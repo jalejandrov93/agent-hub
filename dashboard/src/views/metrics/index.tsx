@@ -20,6 +20,7 @@ import {
   Bar,
   BarChart,
   CartesianGrid,
+  Cell,
   XAxis,
   YAxis,
 } from "recharts"
@@ -32,6 +33,7 @@ import {
   SelectValue,
 } from "@/components/ui/select"
 import type { MetricsRowT } from "@/lib/types"
+import { chartHeightClass, mapMetricsChartRows } from "./chart-data"
 
 const chartConfig: ChartConfig = {
   successRate: {
@@ -65,13 +67,7 @@ export function MetricsView() {
       : !search.taskType || row.taskType === search.taskType
   )
   const sortedRows = [...filteredRows].sort((a, b) => b.samples - a.samples)
-  const chartRows = [...filteredRows]
-    .sort((a, b) => (b.successRate ?? -1) - (a.successRate ?? -1))
-    .map((row) => ({
-      ...row,
-      name: `${row.agent}:${row.model}${row.mode === "write" ? " (write)" : ""}`,
-      successRatePct: row.successRate == null ? 0 : row.successRate * 100,
-    }))
+  const chartRows = mapMetricsChartRows(filteredRows)
   const totalSamples = filteredRows.reduce((sum, row) => sum + row.samples, 0)
   const succeeded = filteredRows.reduce((sum, row) => sum + row.succeeded, 0)
   const overallSuccessRate = totalSamples ? (succeeded / totalSamples) * 100 : null
@@ -240,11 +236,34 @@ export function MetricsView() {
               <CardTitle>Success rate by agent and model</CardTitle>
             </CardHeader>
             <CardContent>
-              <ChartContainer config={chartConfig} className="min-h-[320px] w-full">
-                <BarChart accessibilityLayer data={chartRows} margin={{ left: 8, right: 8 }}>
-                  <CartesianGrid vertical={false} />
-                  <XAxis dataKey="name" tickLine={false} axisLine={false} angle={-25} textAnchor="end" height={70} />
-                  <YAxis domain={[0, 100]} tickFormatter={(value) => `${value}%`} tickLine={false} axisLine={false} />
+              <ChartContainer
+                config={chartConfig}
+                className={`w-full ${chartHeightClass(chartRows.length)}`}
+              >
+                <BarChart
+                  accessibilityLayer
+                  data={chartRows}
+                  layout="vertical"
+                  margin={{ left: 8, right: 8 }}
+                >
+                  <CartesianGrid horizontal={false} />
+                  <XAxis
+                    type="number"
+                    domain={[0, 100]}
+                    tickFormatter={(value) => `${value}%`}
+                    tickLine={false}
+                    axisLine={false}
+                  />
+                  <YAxis
+                    type="category"
+                    dataKey="name"
+                    width={220}
+                    tickFormatter={(value) =>
+                      value.length > 32 ? `${value.slice(0, 29)}...` : value
+                    }
+                    tickLine={false}
+                    axisLine={false}
+                  />
                   <ChartTooltip
                     content={
                       <ChartTooltipContent
@@ -256,13 +275,20 @@ export function MetricsView() {
                               <span className="text-muted-foreground">
                                 {formatNumber(row.samples)} samples · p95 {formatDuration(row.p95Ms == null ? null : row.p95Ms / 1000)}
                               </span>
+                              {row.samples < 10 ? (
+                                <span className="text-muted-foreground">low sample</span>
+                              ) : null}
                             </div>
                           )
                         }}
                       />
                     }
                   />
-                  <Bar dataKey="successRatePct" fill="var(--color-successRate)" radius={4} />
+                  <Bar dataKey="successRatePct" fill="var(--color-successRate)" radius={4}>
+                    {chartRows.map((row) => (
+                      <Cell key={row.name} fillOpacity={row.fillOpacity} />
+                    ))}
+                  </Bar>
                 </BarChart>
               </ChartContainer>
             </CardContent>
