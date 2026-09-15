@@ -1,6 +1,7 @@
 import { readCache, circuitBreakerOpen } from './preflight.mjs'
 import { readDiscovery } from './discovery.mjs'
 import { readOverrides, overrideKey } from './overrides.mjs'
+import { acceptedOrderFor } from './proposals.mjs'
 
 /**
  * The delegation map from the plan, expressed as ordered candidate chains.
@@ -169,18 +170,22 @@ export async function route({ taskType, mode, includeCatalog = false, env = proc
     throw new Error(`unknown task type: "${taskType}". Known types: ${Object.keys(DELEGATION_MAP).join(', ')}`)
   }
 
-  const evaluated = entry.chain.map((c) => ({ candidate: c, ...evaluateCandidate(c, env) }))
+  const applied = acceptedOrderFor(taskType, env, { chain: entry.chain })
+  const chain = applied ? applied.chain : entry.chain
+  const appliedProposal = applied ? { id: applied.proposalId } : null
+
+  const evaluated = chain.map((c) => ({ candidate: c, ...evaluateCandidate(c, env) }))
   const survivors = evaluated.filter((e) => e.usable).map((e) => e.candidate)
   const skipped = evaluated.filter((e) => !e.usable).map((e) => ({ agent: e.candidate.agent, model: e.candidate.model, reason: e.reason }))
-  const discovery = discoveryForChain(entry.chain, env, includeCatalog)
+  const discovery = discoveryForChain(chain, env, includeCatalog)
 
   if (survivors.length === 0) {
     const detail = skipped.map((s) => `${s.agent}:${s.model} (${s.reason})`).join(', ')
-    return { primary: null, fallbacks: [], skipped, discovery, reason: `every candidate for "${taskType}" is unavailable: ${detail} (${entry.why})` }
+    return { primary: null, fallbacks: [], skipped, discovery, reason: `every candidate for "${taskType}" is unavailable: ${detail} (${entry.why})`, appliedProposal }
   }
 
   const [primary, ...fallbacks] = survivors
-  return { primary, fallbacks, skipped, discovery, reason: entry.why }
+  return { primary, fallbacks, skipped, discovery, reason: entry.why, appliedProposal }
 }
 
 export function knownTaskTypes() {
