@@ -52,11 +52,19 @@ export function createStore(initial) {
 
 /** Full snapshot from GET /api/state, capping events at MAX_EVENTS. */
 export function applyServerState(state, apiState, now = Date.now()) {
-  const events = Array.isArray(apiState.events) ? apiState.events.slice(-MAX_EVENTS) : state.events
+  // Events that arrived over SSE while this snapshot was in flight are newer
+  // than anything in it; keep them instead of letting the snapshot erase them.
+  const mergeNewer = (snapshot, current) => {
+    const newest = snapshot.length ? snapshot[snapshot.length - 1].ts : ''
+    const newer = current.filter((e) => e.ts > newest)
+    return [...snapshot, ...newer].slice(-MAX_EVENTS)
+  }
+  const events = Array.isArray(apiState.events) ? mergeNewer(apiState.events, state.events) : state.events
+  const subagents = Array.isArray(apiState.subagents) ? mergeNewer(apiState.subagents, state.subagents) : state.subagents
   return {
     agents: Array.isArray(apiState.agents) ? apiState.agents : state.agents,
     jobs: Array.isArray(apiState.jobs) ? apiState.jobs : state.jobs,
-    subagents: Array.isArray(apiState.subagents) ? apiState.subagents : state.subagents,
+    subagents,
     events,
     lastUpdatedAt: now,
   }
