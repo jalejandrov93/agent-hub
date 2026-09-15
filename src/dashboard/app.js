@@ -186,7 +186,13 @@ function boot() {
     })
   }
 
+  // Each navigation gets a token. A view import that resolves after a newer
+  // navigation started must not mount into the discarded section or replace
+  // the current view (reported independently by two adversarial reviewers).
+  let navToken = 0
+
   async function mountRoute(route) {
+    const token = ++navToken
     ctx.route = route
     const main = document.getElementById('main-content')
     if (!main) return
@@ -208,11 +214,13 @@ function boot() {
     try {
       mod = await import(`./views/${route.name}.js`)
     } catch {
+      if (token !== navToken) return
       section.innerHTML = '<div class="callout callout-warn">view unavailable</div>'
       currentView = null
       return
     }
 
+    if (token !== navToken) return
     currentView = mod
     try {
       mod.mount(section, ctx)
