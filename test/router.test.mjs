@@ -193,6 +193,71 @@ test('route() skips a candidate held via overrides.json, with reason "held", and
   assert.equal(held.reason, 'held')
 })
 
+test('route() applies an accepted proposal, reordering the chain and returning appliedProposal', async () => {
+  const home = tmpHome()
+  process.env.AGENT_HUB_HOME = home
+  const { writeJsonAtomic } = await import('../src/fsutil.mjs?t=' + Date.now())
+  const { paths } = await import('../src/config.mjs?t=' + Date.now())
+  const { chainHash } = await import('../src/proposals.mjs?t=' + Date.now())
+  const { DELEGATION_MAP, route } = await fresh(home)
+
+  const chain = DELEGATION_MAP.recon.chain
+  const cli = chain.filter((c) => c.agent !== 'claude')
+  const hash = chainHash(chain)
+
+  writeJsonAtomic(paths({ AGENT_HUB_HOME: home }).proposalsFile, {
+    version: 1,
+    proposals: [
+      {
+        id: 'prop-recon-1',
+        taskType: 'recon',
+        chainHash: hash,
+        fromOrder: cli.map((c) => ({ agent: c.agent, model: c.model })),
+        toOrder: [{ agent: cli[1].agent, model: cli[1].model }, { agent: cli[0].agent, model: cli[0].model }],
+        evidence: {},
+        reason: 'test',
+        status: 'accepted',
+        createdAt: new Date().toISOString(),
+        decidedAt: new Date().toISOString(),
+      },
+    ],
+  })
+
+  const result = await route({ taskType: 'recon' })
+  assert.deepEqual(result.appliedProposal, { id: 'prop-recon-1' })
+  assert.equal(result.primary.agent, cli[1].agent)
+  assert.equal(result.primary.model, cli[1].model)
+})
+
+test('route() ignores an accepted proposal whose chainHash is stale (DELEGATION_MAP changed underneath it)', async () => {
+  const home = tmpHome()
+  process.env.AGENT_HUB_HOME = home
+  const { writeJsonAtomic } = await import('../src/fsutil.mjs?t=' + Date.now())
+  const { paths } = await import('../src/config.mjs?t=' + Date.now())
+  const { route } = await fresh(home)
+
+  writeJsonAtomic(paths({ AGENT_HUB_HOME: home }).proposalsFile, {
+    version: 1,
+    proposals: [
+      {
+        id: 'prop-stale',
+        taskType: 'recon',
+        chainHash: 'stale-hash-000000',
+        fromOrder: [],
+        toOrder: [],
+        evidence: {},
+        reason: 'test',
+        status: 'accepted',
+        createdAt: new Date().toISOString(),
+        decidedAt: new Date().toISOString(),
+      },
+    ],
+  })
+
+  const result = await route({ taskType: 'recon' })
+  assert.equal(result.appliedProposal, null)
+})
+
 test('clearing a hold override makes the candidate usable again', async () => {
   const home = tmpHome()
   process.env.AGENT_HUB_HOME = home
