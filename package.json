@@ -26,11 +26,15 @@
   "bin": {
     "agent-hub": "./bin/agent-hub"
   },
+  "workspaces": [
+    "dashboard"
+  ],
   "files": [
     "bin/",
     "src/",
     "skills/",
     "systemd/",
+    "dashboard/dist/",
     "LICENSE",
     "README.md",
     "CHANGELOG.md"
@@ -38,13 +42,15 @@
   "scripts": {
     "test": "node --test $(find test -name '*.test.mjs' ! -path 'test/live/*')",
     "test:live": "AGENT_HUB_LIVE=1 node --test test/live/*.test.mjs",
-    "selftest": "node bin/agent-hub selftest"
+    "selftest": "node bin/agent-hub selftest",
+    "build": "npm run -w dashboard build",
+    "prepare": "node scripts/build-dashboard.mjs"
   },
   "engines": {
-    "node": ">=20.6.0"
+    "node": ">=20.19.0"
   },
   "dependencies": {
     "@modelcontextprotocol/sdk": "^1.30.0",
-    "zod": "^3.25.76"
+    "zod": "3.25.76"
   }
 }

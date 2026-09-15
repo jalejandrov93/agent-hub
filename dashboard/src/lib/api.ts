@@ -1,0 +1,152 @@
+/**
+ * Typed fetch layer over the dashboard server's JSON API. Every response is
+ * parsed with a zod schema from @shared, so a shape drift between server and
+ * client fails loudly (as a thrown ApiError) instead of silently rendering
+ * `undefined`. Every write sends `Content-Type: application/json` — the
+ * server's CSRF guard (dashboard.mjs) requires it on every non-GET request.
+ */
+import { z } from "zod"
+import {
+  StateResponse,
+  ConfigResponse,
+  MetricsResponse,
+  Proposal,
+  Learning,
+  LearningInput,
+  AgentStatusRow,
+} from "@shared"
+import type {
+  StateResponseT,
+  ConfigResponseT,
+  MetricsResponseT,
+  ProposalT,
+  LearningT,
+  LearningInputT,
+  AgentRow,
+} from "./types"
+
+export class ApiError extends Error {
+  status: number
+
+  constructor(message: string, status: number) {
+    super(message)
+    this.name = "ApiError"
+    this.status = status
+  }
+}
+
+/** GET/POST/DELETE and parse the JSON body with `schema`. Throws ApiError on any non-2xx status. */
+export async function fetchJson<S extends z.ZodTypeAny>(
+  schema: S,
+  url: string,
+  init?: RequestInit
+): Promise<z.infer<S>> {
+  const response = await fetch(url, init)
+  const text = await response.text()
+  let body: unknown = null
+  if (text) {
+    try {
+      body = JSON.parse(text)
+    } catch {
+      body = null
+    }
+  }
+
+  if (!response.ok) {
+    const message =
+      body && typeof body === "object" && "error" in body && typeof (body as { error: unknown }).error === "string"
+        ? (body as { error: string }).error
+        : `request to ${url} failed with status ${response.status}`
+    throw new ApiError(message, response.status)
+  }
+
+  return schema.parse(body)
+}
+
+function writeInit(method: string, body?: unknown): RequestInit {
+  return {
+    method,
+    headers: { "Content-Type": "application/json" },
+    body: body === undefined ? undefined : JSON.stringify(body),
+  }
+}
+
+export function getState(): Promise<StateResponseT> {
+  return fetchJson(StateResponse, "/api/state")
+}
+
+export function getConfig(): Promise<ConfigResponseT> {
+  return fetchJson(ConfigResponse, "/api/config")
+}
+
+export function getMetrics(): Promise<MetricsResponseT> {
+  return fetchJson(MetricsResponse, "/api/metrics")
+}
+
+const ProposalsPayload = z.object({ proposals: z.array(Proposal) })
+export function getProposals(): Promise<{ proposals: ProposalT[] }> {
+  return fetchJson(ProposalsPayload, "/api/proposals")
+}
+
+export function refreshProposals(): Promise<{ proposals: ProposalT[] }> {
+  return fetchJson(ProposalsPayload, "/api/proposals/refresh", writeInit("POST"))
+}
+
+export function decideProposal(id: string, decision: "accept" | "reject"): Promise<ProposalT> {
+  return fetchJson(Proposal, `/api/proposals/${encodeURIComponent(id)}/${decision}`, writeInit("POST"))
+}
+
+const LearningsPayload = z.object({ learnings: z.array(Learning) })
+export function getLearnings(): Promise<{ learnings: LearningT[] }> {
+  return fetchJson(LearningsPayload, "/api/learnings")
+}
+
+export function decideLearning(id: string, decision: "approve" | "reject"): Promise<LearningT> {
+  return fetchJson(Learning, `/api/learnings/${encodeURIComponent(id)}/${decision}`, writeInit("POST"))
+}
+
+export function deleteLearning(id: string): Promise<{ deleted: true }> {
+  return fetchJson(
+    z.object({ deleted: z.literal(true) }),
+    `/api/learnings/${encodeURIComponent(id)}`,
+    writeInit("DELETE")
+  )
+}
+
+export function createLearning(input: LearningInputT): Promise<LearningT> {
+  const parsed = LearningInput.parse(input)
+  return fetchJson(Learning, "/api/learnings", writeInit("POST", parsed))
+}
+
+const RefreshAgentsPayload = z.object({ results: z.array(AgentStatusRow) })
+export function refreshAgents(params: { agent?: string; model?: string; ping?: boolean }): Promise<{
+  results: AgentRow[]
+}> {
+  return fetchJson(RefreshAgentsPayload, "/api/agents/refresh", writeInit("POST", params))
+}
+
+export function refreshDiscovery(): Promise<Record<string, unknown>> {
+  return fetchJson(z.record(z.string(), z.unknown()), "/api/discovery/refresh", writeInit("POST"))
+}
+
+export function setOverride(params: {
+  agent: string
+  model: string
+  hold?: boolean
+  breakerReset?: boolean
+  reason?: string
+}): Promise<unknown> {
+  return fetchJson(z.unknown(), "/api/overrides", writeInit("POST", params))
+}
+
+export function clearOverride(agent: string, model: string): Promise<unknown> {
+  return fetchJson(
+    z.unknown(),
+    `/api/overrides/${encodeURIComponent(agent)}/${encodeURIComponent(model)}`,
+    writeInit("DELETE")
+  )
+}
+
+export function cancelJob(jobId: string): Promise<unknown> {
+  return fetchJson(z.unknown(), `/api/jobs/${encodeURIComponent(jobId)}/cancel`, writeInit("POST"))
+}
