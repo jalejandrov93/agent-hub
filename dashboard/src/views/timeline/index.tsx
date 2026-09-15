@@ -32,16 +32,16 @@ function TimelineSummary({ summary }: { summary: string }) {
   const isLong = summary.length > 80
 
   if (!isLong) {
-    return <div className="text-xs text-muted-foreground break-words">{summary}</div>
+    return <div className="truncate min-w-0 text-xs text-muted-foreground">{summary}</div>
   }
 
   return (
-    <div className="flex flex-col items-start gap-1">
+    <div className="flex flex-col items-start min-w-0 w-full gap-1">
       <div
         onClick={() => setExpanded(!expanded)}
         className={cn(
-          "text-xs text-muted-foreground cursor-pointer hover:text-foreground transition-colors",
-          expanded ? "whitespace-pre-wrap break-words" : "truncate max-w-full"
+          "min-w-0 text-xs text-muted-foreground cursor-pointer hover:text-foreground transition-colors w-full",
+          expanded ? "whitespace-pre-wrap break-words" : "truncate"
         )}
       >
         {summary}
@@ -49,7 +49,7 @@ function TimelineSummary({ summary }: { summary: string }) {
       <button
         type="button"
         onClick={() => setExpanded(!expanded)}
-        className="text-[11px] font-medium text-primary hover:underline cursor-pointer"
+        className="shrink-0 text-[11px] font-medium text-primary hover:underline cursor-pointer"
         aria-expanded={expanded}
       >
         {expanded ? "Show less" : "Show more"}
@@ -67,50 +67,57 @@ function TimelineRow({ event }: { event: HubEventT }) {
       : event.kind
 
   return (
-    <div className="flex flex-col gap-1.5 p-3.5 hover:bg-muted/40 transition-colors">
-      <div className="flex flex-wrap items-center justify-between gap-2">
-        <div className="flex flex-wrap items-center gap-2">
-          <Tooltip>
-            <TooltipTrigger className="cursor-help font-mono text-xs text-muted-foreground hover:text-foreground">
-              <RelativeTime iso={event.ts} />
-            </TooltipTrigger>
-            <TooltipContent>
-              <span>{event.ts}</span>
-            </TooltipContent>
-          </Tooltip>
-
-          <Badge variant="outline" className="font-mono text-[11px] font-normal">
+    <div data-slot="timeline-row" className="flex flex-col min-w-0 gap-1.5 p-3.5 hover:bg-muted/40 transition-colors">
+      <div className="flex items-center justify-between gap-2 min-w-0">
+        <div className="flex flex-wrap items-center gap-2 min-w-0">
+          <Badge variant="outline" className="font-mono text-[11px] font-normal shrink-0">
             {kindLabel}
           </Badge>
 
-          {event.errorKind ? <StatusBadge kind="errorKind" value={event.errorKind} /> : null}
+          {event.errorKind ? <StatusBadge kind="errorKind" value={event.errorKind} className="shrink-0" /> : null}
 
           {agentModelText ? (
             <span
-              className="text-xs text-muted-foreground"
+              className="truncate text-xs text-muted-foreground"
               title={event.model ?? undefined}
             >
               {agentModelText}
             </span>
           ) : null}
+
+          {event.jobId ? (
+            <Link
+              to="/history"
+              search={{ q: event.jobId, status: "all", agent: "" }}
+              className="font-mono text-xs text-muted-foreground hover:text-foreground hover:underline shrink-0"
+            >
+              {event.jobId}
+            </Link>
+          ) : null}
         </div>
 
-        {event.jobId ? (
-          <Link
-            to="/history"
-            search={{ q: event.jobId, status: "all", agent: "" }}
-            className="font-mono text-xs text-muted-foreground hover:text-foreground hover:underline shrink-0"
-          >
-            {event.jobId}
-          </Link>
-        ) : null}
+        <div className="flex shrink-0 items-center gap-1.5 font-mono text-xs text-muted-foreground ml-auto">
+          <Tooltip>
+            <TooltipTrigger className="cursor-help flex items-center gap-1 hover:text-foreground">
+              <RelativeTime iso={event.ts} />
+              <span className="hidden md:inline text-[11px] text-muted-foreground/70">
+                ({event.ts})
+              </span>
+            </TooltipTrigger>
+            <TooltipContent>
+              <span>{event.ts}</span>
+            </TooltipContent>
+          </Tooltip>
+        </div>
       </div>
 
-      {event.title ? (
-        <div className="text-sm font-medium text-foreground">{event.title}</div>
-      ) : null}
+      <div data-slot="timeline-content" className="flex flex-col min-w-0 gap-1">
+        {event.title ? (
+          <div className="truncate min-w-0 text-sm font-medium text-foreground">{event.title}</div>
+        ) : null}
 
-      {event.summary ? <TimelineSummary summary={event.summary} /> : null}
+        {event.summary ? <TimelineSummary summary={event.summary} /> : null}
+      </div>
     </div>
   )
 }
@@ -155,13 +162,13 @@ export function TimelineView() {
 
   return (
     <TooltipProvider delay={200}>
-      <div className="flex flex-1 flex-col min-h-0 gap-3">
+      <div className="flex flex-1 flex-col min-h-0 min-w-0 gap-3">
         <PageHeader
           title="Timeline"
           description="Every hub and claude-hook event, newest first."
         />
 
-        <div className="sticky top-0 z-10 flex flex-wrap items-center justify-between gap-3 bg-background/95 pb-2 backdrop-blur">
+        <div className="sticky top-0 z-10 flex flex-wrap items-center justify-between gap-2 bg-background/95 pb-2 backdrop-blur">
           <div className="flex flex-wrap items-center gap-2">
             <ToggleGroup
               value={[source || "all"]}
@@ -214,17 +221,18 @@ export function TimelineView() {
                   replace: true,
                 })
               }}
+              className="w-full sm:w-64"
             />
           </Field>
         </div>
 
-        <ScrollArea className="flex-1 min-h-0 w-full rounded-lg border bg-card text-card-foreground">
+        <ScrollArea className="flex-1 min-h-0 min-w-0 w-full rounded-lg border bg-card text-card-foreground">
           {filteredEvents.length === 0 ? (
             <div className="p-8">
               <EmptyState icon={Activity} title={emptyTitle} description={emptyDescription} />
             </div>
           ) : (
-            <div className="flex flex-col divide-y divide-border">
+            <div data-slot="timeline-list" className="flex flex-col divide-y divide-border min-w-0">
               {filteredEvents.map((event) => (
                 <TimelineRow
                   key={`${event.ts}:${event.kind}:${event.jobId ?? ""}`}
