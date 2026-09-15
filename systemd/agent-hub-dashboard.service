@@ -14,9 +14,16 @@ ExecStart=%h/.local/share/fnm/aliases/default/bin/node %h/.claude/mcp-servers/ag
 Restart=on-failure
 RestartSec=5
 Environment=AGENT_HUB_HOME=%h/.local/share/agent-hub
+# systemd --user gives services a minimal PATH (no ~/.local/bin, no
+# ~/.opencode/bin), so the dashboard could not find agy/opencode/copilot and
+# a Revalidate click would mark them unavailable in the cache the MCP server
+# shares. This optional file supplies PATH=... with absolute directories
+# (systemd does not expand %h or $HOME inside it). See README.
+EnvironmentFile=-%h/.config/agent-hub/env
 # NOTE: this file is NOT installed by agent-hub itself. To enable it:
 #   mkdir -p ~/.config/systemd/user
 #   cp ~/.claude/mcp-servers/agent-hub/systemd/agent-hub-dashboard.service ~/.config/systemd/user/
+#   mkdir -p ~/.config/agent-hub && printf 'PATH=%s\n' "$HOME/.local/bin:/usr/local/bin:/usr/bin:/bin" > ~/.config/agent-hub/env
 #   systemctl --user daemon-reload
 #   systemctl --user enable --now agent-hub-dashboard
 
