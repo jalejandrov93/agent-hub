@@ -127,21 +127,43 @@ function isUsable(candidate, env) {
 }
 
 /**
- * route({taskType}) -> {primary, fallbacks, reason}. Filters out candidates
- * whose cached preflight is 'unavailable' or whose circuit breaker is open,
- * then returns the first survivor as primary and the rest as fallbacks.
+ * A discovery row without its model catalog. Full catalogs run to several KB
+ * per agent, and route() is called before every delegation, so the default
+ * keeps the orchestrator's context small.
  */
-/** discovery.json rows for every distinct CLI agent referenced in one chain (additive context, never used to hard-filter). */
-function discoveryForChain(chain, env) {
+function summarizeDiscoveryRow(row) {
+  if (!row) return null
+  return {
+    binPath: row.binPath ?? null,
+    version: row.version ?? null,
+    modelCount: Array.isArray(row.models) ? row.models.length : 0,
+    checkedAt: row.checkedAt ?? null,
+    error: row.error ?? null,
+  }
+}
+
+/**
+ * discovery.json rows for every distinct CLI agent referenced in one chain
+ * (additive context, never used to hard-filter). Summarized unless
+ * includeCatalog is true.
+ */
+function discoveryForChain(chain, env, includeCatalog) {
   const discovery = readDiscovery(env)
   const out = {}
   for (const candidate of chain) {
-    if (candidate.agent !== 'claude' && !(candidate.agent in out)) out[candidate.agent] = discovery[candidate.agent] ?? null
+    if (candidate.agent === 'claude' || candidate.agent in out) continue
+    const row = discovery[candidate.agent] ?? null
+    out[candidate.agent] = includeCatalog ? row : summarizeDiscoveryRow(row)
   }
   return out
 }
 
-export async function route({ taskType, mode, env = process.env }) {
+/**
+ * route({taskType}) -> {primary, fallbacks, reason}. Filters out candidates
+ * whose cached preflight is 'unavailable' or whose circuit breaker is open,
+ * then returns the first survivor as primary and the rest as fallbacks.
+ */
+export async function route({ taskType, mode, includeCatalog = false, env = process.env }) {
   const entry = DELEGATION_MAP[taskType]
   if (!entry) {
     throw new Error(`unknown task type: "${taskType}". Known types: ${Object.keys(DELEGATION_MAP).join(', ')}`)
@@ -150,7 +172,7 @@ export async function route({ taskType, mode, env = process.env }) {
   const evaluated = entry.chain.map((c) => ({ candidate: c, ...evaluateCandidate(c, env) }))
   const survivors = evaluated.filter((e) => e.usable).map((e) => e.candidate)
   const skipped = evaluated.filter((e) => !e.usable).map((e) => ({ agent: e.candidate.agent, model: e.candidate.model, reason: e.reason }))
-  const discovery = discoveryForChain(entry.chain, env)
+  const discovery = discoveryForChain(entry.chain, env, includeCatalog)
 
   if (survivors.length === 0) {
     const detail = skipped.map((s) => `${s.agent}:${s.model} (${s.reason})`).join(', ')

@@ -231,7 +231,7 @@ from racing on the same worktree.
 | Tool | Input | Notes |
 |---|---|---|
 | `agents_status` | `{refresh?: boolean}` | L0-L2 for every pair in the delegation map. Never pings. Rows include `binPath`/`cliVersion` from `discovery.json`. |
-| `route` | `{taskType: enum, mode?: 'read'\|'write'}` | Skips unavailable/breaker-open/held pairs; returns `{primary, fallbacks, skipped, discovery, reason}`. |
+| `route` | `{taskType: enum, mode?: 'read'\|'write', includeCatalog?: boolean}` | Skips unavailable/breaker-open/held pairs; returns `{primary, fallbacks, skipped, discovery, reason}`. `discovery` holds `{binPath, version, modelCount, checkedAt, error}` per CLI; `includeCatalog: true` returns the full model catalog instead. |
 | `delegate` | `{agent, model, task, cwd, mode?, timeoutS?, title?, variant?}` | Returns `{jobId, status:'queued'}` immediately. `variant` is opencode's reasoning effort (minimal/low/medium/high/max); ignored by agy/copilot. |
 | `job_wait` | `{jobId, timeoutS?<=60}` | Polls until terminal or timeout. |
 | `job_status` | `{jobId}` | Current status, no waiting. |

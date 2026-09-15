@@ -60,10 +60,14 @@ export function buildServer() {
       inputSchema: {
         taskType: z.enum(knownTaskTypes()),
         mode: modeEnum.optional(),
+        includeCatalog: z
+          .boolean()
+          .optional()
+          .describe('Return the full discovered model catalog per CLI instead of a {binPath, version, modelCount, checkedAt, error} summary.'),
       },
       annotations: { readOnlyHint: true },
     },
-    guard(({ taskType, mode }) => routeTool({ taskType, mode }))
+    guard(({ taskType, mode, includeCatalog }) => routeTool({ taskType, mode, includeCatalog: !!includeCatalog }))
   )
 
   server.registerTool(

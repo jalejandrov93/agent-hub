@@ -108,6 +108,30 @@ test('route() result includes an additive discovery field keyed by agent, source
   assert.equal(result.discovery.agy.binPath, '/home/u/.local/bin/agy')
 })
 
+test('route() discovery is a compact summary by default and the full catalog only with includeCatalog', async () => {
+  const home = tmpHome()
+  process.env.AGENT_HUB_HOME = home
+  const { writeJsonAtomic } = await import('../src/fsutil.mjs?t=' + Date.now())
+  const { paths } = await import('../src/config.mjs?t=' + Date.now())
+  const checkedAt = new Date().toISOString()
+  const models = [
+    { id: 'gemini-3.8-flash-low', label: 'Gemini 3.8 Flash (Low)' },
+    { id: 'gemini-3.8-flash-high', label: 'Gemini 3.8 Flash (High)' },
+  ]
+  writeJsonAtomic(paths({ AGENT_HUB_HOME: home }).discoveryFile, {
+    agy: { agent: 'agy', cmd: 'agy', binPath: '/home/u/.local/bin/agy', version: '1.2.1', models, checkedAt, error: null },
+  })
+
+  const { route } = await fresh(home)
+
+  const compact = await route({ taskType: 'recon' })
+  assert.deepEqual(compact.discovery.agy, { binPath: '/home/u/.local/bin/agy', version: '1.2.1', modelCount: 2, checkedAt, error: null })
+  assert.equal(compact.discovery.opencode, null)
+
+  const full = await route({ taskType: 'recon', includeCatalog: true })
+  assert.deepEqual(full.discovery.agy.models, models)
+})
+
 test('route() skips a candidate whose discovery row reports the CLI missing from PATH, with reason "cli_not_found"', async () => {
   const home = tmpHome()
   process.env.AGENT_HUB_HOME = home

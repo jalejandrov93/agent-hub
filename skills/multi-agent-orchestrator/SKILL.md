@@ -41,9 +41,11 @@ agents_status → route → delegate → job_wait / job_status → job_result �
    already warm. `AGENT_HUB_DISABLE_STARTUP_DISCOVERY=1` opts out (used by the server's own test
    suite). Call `agents_status` once per session or when routing looks stale; `refresh:true`
    bypasses the 15-min cache.
-2. `route({taskType, mode?})` — `taskType` is one of the keys in the Delegation map below;
+2. `route({taskType, mode?, includeCatalog?})` — `taskType` is one of the keys in the Delegation map below;
    `mode` is `'read'|'write'`. Returns `{primary:{agent,model,mode}, fallbacks[], skipped[],
-   discovery, reason}` — route stays advisory, it never blocks you, only orders/filters
+   discovery, reason}`, where `discovery` is a per-CLI `{binPath, version, modelCount, checkedAt,
+   error}` summary. Pass `includeCatalog:true` only when you need the model ids a CLI actually
+   offers (the full catalog costs several KB of context) — route stays advisory, it never blocks you, only orders/filters
    candidates. `skipped` lists every filtered-out chain candidate as `{agent, model, reason}`:
    `held` (a human put this pair on hold from the dashboard — don't silently route around it,
    tell the user), `cli_not_found` (the CLI isn't installed or isn't on PATH — this needs a

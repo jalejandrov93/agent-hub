@@ -6,6 +6,13 @@ and this project adheres to [Semantic Versioning](https://semver.org/).
 
 ## [Unreleased]
 
+### Changed
+
+- `route` returns a compact per-CLI discovery summary (`binPath`, `version`,
+  `modelCount`, `checkedAt`, `error`) instead of the full model catalog, which
+  added several KB to every routing call. Pass `includeCatalog: true` to get
+  the catalog.
+
 ## [1.2.0] - 2026-09-14
 
 ### Added

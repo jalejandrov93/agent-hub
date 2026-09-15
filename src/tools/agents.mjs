@@ -51,8 +51,8 @@ export async function agentsStatusTool({ refresh = false, cwd = process.cwd(), e
   }))
 }
 
-export async function routeTool({ taskType, mode, env = process.env }) {
-  const result = await routeFn({ taskType, mode, env })
+export async function routeTool({ taskType, mode, includeCatalog = false, env = process.env }) {
+  const result = await routeFn({ taskType, mode, includeCatalog, env })
   return result
 }
 
