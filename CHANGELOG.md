@@ -6,6 +6,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/).
 
 ## [Unreleased]
 
+## [2.0.0] - 2026-09-15
+
 ### Added
 
 - Dashboard rewritten as a React 19 + TypeScript + Vite + Tailwind v4 app
@@ -65,11 +67,18 @@ and this project adheres to [Semantic Versioning](https://semver.org/).
   each other's writes now that the store takes a lock file.
 - Jobs record the task type, turn depth, effective timeout and injected
   learnings, so history and metrics reflect what actually ran.
+- A job finished late by the MCP process can no longer overwrite a
+  cancellation written by the dashboard.
 - The dashboard uses a colored chart palette and no longer requests a missing
   favicon on every load.
 
 ### Security
 
+- Job ids are validated as a single safe path segment before any filesystem
+  access, so `GET /api/jobs/:id/result` and the MCP job tools can no longer
+  read files outside `runs/` with an encoded `..` id.
+- Cross-process locks carry an ownership token, so a paused holder can no
+  longer release a lock that another process reclaimed.
 - Dashboard CSP still enforces `style-src 'self'`: Base UI runs with
   `CSPProvider disableStyleElements` and chart colors come from CSS variables,
   so the app injects no inline styles.
@@ -203,7 +212,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/).
 - Local dashboard on `127.0.0.1:7777` with SSE timeline and job cancel.
 - `SubagentStart`/`SubagentStop` hook recorder for Claude Code subagents.
 
-[Unreleased]: https://github.com/jalejandrov93/agent-hub/compare/v1.2.0...HEAD
+[Unreleased]: https://github.com/jalejandrov93/agent-hub/compare/v2.0.0...HEAD
+[2.0.0]: https://github.com/jalejandrov93/agent-hub/compare/v1.2.0...v2.0.0
 [1.2.0]: https://github.com/jalejandrov93/agent-hub/compare/v1.1.0...v1.2.0
 [1.1.0]: https://github.com/jalejandrov93/agent-hub/compare/v1.0.0...v1.1.0
 [1.0.0]: https://github.com/jalejandrov93/agent-hub/releases/tag/v1.0.0

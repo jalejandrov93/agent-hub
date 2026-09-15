@@ -23,7 +23,7 @@ import {
   Learning,
 } from './schemas.mjs'
 
-const VERSION = '1.2.0'
+const VERSION = '2.0.0'
 const TESTED_VERSIONS = { agy: '1.2.1', opencode: '1.18.30', copilot: '1.0.31' }
 
 const log = (...args) => console.error('[agent-hub]', ...args)
