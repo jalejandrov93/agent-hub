@@ -272,6 +272,84 @@
     border-color: var(--unavailable);
   }
 
+  /* Compact action buttons: panel-header actions (Revalidate all, Rediscover
+     CLIs) and per-row agent actions (Revalidate, Ping, Hold/Release, Reset breaker). */
+  .panel-actions {
+    display: flex;
+    align-items: center;
+    gap: 6px;
+    flex-wrap: wrap;
+  }
+
+  .btn-sm {
+    background: transparent;
+    color: var(--text-muted);
+    border: 1px solid var(--panel-border);
+    padding: 3px 8px;
+    font-size: 11px;
+    font-weight: 600;
+    border-radius: var(--radius-sm);
+    cursor: pointer;
+    white-space: nowrap;
+  }
+  .btn-sm:hover:not(:disabled) {
+    background: var(--panel-hover);
+    color: var(--text);
+    border-color: var(--text-dim);
+  }
+  .btn-sm:disabled {
+    opacity: 0.5;
+    cursor: not-allowed;
+  }
+  .btn-sm.btn-warn {
+    color: var(--degraded);
+    border-color: var(--degraded-border);
+  }
+  .btn-sm.btn-warn:hover:not(:disabled) {
+    background: var(--degraded-bg);
+  }
+
+  .row-actions {
+    display: flex;
+    flex-direction: column;
+    align-items: flex-end;
+    gap: 4px;
+  }
+
+  .config-summary {
+    display: grid;
+    grid-template-columns: repeat(auto-fit, minmax(180px, 1fr));
+    gap: 10px;
+    margin-bottom: 14px;
+  }
+  .config-item {
+    background: var(--panel-border-subtle);
+    border-radius: var(--radius-sm);
+    padding: 8px 10px;
+  }
+  .config-item-label {
+    font-size: 10px;
+    font-weight: 600;
+    text-transform: uppercase;
+    letter-spacing: 0.05em;
+    color: var(--text-muted);
+    display: block;
+    margin-bottom: 2px;
+  }
+  .config-item-val {
+    font-size: 12px;
+    font-family: var(--font-mono);
+    word-break: break-all;
+  }
+  .config-section-title {
+    font-size: 11px;
+    font-weight: 700;
+    text-transform: uppercase;
+    letter-spacing: 0.05em;
+    color: var(--text-muted);
+    margin: 14px 0 6px;
+  }
+
   /* KPI Summary Row */
   .kpi-row {
     display: grid;
@@ -764,6 +842,10 @@
             <h2 class="panel-title" id="heading-agents">Agents</h2>
             <span class="panel-count" id="count-agents">0</span>
           </div>
+          <div class="panel-actions">
+            <button type="button" id="btn-revalidate-all" class="btn-sm" title="Re-run L0-L2 preflight for every default pair">Revalidate all</button>
+            <button type="button" id="btn-rediscover" class="btn-sm" title="Re-probe binPath/version/models for agy, opencode and copilot">Rediscover CLIs</button>
+          </div>
         </div>
         <div class="panel-body">
           <div class="table-container" id="agents"></div>
@@ -839,6 +921,22 @@
           </div>
         </div>
       </section>
+
+      <!-- Config Panel: read-only display of the delegation map, timeouts, breaker
+           settings, TTL, state dir, write allowlist and current overrides. Edits
+           happen only through the Agents panel's Hold/Release and Reset breaker buttons. -->
+      <section class="panel" id="config-panel" aria-labelledby="heading-config">
+        <div class="panel-header">
+          <div class="panel-title-group">
+            <h2 class="panel-title" id="heading-config">Config</h2>
+          </div>
+        </div>
+        <div class="panel-body">
+          <div id="config-summary" class="config-summary"></div>
+          <div class="table-container" id="config-delegation-map"></div>
+          <div class="table-container" id="config-overrides"></div>
+        </div>
+      </section>
     </main>
   </div>
 
@@ -850,6 +948,7 @@
     jobs: [],
     subagents: [],
     events: [],
+    config: null, // last GET /api/config payload: delegationMap, discovery, breakerState, overrides, ...
     connection: 'connecting', // 'connecting' | 'live' | 'reconnecting' | 'offline'
     timelineSource: 'all',
     timelineQuery: ''
@@ -949,6 +1048,46 @@
     document.getElementById('count-events').textContent = String(state.events.length);
   }
 
+  // POST/DELETE JSON helper shared by every dashboard write action.
+  function apiRequest(method, url, body) {
+    var opts = { method: method };
+    if (body !== undefined) {
+      opts.headers = { 'Content-Type': 'application/json' };
+      opts.body = JSON.stringify(body);
+    }
+    return fetch(url, opts).then(function (r) {
+      if (!r.ok) throw new Error('Failed with status ' + r.status);
+      return r.json();
+    });
+  }
+
+  // Human-readable age since an ISO timestamp (checkedAt, etc.), e.g. "3m ago".
+  function formatAge(iso) {
+    if (!iso) return '—';
+    var ms = Date.now() - new Date(iso).getTime();
+    if (isNaN(ms) || ms < 0) return '—';
+    var s = Math.floor(ms / 1000);
+    if (s < 60) return s + 's ago';
+    var m = Math.floor(s / 60);
+    if (m < 60) return m + 'm ago';
+    var h = Math.floor(m / 60);
+    if (h < 24) return h + 'h ago';
+    return Math.floor(h / 24) + 'd ago';
+  }
+
+  function breakerFor(agent, model) {
+    var list = (state.config && state.config.breakerState) || [];
+    for (var i = 0; i < list.length; i++) {
+      if (list[i].agent === agent && list[i].model === model) return list[i];
+    }
+    return null;
+  }
+
+  function overrideFor(agent, model) {
+    var overrides = (state.config && state.config.overrides) || {};
+    return overrides[agent + ':' + model] || null;
+  }
+
   // Render Agents
   function renderAgents() {
     var el = document.getElementById('agents');
@@ -968,19 +1107,83 @@
       // including a single 'billing' failure opening it immediately), or
       // "catalog only; account availability unverified" (copilot non-auto).
       var reasonRow = a.reason ? '<div class="subtext truncate" title="' + esc(a.reason) + '">' + esc(a.reason) + '</div>' : '';
+
+      var cliCell = a.cliVersion
+        ? '<span class="subtext mono" title="' + esc(a.binPath || '') + '">' + esc(a.cliVersion) + '</span>'
+        : '<span class="subtext">&mdash;</span>';
+
+      var breaker = breakerFor(a.agent, a.model);
+      var breakerCell = breaker && breaker.open
+        ? '<span class="badge unavailable" title="' + breaker.failureCount + ' failure(s), last at ' + esc(breaker.lastFailureAt || '') + '">breaker open</span>'
+        : '<span class="subtext">closed</span>';
+
+      var override = overrideFor(a.agent, a.model);
+      var held = !!(override && override.hold);
+      var showPing = a.status === 'degraded' || a.status === 'unavailable';
+      var showResetBreaker = !!(breaker && breaker.open);
+
+      var actions =
+        '<button type="button" class="btn-sm" data-action="revalidate" data-agent="' + esc(a.agent) + '" data-model="' + esc(a.model) + '">Revalidate</button>' +
+        (showPing ? '<button type="button" class="btn-sm" data-action="ping" data-agent="' + esc(a.agent) + '" data-model="' + esc(a.model) + '" title="L3: send a real PONG prompt">Ping (L3)</button>' : '') +
+        '<button type="button" class="btn-sm' + (held ? ' btn-warn' : '') + '" data-action="' + (held ? 'release' : 'hold') + '" data-agent="' + esc(a.agent) + '" data-model="' + esc(a.model) + '">' + (held ? 'Release' : 'Hold') + '</button>' +
+        (showResetBreaker ? '<button type="button" class="btn-sm btn-warn" data-action="reset-breaker" data-agent="' + esc(a.agent) + '" data-model="' + esc(a.model) + '">Reset breaker</button>' : '');
+
       return '<tr>' +
         '<td><strong>' + esc(a.agent) + '</strong></td>' +
-        '<td><span class="tag-model" title="' + esc(a.model) + '">' + esc(displayModel) + '</span></td>' +
+        '<td><span class="tag-model" title="' + esc(a.model) + '">' + esc(displayModel) + '</span>' + (held ? ' <span class="badge degraded" title="manual hold">held</span>' : '') + '</td>' +
         '<td>' + badge(a.status) + reasonRow + '</td>' +
         '<td><span class="subtext">' + esc(a.quotaSignal || '—') + '</span></td>' +
         '<td><span class="subtext">' + esc(a.dataPolicy || '—') + '</span></td>' +
+        '<td>' + cliCell + '</td>' +
+        '<td><span class="subtext">' + esc(formatAge(a.checkedAt)) + '</span></td>' +
+        '<td>' + breakerCell + '</td>' +
+        '<td><div class="row-actions">' + actions + '</div></td>' +
       '</tr>';
     }).join('');
 
     el.innerHTML = '<table>' +
-      '<thead><tr><th>Agent</th><th>Model</th><th>Status</th><th>Quota</th><th>Data Policy</th></tr></thead>' +
+      '<thead><tr><th>Agent</th><th>Model</th><th>Status</th><th>Quota</th><th>Data Policy</th><th>CLI</th><th>Checked</th><th>Breaker</th><th>Actions</th></tr></thead>' +
       '<tbody>' + rows + '</tbody>' +
       '</table>';
+
+    // One delegated click handler for every per-row action button: disable +
+    // aria-busy while the request is in flight, then reload state.
+    el.querySelectorAll('button[data-action]').forEach(function (btn) {
+      btn.addEventListener('click', function () {
+        var action = btn.dataset.action;
+        var agent = btn.dataset.agent;
+        var model = btn.dataset.model;
+        var originalLabel = btn.textContent;
+        btn.disabled = true;
+        btn.setAttribute('aria-busy', 'true');
+        btn.textContent = originalLabel + '…';
+
+        var req;
+        if (action === 'revalidate') {
+          req = apiRequest('POST', '/api/agents/refresh', { agent: agent, model: model });
+        } else if (action === 'ping') {
+          req = apiRequest('POST', '/api/agents/refresh', { agent: agent, model: model, ping: true });
+        } else if (action === 'hold') {
+          req = apiRequest('POST', '/api/overrides', { agent: agent, model: model, hold: true });
+        } else if (action === 'release') {
+          req = apiRequest('DELETE', '/api/overrides/' + encodeURIComponent(agent) + '/' + encodeURIComponent(model));
+        } else if (action === 'reset-breaker') {
+          req = apiRequest('POST', '/api/overrides', { agent: agent, model: model, breakerReset: true });
+        }
+
+        req
+          .then(function () { refresh(false); })
+          .catch(function () {
+            btn.textContent = 'Failed';
+            setTimeout(function () { btn.textContent = originalLabel; btn.disabled = false; btn.removeAttribute('aria-busy'); }, 3000);
+          })
+          .then(function () {
+            // On success renderAgents() rebuilds this button from fresh
+            // state; on failure the timeout above restores it — nothing
+            // else to do here either way.
+          });
+      });
+    });
   }
 
   // Calculate live elapsed seconds
@@ -1196,7 +1399,11 @@
       // job.failed/job.canceled events carry errorKind (e.g. 'billing',
       // 'timeout') — surface it next to the event kind, not just buried in
       // the free-text summary.
-      var kindCell = '<span class="tag-model">' + esc(e.kind || 'event') + '</span>' + (e.errorKind ? ' ' + errorBadge(e.errorKind) : '');
+      // preflight events (discovery at startup, an agent-level refresh, or
+      // an L3 ping) carry a `phase` — show it next to the kind so "preflight"
+      // rows are distinguishable at a glance instead of all looking alike.
+      var kindLabel = e.kind === 'preflight' && e.phase ? e.kind + ':' + e.phase : (e.kind || 'event');
+      var kindCell = '<span class="tag-model">' + esc(kindLabel) + '</span>' + (e.errorKind ? ' ' + errorBadge(e.errorKind) : '');
       return '<tr>' +
         '<td><span class="mono">' + esc(ts) + '</span></td>' +
         '<td>' + kindCell + '</td>' +
@@ -1229,6 +1436,63 @@
     }
   }
 
+  // Render the Config panel: read-only delegation map, timeouts/breaker/TTL
+  // summary, and the current overrides list. Edits only happen through the
+  // Agents panel's Hold/Release/Reset breaker buttons, never here.
+  function renderConfig() {
+    var cfg = state.config;
+    var summaryEl = document.getElementById('config-summary');
+    var mapEl = document.getElementById('config-delegation-map');
+    var overridesEl = document.getElementById('config-overrides');
+    if (!cfg) {
+      summaryEl.innerHTML = '';
+      mapEl.innerHTML = '';
+      overridesEl.innerHTML = '';
+      return;
+    }
+
+    function item(label, val) {
+      return '<div class="config-item"><span class="config-item-label">' + esc(label) + '</span><span class="config-item-val">' + esc(val) + '</span></div>';
+    }
+
+    summaryEl.innerHTML =
+      item('State dir', cfg.agentHubHome) +
+      item('Preflight TTL', Math.round(cfg.ttlMs / 60000) + 'm') +
+      item('Breaker window', Math.round(cfg.breaker.windowMs / 60000) + 'm') +
+      item('Breaker threshold', cfg.breaker.failureThreshold + ' failure(s)') +
+      item('Breaker failure kinds', cfg.breaker.failureKinds.join(', ')) +
+      item('Breaker immediate kinds', cfg.breaker.immediateKinds.join(', ')) +
+      item('Write allowlist', cfg.writeAllowlist.length ? cfg.writeAllowlist.join(', ') : '(empty — write mode requires a secondary git worktree)');
+
+    var mapRows = Object.keys(cfg.delegationMap).map(function (taskType) {
+      var entry = cfg.delegationMap[taskType];
+      var chain = entry.chain.map(function (c) {
+        var label = esc(c.agent) + (c.model ? ':' + esc(formatModel(c.model)) : '');
+        return c.parallelWith ? label + ' + ' + esc(c.parallelWith.agent) + ':' + esc(formatModel(c.parallelWith.model)) : label;
+      }).join(' &rarr; ');
+      return '<tr><td><strong>' + esc(taskType) + '</strong></td><td>' + chain + '</td><td class="subtext">' + esc(entry.why) + '</td></tr>';
+    }).join('');
+    mapEl.innerHTML = '<div class="config-section-title">Delegation map</div><table>' +
+      '<thead><tr><th>Task type</th><th>Chain</th><th>Why</th></tr></thead><tbody>' + mapRows + '</tbody></table>';
+
+    var overrideKeys = Object.keys(cfg.overrides);
+    if (!overrideKeys.length) {
+      overridesEl.innerHTML = '<div class="config-section-title">Overrides</div><div class="empty-hint">No manual holds or breaker resets set</div>';
+    } else {
+      var overrideRows = overrideKeys.map(function (key) {
+        var o = cfg.overrides[key];
+        return '<tr>' +
+          '<td class="mono">' + esc(key) + '</td>' +
+          '<td>' + (o.hold ? '<span class="badge degraded">held</span>' : '<span class="subtext">&mdash;</span>') + '</td>' +
+          '<td class="subtext">' + esc(o.breakerReset || '—') + '</td>' +
+          '<td class="subtext">' + esc(o.setAt || '—') + '</td>' +
+        '</tr>';
+      }).join('');
+      overridesEl.innerHTML = '<div class="config-section-title">Overrides</div><table>' +
+        '<thead><tr><th>Pair</th><th>Hold</th><th>Breaker reset</th><th>Set at</th></tr></thead><tbody>' + overrideRows + '</tbody></table>';
+    }
+  }
+
   // Master Render
   function renderAll() {
     renderMetrics();
@@ -1238,23 +1502,32 @@
     renderSubagents();
     renderFilters();
     renderTimeline();
+    renderConfig();
   }
 
-  // Pull state from /api/state
+  // Pull state from /api/state and /api/config
   function refresh(isManual) {
     var icon = document.getElementById('refresh-icon');
     if (isManual && icon) icon.classList.add('spinning');
 
-    fetch('/api/state')
-      .then(function (res) {
+    Promise.all([
+      fetch('/api/state').then(function (res) {
+        if (!res.ok) throw new Error('HTTP ' + res.status);
+        return res.json();
+      }),
+      fetch('/api/config').then(function (res) {
         if (!res.ok) throw new Error('HTTP ' + res.status);
         return res.json();
       })
-      .then(function (data) {
+    ])
+      .then(function (results) {
+        var data = results[0];
+        var config = results[1];
         state.agents = Array.isArray(data.agents) ? data.agents : [];
         state.jobs = Array.isArray(data.jobs) ? data.jobs : [];
         state.subagents = Array.isArray(data.subagents) ? data.subagents : [];
         state.events = Array.isArray(data.events) ? data.events : [];
+        state.config = config;
         renderAll();
       })
       .catch(function (err) {
@@ -1301,10 +1574,33 @@
   }
 
   // Event Listeners setup
+  // Shared handler for the two Agents-panel header buttons: disable + aria-busy
+  // while the request is in flight, then reload state either way.
+  function setupHeaderAction(buttonId, method, url, body) {
+    var btn = document.getElementById(buttonId);
+    var originalLabel = btn.textContent;
+    btn.addEventListener('click', function () {
+      btn.disabled = true;
+      btn.setAttribute('aria-busy', 'true');
+      btn.textContent = originalLabel + '…';
+      apiRequest(method, url, body)
+        .then(function () { refresh(false); })
+        .catch(function () { /* transient failure — the next SSE/poll refresh will catch up */ })
+        .then(function () {
+          btn.disabled = false;
+          btn.removeAttribute('aria-busy');
+          btn.textContent = originalLabel;
+        });
+    });
+  }
+
   function setupEvents() {
     // Refresh button
     var refreshBtn = document.getElementById('btn-refresh');
     refreshBtn.addEventListener('click', function () { refresh(true); });
+
+    setupHeaderAction('btn-revalidate-all', 'POST', '/api/agents/refresh', {});
+    setupHeaderAction('btn-rediscover', 'POST', '/api/discovery/refresh');
 
     // Keyboard shortcut 'r' for refresh
     window.addEventListener('keydown', function (e) {
