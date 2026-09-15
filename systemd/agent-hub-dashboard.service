@@ -1,0 +1,24 @@
+[Unit]
+Description=agent-hub dashboard (local delegation dashboard, 127.0.0.1 only)
+After=network.target
+
+[Service]
+Type=simple
+# Absolute node path required: node here comes from an ephemeral fnm
+# multishell dir (~/.local/state/fnm_multishells/<pid>-<ts>/bin) that only
+# exists inside a shell that has run `fnm use`/`eval "$(fnm env)"` — it is
+# NOT on systemd's PATH, and a bare `node` or `#!/usr/bin/env node` shebang
+# fails under systemd --user. %h/.local/share/fnm/aliases/default/bin/node
+# is the stable, version-pinned symlink fnm maintains for exactly this case.
+ExecStart=%h/.local/share/fnm/aliases/default/bin/node %h/.claude/mcp-servers/agent-hub/bin/agent-hub dashboard --port 7777
+Restart=on-failure
+RestartSec=5
+Environment=AGENT_HUB_HOME=%h/.local/share/agent-hub
+# NOTE: this file is NOT installed by agent-hub itself. To enable it:
+#   mkdir -p ~/.config/systemd/user
+#   cp ~/.claude/mcp-servers/agent-hub/systemd/agent-hub-dashboard.service ~/.config/systemd/user/
+#   systemctl --user daemon-reload
+#   systemctl --user enable --now agent-hub-dashboard
+
+[Install]
+WantedBy=default.target

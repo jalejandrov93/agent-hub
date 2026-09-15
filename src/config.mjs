@@ -1,0 +1,142 @@
+import os from 'node:os'
+import path from 'node:path'
+
+/**
+ * All runtime state lives under AGENT_HUB_HOME (default ~/.local/share/agent-hub).
+ * Tests MUST override this env var with a temp dir — never touch the real one.
+ */
+export function stateHome(env = process.env) {
+  return env.AGENT_HUB_HOME || path.join(os.homedir(), '.local', 'share', 'agent-hub')
+}
+
+export function paths(env = process.env) {
+  const home = stateHome(env)
+  return {
+    home,
+    eventsFile: path.join(home, 'events.jsonl'),
+    preflightCacheFile: path.join(home, 'preflight-cache.json'),
+    runsDir: path.join(home, 'runs'),
+    locksDir: path.join(home, 'runs', '.locks'),
+  }
+}
+
+export const PREFLIGHT_TTL_MS = 15 * 60 * 1000
+
+export const CIRCUIT_BREAKER = {
+  windowMs: 30 * 60 * 1000,
+  failureThreshold: 2,
+  failureKinds: new Set(['quota', 'canceled', 'billing']),
+  // A single failure of one of these kinds opens the breaker immediately,
+  // instead of waiting for failureThreshold within the window. 'billing'
+  // (e.g. DeepSeek 402 Insufficient Balance) never clears on its own retry.
+  immediateKinds: new Set(['billing']),
+}
+
+/**
+ * Extra buffer (seconds) the hub's own hard-kill waits past the adapter's
+ * requested timeoutS. agy is given --print-timeout <timeoutS>s and exits on
+ * its own with a partial/empty result when it fires; KILL_GRACE_S gives that
+ * graceful exit time to happen before jobrunner's outer SIGTERM->SIGKILL.
+ */
+export const KILL_GRACE_S = 30
+
+export const CONCURRENCY_CAP_PER_AGENT = 2
+
+/**
+ * Cwd paths allowed to accept a write-mode job even outside a secondary git
+ * worktree. Empty by default: write mode requires `git worktree add`. The
+ * file-pattern denylist (never prisma/, URLs, src/server/openapi/**, tests,
+ * next.config.ts, package.json, turbo.json) is a routing-skill policy, not
+ * enforced here — this allowlist is only about which cwd bypasses the
+ * "must be a secondary worktree" rule.
+ */
+export const WRITE_ALLOWLIST = []
+
+// Real runs of 278s/303s on medium/high were being cut short by the old
+// 90s/180s defaults — agy's own --print-timeout then abandons the turn.
+export const DEFAULT_TIMEOUTS_S = {
+  agy: {
+    'gemini-3.8-flash-low': 300,
+    'gemini-3.8-flash-medium': 600,
+    'gemini-3.8-flash-high': 900,
+    default: 900,
+  },
+  opencode: { default: 600 },
+  copilot: { default: 300 },
+}
+
+export function resolveTimeoutS(agent, model) {
+  const table = DEFAULT_TIMEOUTS_S[agent]
+  if (!table) return 240
+  return table[model] ?? table.default
+}
+
+/**
+ * Reasoning-effort variant (minimal/low/medium/high/max) for opencode:
+ * explicit override wins, then the model's MODEL_REGISTRY default, else none.
+ */
+export function resolveVariant(agent, model, override) {
+  if (override) return override
+  return MODEL_REGISTRY[agent]?.[model]?.variant ?? null
+}
+
+/**
+ * Model registry: tier (cost/latency class), dataPolicy badge, and short
+ * strength notes. Informational — the router does not block on dataPolicy.
+ */
+export const MODEL_REGISTRY = {
+  agy: {
+    'gemini-3.8-flash-low': { tier: 'cheap', dataPolicy: 'unknown', strengths: 'recon, summarize huge artifacts' },
+    'gemini-3.8-flash-medium': { tier: 'cheap', dataPolicy: 'unknown', strengths: 'general read/write tasks' },
+    'gemini-3.8-flash-high': { tier: 'mid', dataPolicy: 'unknown', strengths: 'cross-module call-chain trace, 1M ctx' },
+    'gemini-3.7-flash-low': { tier: 'cheap', dataPolicy: 'unknown', strengths: 'legacy alias' },
+    'gemini-3.7-flash-medium': { tier: 'cheap', dataPolicy: 'unknown', strengths: 'legacy alias' },
+    'gemini-3.7-flash-high': { tier: 'mid', dataPolicy: 'unknown', strengths: 'legacy alias' },
+    'gemini-3.1-pro-low': { tier: 'mid', dataPolicy: 'unknown', strengths: 'second architectural opinion' },
+    'gemini-3.1-pro-high': { tier: 'expensive', dataPolicy: 'unknown', strengths: 'second architectural opinion, hard reasoning' },
+    'claude-sonnet-4-6': { tier: 'mid', dataPolicy: 'unknown', strengths: 'adversarial diff review, judge' },
+    'claude-opus-4-6-thinking': { tier: 'expensive', dataPolicy: 'unknown', strengths: 'architecture, hard judgment' },
+    'gpt-oss-120b-medium': { tier: 'mid', dataPolicy: 'unknown', strengths: 'general purpose oss model' },
+  },
+  opencode: {
+    'opencode/muse-spark-1.3-contributor-free': {
+      tier: 'free',
+      dataPolicy: 'trains',
+      strengths: 'library/docs research, brainstorming, 1M ctx',
+      // Verified live: this account runs Muse Spark 1.3 (OpenCode Zen free)
+      // at variant 'high' by default; a ping with --variant high answered correctly.
+      variant: 'high',
+    },
+    'opencode/nemotron-3.5-lightning-free': { tier: 'free', dataPolicy: 'logs', strengths: 'fast classification/triage/commit messages' },
+    'opencode/nemotron-3-ultra-free': { tier: 'free', dataPolicy: 'logs', strengths: 'cross-module call-chain trace' },
+    'opencode/mimo-v2.5-free': { tier: 'free', dataPolicy: 'logs', strengths: 'library/docs research' },
+    'opencode/big-pickle': { tier: 'free', dataPolicy: 'logs', strengths: 'general purpose free model' },
+    'deepseek/deepseek-v4-pro': { tier: 'paid', dataPolicy: 'unknown', strengths: 'general purpose paid model' },
+    'deepseek/deepseek-v4-flash': { tier: 'paid', dataPolicy: 'unknown', strengths: 'mechanical edits in isolated worktree' },
+    'opencode-go/default': { tier: 'paid', dataPolicy: 'unknown', strengths: 'capped $12/5h, $30/week, $60/month' },
+  },
+  copilot: {
+    // The router's default candidates use 'auto': copilot's --model allowlist
+    // is account-specific and was observed to reject most explicit ids below
+    // (only 'auto' was reliable). These explicit ids stay in the registry for
+    // accounts where they DO work — set them directly via route()/delegate()
+    // once L3-pinged 'ready' on that account.
+    auto: { tier: 'variable', dataPolicy: 'unknown', strengths: 'resolves to whatever this account can actually use; the only --model value verified reliable' },
+    'gpt-5-mini': { tier: 'cheap', dataPolicy: 'unknown', strengths: 'fast classification/triage, GitHub-context work' },
+    'gpt-4.1': { tier: 'cheap', dataPolicy: 'unknown', strengths: 'GitHub-context work fallback' },
+    'gpt-5.4-mini': { tier: 'cheap', dataPolicy: 'unknown', strengths: 'cheap general purpose' },
+    'gpt-5.4': { tier: 'mid', dataPolicy: 'unknown', strengths: 'second opinion fallback' },
+    'gpt-5.3-codex': { tier: 'mid', dataPolicy: 'unknown', strengths: 'code-focused tasks' },
+    'gpt-5.2-codex': { tier: 'mid', dataPolicy: 'unknown', strengths: 'code-focused tasks' },
+    'gpt-5.2': { tier: 'mid', dataPolicy: 'unknown', strengths: 'general purpose' },
+    'gpt-5.1': { tier: 'mid', dataPolicy: 'unknown', strengths: 'general purpose' },
+    'claude-sonnet-4.6': { tier: 'mid', dataPolicy: 'unknown', strengths: 'adversarial diff review, judge' },
+    'claude-sonnet-4.5': { tier: 'mid', dataPolicy: 'unknown', strengths: 'adversarial diff review, judge' },
+    'claude-haiku-4.5': { tier: 'cheap', dataPolicy: 'unknown', strengths: 'mechanical edits, write-capable' },
+    'claude-opus-4.7': { tier: 'expensive', dataPolicy: 'unknown', strengths: 'architecture, hard judgment' },
+    'claude-opus-4.6': { tier: 'expensive', dataPolicy: 'unknown', strengths: 'architecture, hard judgment' },
+    'claude-opus-4.6-fast': { tier: 'expensive', dataPolicy: 'unknown', strengths: 'architecture, hard judgment, faster' },
+    'claude-opus-4.5': { tier: 'expensive', dataPolicy: 'unknown', strengths: 'architecture, hard judgment' },
+    'claude-sonnet-4': { tier: 'mid', dataPolicy: 'unknown', strengths: 'legacy' },
+  },
+}

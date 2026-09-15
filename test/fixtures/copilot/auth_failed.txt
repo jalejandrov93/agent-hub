@@ -1,0 +1,1 @@
+Error: Not authenticated. Run `copilot` interactively and sign in, or set GH_TOKEN / GITHUB_TOKEN.

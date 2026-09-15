@@ -1,0 +1,50 @@
+{
+  "name": "agent-hub-mcp",
+  "version": "1.0.0",
+  "description": "Local MCP server that delegates bounded tasks to other agent CLIs (agy, opencode, copilot) with preflight checks, an event log and a local dashboard.",
+  "license": "Apache-2.0",
+  "author": "jalejandrov93",
+  "repository": {
+    "type": "git",
+    "url": "git+https://github.com/jalejandrov93/agent-hub.git"
+  },
+  "homepage": "https://github.com/jalejandrov93/agent-hub#readme",
+  "bugs": {
+    "url": "https://github.com/jalejandrov93/agent-hub/issues"
+  },
+  "keywords": [
+    "mcp",
+    "model-context-protocol",
+    "claude-code",
+    "multi-agent",
+    "orchestrator",
+    "antigravity",
+    "opencode",
+    "copilot"
+  ],
+  "type": "module",
+  "bin": {
+    "agent-hub": "./bin/agent-hub"
+  },
+  "files": [
+    "bin/",
+    "src/",
+    "skills/",
+    "systemd/",
+    "LICENSE",
+    "README.md",
+    "CHANGELOG.md"
+  ],
+  "scripts": {
+    "test": "node --test $(find test -name '*.test.mjs' ! -path 'test/live/*')",
+    "test:live": "AGENT_HUB_LIVE=1 node --test test/live/*.test.mjs",
+    "selftest": "node bin/agent-hub selftest"
+  },
+  "engines": {
+    "node": ">=20.6.0"
+  },
+  "dependencies": {
+    "@modelcontextprotocol/sdk": "^1.30.0",
+    "zod": "^3.25.76"
+  }
+}

@@ -1,0 +1,2 @@
+{"type":"step_start","timestamp":1789138999000,"sessionID":"ses_synthetic_empty","part":{"id":"prt_synth1","messageID":"msg_synth1","sessionID":"ses_synthetic_empty","type":"step-start"}}
+{"type":"tool_use","timestamp":1789138999100,"sessionID":"ses_synthetic_empty","part":{"id":"prt_synth2","messageID":"msg_synth1","sessionID":"ses_synthetic_empty","type":"tool-use","tool":"read","state":{"status":"completed"}}}

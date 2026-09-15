@@ -1,0 +1,3 @@
+{"type":"session.mcp_server_status_changed","data":{"serverName":"github-mcp-server","status":"pending"},"ephemeral":true,"id":"5d5e1dfc-3ec1-4f2d-9758-550a5afc1016","timestamp":"2026-09-11T15:22:12.903Z","parentId":"49a244f9-3fea-4044-8fc7-99a1d154e323"}
+{"type":"session.mcp_server_status_changed","data":{"serverName":"github-mcp-server","status":"connected"},"ephemeral":true,"id":"61ec68b5-5f32-4050-b8b3-5264d5e9f9d9","timestamp":"2026-09-11T15:22:13.425Z","parentId":"49a244f9-3fea-4044-8fc7-99a1d154e323"}
+Error: Model "gpt-5-mini" from --model flag is not available.

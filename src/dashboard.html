@@ -1,0 +1,1350 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8" />
+<meta name="viewport" content="width=device-width, initial-scale=1" />
+<title>agent-hub · Delegation Dashboard</title>
+<style>
+  :root {
+    color-scheme: light dark;
+    --font-sans: Inter, ui-sans-serif, system-ui, -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, "Helvetica Neue", Arial, sans-serif;
+    --font-mono: ui-monospace, SFMono-Regular, Menlo, Monaco, Consolas, "Liberation Mono", "Courier New", monospace;
+
+    /* Light theme tokens */
+    --bg: #f8fafc;
+    --panel: #ffffff;
+    --panel-hover: #fcfdfe;
+    --panel-border: #e2e8f0;
+    --panel-border-subtle: #edf2f7;
+    --text: #0f172a;
+    --text-muted: #64748b;
+    --text-dim: #94a3b8;
+    
+    /* Semantic brand & states */
+    --primary: #4f46e5;
+    --primary-hover: #4338ca;
+    --primary-tint: rgba(79, 70, 229, 0.08);
+    --primary-border: rgba(79, 70, 229, 0.2);
+
+    --ready: #059669;
+    --ready-bg: rgba(16, 185, 129, 0.1);
+    --ready-border: rgba(16, 185, 129, 0.25);
+
+    --running: #0284c7;
+    --running-bg: rgba(14, 165, 233, 0.1);
+    --running-border: rgba(14, 165, 233, 0.25);
+
+    --degraded: #d97706;
+    --degraded-bg: rgba(245, 158, 11, 0.1);
+    --degraded-border: rgba(245, 158, 11, 0.25);
+
+    --unavailable: #dc2626;
+    --unavailable-bg: rgba(239, 68, 68, 0.1);
+    --unavailable-border: rgba(239, 68, 68, 0.25);
+
+    --muted-badge: #64748b;
+    --muted-badge-bg: rgba(100, 116, 139, 0.1);
+    --muted-badge-border: rgba(100, 116, 139, 0.2);
+
+    --shadow-sm: 0 1px 2px 0 rgba(0, 0, 0, 0.04);
+    --shadow-md: 0 4px 6px -1px rgba(0, 0, 0, 0.06), 0 2px 4px -2px rgba(0, 0, 0, 0.04);
+    --radius-sm: 6px;
+    --radius-md: 10px;
+    --radius-lg: 14px;
+  }
+
+  @media (prefers-color-scheme: dark) {
+    :root {
+      /* Dark theme tokens */
+      --bg: #0b0f17;
+      --panel: #131926;
+      --panel-hover: #171f2f;
+      --panel-border: #202b3e;
+      --panel-border-subtle: #192233;
+      --text: #f1f5f9;
+      --text-muted: #8b95a5;
+      --text-dim: #556070;
+
+      --primary: #6366f1;
+      --primary-hover: #4f46e5;
+      --primary-tint: rgba(99, 102, 241, 0.15);
+      --primary-border: rgba(99, 102, 241, 0.3);
+
+      --ready: #34d399;
+      --ready-bg: rgba(52, 211, 153, 0.12);
+      --ready-border: rgba(52, 211, 153, 0.25);
+
+      --running: #38bdf8;
+      --running-bg: rgba(56, 189, 248, 0.12);
+      --running-border: rgba(56, 189, 248, 0.25);
+
+      --degraded: #fbbf24;
+      --degraded-bg: rgba(251, 191, 36, 0.12);
+      --degraded-border: rgba(251, 191, 36, 0.25);
+
+      --unavailable: #f87171;
+      --unavailable-bg: rgba(248, 113, 113, 0.14);
+      --unavailable-border: rgba(248, 113, 113, 0.28);
+
+      --muted-badge: #94a3b8;
+      --muted-badge-bg: rgba(148, 163, 184, 0.12);
+      --muted-badge-border: rgba(148, 163, 184, 0.2);
+
+      --shadow-sm: 0 1px 2px 0 rgba(0, 0, 0, 0.2);
+      --shadow-md: 0 4px 6px -1px rgba(0, 0, 0, 0.3), 0 2px 4px -2px rgba(0, 0, 0, 0.2);
+    }
+  }
+
+  * { box-sizing: border-box; }
+  
+  body {
+    margin: 0;
+    background: var(--bg);
+    color: var(--text);
+    font: 13px/1.5 var(--font-sans);
+    padding: 24px;
+    -webkit-font-smoothing: antialiased;
+    -moz-osx-font-smoothing: grayscale;
+  }
+
+  /* Accessibility focus */
+  :focus-visible {
+    outline: 2px solid var(--primary);
+    outline-offset: 2px;
+  }
+
+  /* Layout */
+  .container {
+    max-width: 1360px;
+    margin: 0 auto;
+    display: flex;
+    flex-direction: column;
+    gap: 20px;
+  }
+
+  /* Header & Navigation */
+  header {
+    display: flex;
+    align-items: center;
+    justify-content: space-between;
+    flex-wrap: wrap;
+    gap: 16px;
+    padding-bottom: 4px;
+  }
+
+  .brand-group {
+    display: flex;
+    align-items: center;
+    gap: 12px;
+  }
+
+  .brand-icon {
+    display: inline-flex;
+    align-items: center;
+    justify-content: center;
+    width: 36px;
+    height: 36px;
+    border-radius: var(--radius-md);
+    background: var(--primary-tint);
+    color: var(--primary);
+    border: 1px solid var(--primary-border);
+  }
+
+  h1 {
+    font-size: 18px;
+    font-weight: 700;
+    margin: 0;
+    letter-spacing: -0.01em;
+    display: flex;
+    align-items: center;
+    gap: 8px;
+  }
+
+  .header-sub {
+    font-size: 12px;
+    color: var(--text-muted);
+    margin-top: 2px;
+  }
+
+  .header-actions {
+    display: flex;
+    align-items: center;
+    gap: 12px;
+  }
+
+  /* Connection Indicator */
+  .conn-badge {
+    display: inline-flex;
+    align-items: center;
+    gap: 7px;
+    padding: 5px 11px;
+    border-radius: 999px;
+    font-size: 11px;
+    font-weight: 600;
+    border: 1px solid var(--panel-border);
+    background: var(--panel);
+    transition: all 0.2s ease;
+  }
+
+  .conn-dot {
+    width: 7px;
+    height: 7px;
+    border-radius: 50%;
+    background: var(--text-dim);
+  }
+
+  .conn-badge.live {
+    color: var(--ready);
+    border-color: var(--ready-border);
+    background: var(--ready-bg);
+  }
+  .conn-badge.live .conn-dot {
+    background: var(--ready);
+    box-shadow: 0 0 0 2px var(--ready-bg);
+    animation: live-pulse 2s infinite ease-in-out;
+  }
+
+  .conn-badge.reconnecting {
+    color: var(--degraded);
+    border-color: var(--degraded-border);
+    background: var(--degraded-bg);
+  }
+  .conn-badge.reconnecting .conn-dot {
+    background: var(--degraded);
+  }
+
+  .conn-badge.offline {
+    color: var(--unavailable);
+    border-color: var(--unavailable-border);
+    background: var(--unavailable-bg);
+  }
+  .conn-badge.offline .conn-dot {
+    background: var(--unavailable);
+  }
+
+  @keyframes live-pulse {
+    0%, 100% { opacity: 1; transform: scale(1); }
+    50% { opacity: 0.5; transform: scale(1.2); }
+  }
+
+  /* Buttons */
+  .btn {
+    display: inline-flex;
+    align-items: center;
+    justify-content: center;
+    gap: 6px;
+    border: 1px solid var(--panel-border);
+    background: var(--panel);
+    color: var(--text);
+    padding: 6px 12px;
+    border-radius: var(--radius-sm);
+    font-size: 12px;
+    font-weight: 500;
+    cursor: pointer;
+    transition: all 0.15s ease;
+  }
+  .btn:hover:not(:disabled) {
+    background: var(--panel-hover);
+    border-color: var(--text-dim);
+  }
+  .btn:disabled {
+    opacity: 0.45;
+    cursor: not-allowed;
+  }
+
+  .btn-icon-only {
+    padding: 6px;
+    width: 32px;
+    height: 32px;
+  }
+
+  .btn-cancel {
+    background: transparent;
+    color: var(--unavailable);
+    border: 1px solid var(--unavailable-border);
+    padding: 3px 8px;
+    font-size: 11px;
+    font-weight: 600;
+    border-radius: var(--radius-sm);
+  }
+  .btn-cancel:hover:not(:disabled) {
+    background: var(--unavailable-bg);
+    border-color: var(--unavailable);
+  }
+
+  /* KPI Summary Row */
+  .kpi-row {
+    display: grid;
+    grid-template-columns: repeat(auto-fit, minmax(200px, 1fr));
+    gap: 14px;
+  }
+
+  .kpi-card {
+    background: var(--panel);
+    border: 1px solid var(--panel-border);
+    border-radius: var(--radius-md);
+    padding: 14px 16px;
+    display: flex;
+    align-items: center;
+    justify-content: space-between;
+    box-shadow: var(--shadow-sm);
+  }
+
+  .kpi-meta {
+    display: flex;
+    flex-direction: column;
+    gap: 4px;
+  }
+
+  .kpi-label {
+    font-size: 11px;
+    font-weight: 600;
+    color: var(--text-muted);
+    text-transform: uppercase;
+    letter-spacing: 0.05em;
+  }
+
+  .kpi-val {
+    font-size: 20px;
+    font-weight: 700;
+    letter-spacing: -0.02em;
+    font-variant-numeric: tabular-nums;
+  }
+
+  .kpi-icon {
+    color: var(--text-dim);
+    width: 32px;
+    height: 32px;
+    display: flex;
+    align-items: center;
+    justify-content: center;
+    background: var(--panel-border-subtle);
+    border-radius: var(--radius-sm);
+  }
+
+  /* Dashboard Grid */
+  .dashboard-grid {
+    display: grid;
+    grid-template-columns: repeat(auto-fit, minmax(min(100%, 380px), 1fr));
+    gap: 16px;
+  }
+
+  .panel {
+    background: var(--panel);
+    border: 1px solid var(--panel-border);
+    border-radius: var(--radius-lg);
+    box-shadow: var(--shadow-sm);
+    display: flex;
+    flex-direction: column;
+    min-width: 0;
+    overflow: hidden;
+  }
+
+  .panel-header {
+    padding: 12px 16px;
+    border-bottom: 1px solid var(--panel-border-subtle);
+    display: flex;
+    align-items: center;
+    justify-content: space-between;
+    gap: 8px;
+  }
+
+  .panel-title-group {
+    display: flex;
+    align-items: center;
+    gap: 8px;
+  }
+
+  .panel-title {
+    font-size: 12px;
+    font-weight: 700;
+    text-transform: uppercase;
+    letter-spacing: 0.05em;
+    color: var(--text-muted);
+    margin: 0;
+  }
+
+  .panel-count {
+    font-size: 11px;
+    font-weight: 600;
+    padding: 1px 6px;
+    border-radius: 999px;
+    background: var(--panel-border-subtle);
+    color: var(--text-muted);
+    font-variant-numeric: tabular-nums;
+  }
+
+  .panel-body {
+    padding: 14px 16px;
+    flex: 1;
+    min-width: 0;
+  }
+
+  .timeline-panel {
+    grid-column: 1 / -1;
+  }
+
+  /* Table styling */
+  .table-container {
+    width: 100%;
+    overflow-x: auto;
+    overscroll-behavior-x: contain;
+    -webkit-overflow-scrolling: touch;
+  }
+
+  table {
+    width: 100%;
+    border-collapse: collapse;
+    font-size: 12px;
+    text-align: left;
+  }
+
+  th {
+    color: var(--text-muted);
+    font-size: 11px;
+    font-weight: 600;
+    text-transform: uppercase;
+    letter-spacing: 0.04em;
+    padding: 8px 10px;
+    border-bottom: 1px solid var(--panel-border);
+    white-space: nowrap;
+  }
+
+  td {
+    padding: 9px 10px;
+    border-bottom: 1px solid var(--panel-border-subtle);
+    vertical-align: middle;
+    color: var(--text);
+  }
+
+  tr:last-child td {
+    border-bottom: none;
+  }
+
+  tr:hover td {
+    background: var(--panel-hover);
+  }
+
+  /* Status Badges */
+  .badge {
+    display: inline-flex;
+    align-items: center;
+    gap: 5px;
+    padding: 2px 8px;
+    border-radius: 999px;
+    font-size: 11px;
+    font-weight: 600;
+    white-space: nowrap;
+    line-height: 1.4;
+    border: 1px solid transparent;
+  }
+
+  .badge.ready, .badge.succeeded {
+    color: var(--ready);
+    background: var(--ready-bg);
+    border-color: var(--ready-border);
+  }
+
+  .badge.running, .badge.queued {
+    color: var(--running);
+    background: var(--running-bg);
+    border-color: var(--running-border);
+  }
+
+  .badge.degraded {
+    color: var(--degraded);
+    background: var(--degraded-bg);
+    border-color: var(--degraded-border);
+  }
+
+  .badge.unavailable, .badge.failed {
+    color: var(--unavailable);
+    background: var(--unavailable-bg);
+    border-color: var(--unavailable-border);
+  }
+
+  .badge.canceled {
+    color: var(--muted-badge);
+    background: var(--muted-badge-bg);
+    border-color: var(--muted-badge-border);
+  }
+
+  /* Micro helpers */
+  .mono {
+    font-family: var(--font-mono);
+    font-size: 11px;
+    font-variant-numeric: tabular-nums;
+  }
+
+  .tag-model {
+    display: inline-block;
+    padding: 1px 6px;
+    background: var(--panel-border-subtle);
+    border-radius: var(--radius-sm);
+    color: var(--text);
+    font-family: var(--font-mono);
+    font-size: 11px;
+  }
+
+  /* opencode reasoning-effort variant (minimal/low/medium/high/max) */
+  .tag-variant {
+    display: inline-block;
+    margin-left: 6px;
+    padding: 1px 6px;
+    background: var(--primary-tint);
+    border: 1px solid var(--primary-border);
+    border-radius: var(--radius-sm);
+    color: var(--primary);
+    font-family: var(--font-mono);
+    font-size: 10px;
+    vertical-align: middle;
+  }
+
+  /* job_reply chain hint under a job's title */
+  .reply-hint {
+    display: flex;
+    align-items: center;
+    gap: 4px;
+  }
+
+  .subtext {
+    font-size: 11px;
+    color: var(--text-muted);
+    margin-top: 1px;
+  }
+
+  .truncate {
+    max-width: 260px;
+    white-space: nowrap;
+    overflow: hidden;
+    text-overflow: ellipsis;
+  }
+
+  /* Timeline toolbar & list */
+  .timeline-toolbar {
+    display: flex;
+    align-items: center;
+    justify-content: space-between;
+    flex-wrap: wrap;
+    gap: 10px;
+    margin-bottom: 12px;
+  }
+
+  .filter-chips {
+    display: flex;
+    align-items: center;
+    gap: 6px;
+    flex-wrap: wrap;
+  }
+
+  .filter-chip {
+    background: transparent;
+    border: 1px solid var(--panel-border);
+    color: var(--text-muted);
+    border-radius: 999px;
+    padding: 4px 10px;
+    font-size: 11px;
+    font-weight: 500;
+    cursor: pointer;
+    transition: all 0.15s ease;
+  }
+  .filter-chip:hover {
+    color: var(--text);
+    border-color: var(--text-dim);
+  }
+  .filter-chip.active {
+    background: var(--primary-tint);
+    border-color: var(--primary-border);
+    color: var(--primary);
+    font-weight: 600;
+  }
+
+  .search-box {
+    display: flex;
+    align-items: center;
+    gap: 6px;
+    background: var(--bg);
+    border: 1px solid var(--panel-border);
+    border-radius: var(--radius-sm);
+    padding: 4px 8px;
+    width: 240px;
+    max-width: 100%;
+  }
+  .search-box:focus-within {
+    border-color: var(--primary);
+  }
+  .search-input {
+    border: none;
+    background: transparent;
+    color: var(--text);
+    font: inherit;
+    font-size: 12px;
+    width: 100%;
+    outline: none;
+  }
+  .search-input::placeholder {
+    color: var(--text-dim);
+  }
+  .btn-search-clear {
+    border: none;
+    background: transparent;
+    color: var(--text-dim);
+    cursor: pointer;
+    padding: 0;
+    display: none;
+    align-items: center;
+  }
+  .btn-search-clear.visible {
+    display: flex;
+  }
+
+  #timeline-scroll {
+    max-height: 420px;
+    overflow-y: auto;
+    overscroll-behavior-y: contain;
+  }
+
+  /* Empty States */
+  .empty-state {
+    padding: 32px 16px;
+    text-align: center;
+    display: flex;
+    flex-direction: column;
+    align-items: center;
+    gap: 8px;
+    color: var(--text-muted);
+  }
+  .empty-icon {
+    color: var(--text-dim);
+    margin-bottom: 4px;
+  }
+  .empty-msg {
+    font-size: 13px;
+    font-weight: 500;
+    color: var(--text);
+  }
+  .empty-hint {
+    font-size: 11px;
+    color: var(--text-muted);
+  }
+  .empty-code {
+    font-family: var(--font-mono);
+    background: var(--panel-border-subtle);
+    padding: 1px 6px;
+    border-radius: 4px;
+    color: var(--text);
+  }
+
+  /* Spin animation */
+  .spinning {
+    animation: rotate-spin 1s linear infinite;
+  }
+  @keyframes rotate-spin {
+    from { transform: rotate(0deg); }
+    to { transform: rotate(360deg); }
+  }
+
+  /* Responsive media rules */
+  @media (max-width: 640px) {
+    body { padding: 14px; }
+    .search-box { width: 100%; }
+    .kpi-row { grid-template-columns: repeat(2, 1fr); }
+    .truncate { max-width: 160px; }
+    th, td { padding: 7px 6px; }
+  }
+
+  /* Respect prefers-reduced-motion */
+  @media (prefers-reduced-motion: reduce) {
+    *, *::before, *::after {
+      animation-duration: 0.01ms !important;
+      animation-iteration-count: 1 !important;
+      transition-duration: 0.01ms !important;
+      scroll-behavior: auto !important;
+    }
+  }
+</style>
+</head>
+<body>
+  <div class="container">
+    <!-- Header Navigation -->
+    <header>
+      <div class="brand-group">
+        <div class="brand-icon" aria-hidden="true">
+          <svg width="20" height="20" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round">
+            <rect x="2" y="2" width="20" height="8" rx="2" ry="2"></rect>
+            <rect x="2" y="14" width="20" height="8" rx="2" ry="2"></rect>
+            <line x1="6" y1="6" x2="6.01" y2="6"></line>
+            <line x1="6" y1="18" x2="6.01" y2="18"></line>
+          </svg>
+        </div>
+        <div>
+          <h1>agent-hub</h1>
+          <div class="header-sub">MCP Delegation &amp; Orchestration Dashboard</div>
+        </div>
+      </div>
+
+      <div class="header-actions">
+        <div id="conn-badge" class="conn-badge connecting" role="status">
+          <span class="conn-dot" aria-hidden="true"></span>
+          <span id="conn-text" aria-live="polite">Connecting…</span>
+        </div>
+        <button id="btn-refresh" class="btn" title="Refresh state (shortcut: R)" aria-label="Refresh state">
+          <svg id="refresh-icon" width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true">
+            <path d="M21.5 2v6h-6M21.34 15.57a10 10 0 1 1-.57-8.38l5.67-5.19"></path>
+          </svg>
+          <span>Refresh</span>
+        </button>
+      </div>
+    </header>
+
+    <!-- KPI Summary Row -->
+    <section class="kpi-row" aria-label="System Metrics Summary">
+      <div class="kpi-card">
+        <div class="kpi-meta">
+          <span class="kpi-label">Agents</span>
+          <span class="kpi-val" id="metric-agents">0</span>
+        </div>
+        <div class="kpi-icon" aria-hidden="true">
+          <svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round">
+            <path d="M16 21v-2a4 4 0 0 0-4-4H6a4 4 0 0 0-4 4v2"></path>
+            <circle cx="9" cy="7" r="4"></circle>
+            <polyline points="16 11 18 13 22 9"></polyline>
+          </svg>
+        </div>
+      </div>
+
+      <div class="kpi-card">
+        <div class="kpi-meta">
+          <span class="kpi-label">Active Jobs</span>
+          <span class="kpi-val" id="metric-jobs">0</span>
+        </div>
+        <div class="kpi-icon" aria-hidden="true">
+          <svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round">
+            <polygon points="5 3 19 12 5 21 5 3"></polygon>
+          </svg>
+        </div>
+      </div>
+
+      <div class="kpi-card">
+        <div class="kpi-meta">
+          <span class="kpi-label">Subagents</span>
+          <span class="kpi-val" id="metric-subagents">0</span>
+        </div>
+        <div class="kpi-icon" aria-hidden="true">
+          <svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round">
+            <rect x="3" y="11" width="18" height="10" rx="2"></rect>
+            <circle cx="12" cy="5" r="2"></circle>
+            <path d="M12 7v4"></path>
+            <line x1="8" y1="16" x2="8" y2="16"></line>
+            <line x1="16" y1="16" x2="16" y2="16"></line>
+          </svg>
+        </div>
+      </div>
+
+      <div class="kpi-card">
+        <div class="kpi-meta">
+          <span class="kpi-label">Events</span>
+          <span class="kpi-val" id="metric-events">0</span>
+        </div>
+        <div class="kpi-icon" aria-hidden="true">
+          <svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round">
+            <circle cx="12" cy="12" r="10"></circle>
+            <polyline points="12 6 12 12 16 14"></polyline>
+          </svg>
+        </div>
+      </div>
+    </section>
+
+    <!-- Main Grid -->
+    <main class="dashboard-grid">
+      <!-- Agents Panel -->
+      <section class="panel" id="agents-panel" aria-labelledby="heading-agents">
+        <div class="panel-header">
+          <div class="panel-title-group">
+            <h2 class="panel-title" id="heading-agents">Agents</h2>
+            <span class="panel-count" id="count-agents">0</span>
+          </div>
+        </div>
+        <div class="panel-body">
+          <div class="table-container" id="agents"></div>
+        </div>
+      </section>
+
+      <!-- Running Jobs Panel -->
+      <section class="panel" id="jobs-panel" aria-labelledby="heading-jobs">
+        <div class="panel-header">
+          <div class="panel-title-group">
+            <h2 class="panel-title" id="heading-jobs">Running jobs</h2>
+            <span class="panel-count" id="count-jobs">0</span>
+          </div>
+        </div>
+        <div class="panel-body">
+          <div class="table-container" id="jobs"></div>
+        </div>
+      </section>
+
+      <!-- Job History Panel: terminal jobs (succeeded/failed/canceled), with errorKind, variant, and job_reply chains -->
+      <section class="panel" id="history-panel" aria-labelledby="heading-history">
+        <div class="panel-header">
+          <div class="panel-title-group">
+            <h2 class="panel-title" id="heading-history">Job history</h2>
+            <span class="panel-count" id="count-history">0</span>
+          </div>
+        </div>
+        <div class="panel-body">
+          <div class="table-container" id="job-history"></div>
+        </div>
+      </section>
+
+      <!-- Subagents Activity Panel -->
+      <section class="panel" id="subagents-panel" aria-labelledby="heading-subagents">
+        <div class="panel-header">
+          <div class="panel-title-group">
+            <h2 class="panel-title" id="heading-subagents">Claude subagents</h2>
+            <span class="panel-count" id="count-subagents">0</span>
+          </div>
+        </div>
+        <div class="panel-body">
+          <div class="table-container" id="subagents"></div>
+        </div>
+      </section>
+
+      <!-- Timeline Feed Panel -->
+      <section class="panel timeline-panel" id="timeline-panel" aria-labelledby="heading-timeline">
+        <div class="panel-header">
+          <div class="panel-title-group">
+            <h2 class="panel-title" id="heading-timeline">Timeline</h2>
+            <span class="panel-count" id="count-events">0</span>
+          </div>
+        </div>
+        <div class="panel-body">
+          <div class="timeline-toolbar">
+            <div class="filter-chips" id="filters" role="tablist" aria-label="Event sources"></div>
+            <div class="search-box">
+              <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true">
+                <circle cx="11" cy="11" r="8"></circle>
+                <line x1="21" y1="21" x2="16.65" y2="16.65"></line>
+              </svg>
+              <input type="text" id="timeline-search" class="search-input" placeholder="Search events..." aria-label="Search timeline events" />
+              <button id="btn-search-clear" class="btn-search-clear" aria-label="Clear search">
+                <svg width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round">
+                  <line x1="18" y1="6" x2="6" y2="18"></line>
+                  <line x1="6" y1="6" x2="18" y2="18"></line>
+                </svg>
+              </button>
+            </div>
+          </div>
+          <div class="table-container" id="timeline-scroll">
+            <div id="timeline"></div>
+          </div>
+        </div>
+      </section>
+    </main>
+  </div>
+
+<script>
+(function () {
+  // Centralized Application State
+  var state = {
+    agents: [],
+    jobs: [],
+    subagents: [],
+    events: [],
+    connection: 'connecting', // 'connecting' | 'live' | 'reconnecting' | 'offline'
+    timelineSource: 'all',
+    timelineQuery: ''
+  };
+
+  // Safe string escaping
+  function esc(s) {
+    return String(s == null ? '' : s).replace(/[&<>"']/g, function (c) {
+      return { '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;', "'": '&#39;' }[c];
+    });
+  }
+
+  // Model name humanizer (keeps full model in tooltip)
+  function formatModel(rawModel) {
+    if (!rawModel) return '-';
+    var m = String(rawModel).trim();
+    if (m.indexOf('claude-3-5-sonnet') !== -1) return 'Sonnet 3.5';
+    if (m.indexOf('claude-3-7-sonnet') !== -1) return 'Sonnet 3.7';
+    if (m.indexOf('claude-3-5-haiku') !== -1) return 'Haiku 3.5';
+    if (m.indexOf('claude-3-opus') !== -1) return 'Opus 3';
+    if (m.indexOf('gpt-4o-mini') !== -1) return 'GPT-4o Mini';
+    if (m.indexOf('gpt-4o') !== -1) return 'GPT-4o';
+    if (m.indexOf('o3-mini') !== -1) return 'o3-mini';
+    if (m.indexOf('o1') !== -1) return 'o1';
+    return m;
+  }
+
+  // Number / Token formatter
+  function formatNumber(num) {
+    if (num == null || isNaN(num)) return '-';
+    var n = Number(num);
+    if (n >= 1000000) return (n / 1000000).toFixed(1).replace(/\.0$/, '') + 'M';
+    if (n >= 1000) return (n / 1000).toFixed(1).replace(/\.0$/, '') + 'k';
+    return n.toLocaleString();
+  }
+
+  // Status badge generator
+  function badge(status) {
+    var s = String(status || 'unknown').toLowerCase();
+    return '<span class="badge ' + esc(s) + '">' + esc(status || 'unknown') + '</span>';
+  }
+
+  // errorKind -> which of the 5 existing status colors it reads as:
+  // 'unavailable' (red, hard/not retriable), 'degraded' (amber, retriable),
+  // 'canceled' (muted, lifecycle/informational). See src/README + SKILL.md
+  // errorKind table for the meaning of each kind.
+  var ERROR_KIND_SEVERITY = {
+    billing: 'unavailable',
+    auth: 'unavailable',
+    model_unavailable: 'unavailable',
+    crash: 'unavailable',
+    worktree_denied: 'unavailable',
+    locked: 'unavailable',
+    unsupported: 'unavailable',
+    quota: 'degraded',
+    canceled: 'degraded',
+    canceled_by_user: 'degraded',
+    timeout: 'degraded',
+    empty: 'degraded',
+    orphaned: 'canceled',
+    not_terminal: 'canceled',
+    no_session: 'canceled'
+  };
+
+  // errorKind badge: reuses the same 5 CSS classes as status badges (no new
+  // colors), with the full error message (if any) as the tooltip.
+  function errorBadge(errorKind, message) {
+    if (!errorKind) return '<span class="subtext">&mdash;</span>';
+    var cls = ERROR_KIND_SEVERITY[errorKind] || 'unavailable';
+    var title = message ? esc(message) : esc(errorKind);
+    return '<span class="badge ' + esc(cls) + '" title="' + title + '">' + esc(errorKind) + '</span>';
+  }
+
+  function isTerminalStatus(status) {
+    return status === 'succeeded' || status === 'failed' || status === 'canceled';
+  }
+
+  // Render KPIs
+  function renderMetrics() {
+    var readyAgents = state.agents.filter(function (a) { return a.status === 'ready'; }).length;
+    var totalAgents = state.agents.length;
+    document.getElementById('metric-agents').textContent = totalAgents ? (readyAgents + ' / ' + totalAgents) : '0';
+    document.getElementById('count-agents').textContent = String(totalAgents);
+
+    var runningJobs = state.jobs.filter(function (j) { return j.status === 'queued' || j.status === 'running'; });
+    document.getElementById('metric-jobs').textContent = String(runningJobs.length);
+    document.getElementById('count-jobs').textContent = String(runningJobs.length);
+
+    var historyJobs = state.jobs.filter(function (j) { return isTerminalStatus(j.status); });
+    document.getElementById('count-history').textContent = String(Math.min(historyJobs.length, 30));
+
+    var stopEvents = state.subagents.filter(function (e) { return e.kind === 'subagent.stop'; });
+    document.getElementById('metric-subagents').textContent = String(stopEvents.length);
+    document.getElementById('count-subagents').textContent = String(stopEvents.length);
+
+    document.getElementById('metric-events').textContent = formatNumber(state.events.length);
+    document.getElementById('count-events').textContent = String(state.events.length);
+  }
+
+  // Render Agents
+  function renderAgents() {
+    var el = document.getElementById('agents');
+    if (!state.agents.length) {
+      el.innerHTML = '<div class="empty-state">' +
+        '<div class="empty-icon" aria-hidden="true"><svg width="32" height="32" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.5"><rect x="2" y="2" width="20" height="8" rx="2"></rect><rect x="2" y="14" width="20" height="8" rx="2"></rect><line x1="6" y1="6" x2="6.01" y2="6"></line><line x1="6" y1="18" x2="6.01" y2="18"></line></svg></div>' +
+        '<div class="empty-msg">No preflight agent data yet</div>' +
+        '<div class="empty-hint">Run <code class="empty-code">agents_status</code> to populate configuration</div>' +
+        '</div>';
+      return;
+    }
+
+    var rows = state.agents.map(function (a) {
+      var displayModel = formatModel(a.model);
+      // a.reason explains WHY a degraded/unavailable status was assigned —
+      // e.g. "model list timed out" (L1), "circuit_breaker_open: ..." (L2,
+      // including a single 'billing' failure opening it immediately), or
+      // "catalog only; account availability unverified" (copilot non-auto).
+      var reasonRow = a.reason ? '<div class="subtext truncate" title="' + esc(a.reason) + '">' + esc(a.reason) + '</div>' : '';
+      return '<tr>' +
+        '<td><strong>' + esc(a.agent) + '</strong></td>' +
+        '<td><span class="tag-model" title="' + esc(a.model) + '">' + esc(displayModel) + '</span></td>' +
+        '<td>' + badge(a.status) + reasonRow + '</td>' +
+        '<td><span class="subtext">' + esc(a.quotaSignal || '—') + '</span></td>' +
+        '<td><span class="subtext">' + esc(a.dataPolicy || '—') + '</span></td>' +
+      '</tr>';
+    }).join('');
+
+    el.innerHTML = '<table>' +
+      '<thead><tr><th>Agent</th><th>Model</th><th>Status</th><th>Quota</th><th>Data Policy</th></tr></thead>' +
+      '<tbody>' + rows + '</tbody>' +
+      '</table>';
+  }
+
+  // Calculate live elapsed seconds
+  function getElapsedSeconds(createdAt) {
+    if (!createdAt) return null;
+    var parsed = new Date(createdAt).getTime();
+    if (isNaN(parsed)) return null;
+    return Math.max(0, Math.floor((Date.now() - parsed) / 1000));
+  }
+
+  // Dynamic 1-second ticker for job durations
+  function updateElapsedTimes() {
+    var spans = document.querySelectorAll('[data-created-at]');
+    spans.forEach(function (span) {
+      var sec = getElapsedSeconds(span.dataset.createdAt);
+      span.textContent = sec != null ? (sec + 's') : '—';
+    });
+  }
+
+  // Render Running Jobs
+  function renderJobs() {
+    var el = document.getElementById('jobs');
+    var running = state.jobs.filter(function (j) { return j.status === 'queued' || j.status === 'running'; });
+
+    if (!running.length) {
+      el.innerHTML = '<div class="empty-state">' +
+        '<div class="empty-icon" aria-hidden="true"><svg width="32" height="32" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.5"><polygon points="5 3 19 12 5 21 5 3"></polygon></svg></div>' +
+        '<div class="empty-msg">No running jobs</div>' +
+        '<div class="empty-hint">Trigger delegation tasks through your MCP client</div>' +
+        '</div>';
+      return;
+    }
+
+    var rows = running.map(function (j) {
+      var displayModel = formatModel(j.model);
+      var sec = getElapsedSeconds(j.createdAt);
+      var elapsedText = sec != null ? (sec + 's') : '—';
+
+      // j.parentJobId means this job was started by job_reply, resuming an
+      // earlier conversation's sessionId rather than starting cold.
+      var replyHint = j.parentJobId
+        ? '<div class="subtext reply-hint" title="Reply to job ' + esc(j.parentJobId) + '">&#8617; reply of &hellip;' + esc(String(j.parentJobId).slice(-8)) + '</div>'
+        : '';
+      return '<tr data-job-row="' + esc(j.jobId) + '">' +
+        '<td>' +
+          '<div><strong>' + esc(j.agent) + '</strong></div>' +
+          '<div class="subtext tag-model" title="' + esc(j.model) + '">' + esc(displayModel) + '</div>' +
+          (j.variant ? '<span class="tag-variant" title="opencode reasoning effort">' + esc(j.variant) + '</span>' : '') +
+        '</td>' +
+        '<td>' +
+          '<div class="truncate" title="' + esc(j.title) + '">' + esc(j.title || 'Untitled job') + '</div>' +
+          replyHint +
+        '</td>' +
+        '<td><span class="mono elapsed-time" data-created-at="' + esc(j.createdAt || '') + '">' + elapsedText + '</span></td>' +
+        '<td style="text-align: right;">' +
+          '<button class="btn btn-cancel" data-job="' + esc(j.jobId) + '">' +
+            '<span class="cancel-label">Cancel</span>' +
+          '</button>' +
+        '</td>' +
+      '</tr>';
+    }).join('');
+
+    el.innerHTML = '<table>' +
+      '<thead><tr><th>Agent &amp; Model</th><th>Task</th><th>Elapsed</th><th style="text-align: right;">Action</th></tr></thead>' +
+      '<tbody>' + rows + '</tbody>' +
+      '</table>';
+
+    // Hook cancel buttons (non-optimistic: button enters loading, UI updates upon backend response)
+    el.querySelectorAll('button.btn-cancel').forEach(function (btn) {
+      btn.addEventListener('click', function () {
+        var jobId = btn.dataset.job;
+        var label = btn.querySelector('.cancel-label');
+        btn.disabled = true;
+        if (label) label.textContent = 'Canceling…';
+
+        fetch('/api/jobs/' + encodeURIComponent(jobId) + '/cancel', { method: 'POST' })
+          .then(function (r) {
+            if (!r.ok) throw new Error('Failed with status ' + r.status);
+            return r.json();
+          })
+          .then(function () {
+            refresh();
+          })
+          .catch(function (err) {
+            btn.disabled = false;
+            if (label) label.textContent = 'Cancel failed';
+            setTimeout(function () { if (label) label.textContent = 'Cancel'; }, 3000);
+          });
+      });
+    });
+  }
+
+  // Render Job History: terminal jobs (succeeded/failed/canceled), newest
+  // first, capped — this is where errorKind (including 'billing'), variant
+  // and job_reply chains (parentJobId/sessionId) actually become visible;
+  // the Running Jobs panel above only ever shows queued/running jobs.
+  function renderJobHistory() {
+    var el = document.getElementById('job-history');
+    var history = state.jobs.filter(function (j) { return isTerminalStatus(j.status); }).slice(0, 30);
+
+    if (!history.length) {
+      el.innerHTML = '<div class="empty-state">' +
+        '<div class="empty-icon" aria-hidden="true"><svg width="32" height="32" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.5"><circle cx="12" cy="12" r="10"></circle><polyline points="12 6 12 12 16 14"></polyline></svg></div>' +
+        '<div class="empty-msg">No finished jobs yet</div>' +
+        '<div class="empty-hint">Succeeded, failed and canceled jobs will show up here</div>' +
+        '</div>';
+      return;
+    }
+
+    var rows = history.map(function (j) {
+      var displayModel = formatModel(j.model);
+      var replyHint = j.parentJobId
+        ? '<div class="subtext reply-hint" title="Reply to job ' + esc(j.parentJobId) + '">&#8617; reply of &hellip;' + esc(String(j.parentJobId).slice(-8)) + '</div>'
+        : '';
+      var shortSession = j.sessionId ? (String(j.sessionId).length > 14 ? String(j.sessionId).slice(0, 12) + '…' : j.sessionId) : '—';
+
+      return '<tr>' +
+        '<td>' +
+          '<div><strong>' + esc(j.agent) + '</strong></div>' +
+          '<div class="subtext tag-model" title="' + esc(j.model) + '">' + esc(displayModel) + '</div>' +
+          (j.variant ? '<span class="tag-variant" title="opencode reasoning effort">' + esc(j.variant) + '</span>' : '') +
+        '</td>' +
+        '<td>' +
+          '<div class="truncate" title="' + esc(j.title) + '">' + esc(j.title || 'Untitled job') + '</div>' +
+          replyHint +
+        '</td>' +
+        '<td>' + badge(j.status) + '</td>' +
+        '<td>' + errorBadge(j.errorKind, j.error) + '</td>' +
+        '<td><span class="mono">' + (j.tokens != null ? formatNumber(j.tokens) : '—') + '</span></td>' +
+        '<td><span class="mono" title="' + esc(j.sessionId || '') + '">' + esc(shortSession) + '</span></td>' +
+      '</tr>';
+    }).join('');
+
+    el.innerHTML = '<table>' +
+      '<thead><tr><th>Agent &amp; Model</th><th>Task</th><th>Status</th><th>Error</th><th>Tokens</th><th>Session</th></tr></thead>' +
+      '<tbody>' + rows + '</tbody>' +
+      '</table>';
+  }
+
+  // Render Claude Subagents
+  function renderSubagents() {
+    var el = document.getElementById('subagents');
+    var stops = state.subagents.filter(function (e) { return e.kind === 'subagent.stop'; }).slice(-20).reverse();
+
+    if (!stops.length) {
+      el.innerHTML = '<div class="empty-state">' +
+        '<div class="empty-icon" aria-hidden="true"><svg width="32" height="32" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.5"><rect x="3" y="11" width="18" height="10" rx="2"></rect><circle cx="12" cy="5" r="2"></circle><path d="M12 7v4"></path></svg></div>' +
+        '<div class="empty-msg">No subagent activity recorded</div>' +
+        '<div class="empty-hint">Subagent lifecycles will stream here when active</div>' +
+        '</div>';
+      return;
+    }
+
+    var rows = stops.map(function (e) {
+      var displayModel = formatModel(e.model);
+      return '<tr>' +
+        '<td><strong>' + esc(e.title || 'subagent') + '</strong></td>' +
+        '<td><span class="tag-model" title="' + esc(e.model) + '">' + esc(displayModel) + '</span></td>' +
+        '<td><div class="truncate" title="' + esc(e.summary || '') + '">' + esc(e.summary || '—') + '</div></td>' +
+        '<td><span class="mono" title="' + esc(e.tokens != null ? e.tokens : '') + '">' + (e.tokens != null ? formatNumber(e.tokens) : '—') + '</span></td>' +
+      '</tr>';
+    }).join('');
+
+    el.innerHTML = '<table>' +
+      '<thead><tr><th>Type</th><th>Model</th><th>Summary</th><th>Tokens</th></tr></thead>' +
+      '<tbody>' + rows + '</tbody>' +
+      '</table>';
+  }
+
+  // Filter Toolbar Rendering
+  function renderFilters() {
+    var sources = ['all', 'hub', 'claude-hook'];
+    var el = document.getElementById('filters');
+    el.innerHTML = sources.map(function (s) {
+      var isActive = state.timelineSource === s;
+      return '<button type="button" class="filter-chip ' + (isActive ? 'active' : '') + '" data-source="' + esc(s) + '" role="tab" aria-selected="' + isActive + '">' + esc(s) + '</button>';
+    }).join('');
+
+    el.querySelectorAll('.filter-chip').forEach(function (btn) {
+      btn.addEventListener('click', function () {
+        state.timelineSource = btn.dataset.source;
+        renderFilters();
+        renderTimeline();
+      });
+    });
+  }
+
+  // Render Timeline
+  function renderTimeline() {
+    var el = document.getElementById('timeline');
+    var q = state.timelineQuery.trim().toLowerCase();
+
+    var filtered = state.events.filter(function (e) {
+      var matchesSource = state.timelineSource === 'all' || e.source === state.timelineSource;
+      if (!matchesSource) return false;
+      if (!q) return true;
+      var haystack = [e.kind, e.agent, e.title, e.summary, e.source].join(' ').toLowerCase();
+      return haystack.indexOf(q) !== -1;
+    }).slice(-200).reverse();
+
+    if (!filtered.length) {
+      el.innerHTML = '<div class="empty-state">' +
+        '<div class="empty-icon" aria-hidden="true"><svg width="32" height="32" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.5"><circle cx="12" cy="12" r="10"></circle><line x1="12" y1="8" x2="12" y2="12"></line><line x1="12" y1="16" x2="12.01" y2="16"></line></svg></div>' +
+        '<div class="empty-msg">' + (q ? 'No matching events found' : 'No events in event log') + '</div>' +
+        '<div class="empty-hint">' + (q ? 'Try clearing your search query' : 'System and hook events will stream here live') + '</div>' +
+        '</div>';
+      return;
+    }
+
+    var rows = filtered.map(function (e) {
+      var ts = e.ts ? new Date(e.ts).toLocaleTimeString() : '—';
+      var detail = e.title || e.summary || '';
+      // job.failed/job.canceled events carry errorKind (e.g. 'billing',
+      // 'timeout') — surface it next to the event kind, not just buried in
+      // the free-text summary.
+      var kindCell = '<span class="tag-model">' + esc(e.kind || 'event') + '</span>' + (e.errorKind ? ' ' + errorBadge(e.errorKind) : '');
+      return '<tr>' +
+        '<td><span class="mono">' + esc(ts) + '</span></td>' +
+        '<td>' + kindCell + '</td>' +
+        '<td><strong>' + esc(e.agent || '—') + '</strong></td>' +
+        '<td><span title="' + esc(detail) + '">' + esc(detail) + '</span></td>' +
+      '</tr>';
+    }).join('');
+
+    el.innerHTML = '<table>' +
+      '<thead><tr><th>Time</th><th>Kind</th><th>Agent</th><th>Detail</th></tr></thead>' +
+      '<tbody>' + rows + '</tbody>' +
+      '</table>';
+  }
+
+  // Update SSE badge UI
+  function updateConnectionBadge(connState) {
+    state.connection = connState;
+    var badgeEl = document.getElementById('conn-badge');
+    var textEl = document.getElementById('conn-text');
+    badgeEl.className = 'conn-badge ' + connState;
+
+    if (connState === 'live') {
+      textEl.textContent = 'Live';
+    } else if (connState === 'reconnecting') {
+      textEl.textContent = 'Reconnecting…';
+    } else if (connState === 'offline') {
+      textEl.textContent = 'Offline';
+    } else {
+      textEl.textContent = 'Connecting…';
+    }
+  }
+
+  // Master Render
+  function renderAll() {
+    renderMetrics();
+    renderAgents();
+    renderJobs();
+    renderJobHistory();
+    renderSubagents();
+    renderFilters();
+    renderTimeline();
+  }
+
+  // Pull state from /api/state
+  function refresh(isManual) {
+    var icon = document.getElementById('refresh-icon');
+    if (isManual && icon) icon.classList.add('spinning');
+
+    fetch('/api/state')
+      .then(function (res) {
+        if (!res.ok) throw new Error('HTTP ' + res.status);
+        return res.json();
+      })
+      .then(function (data) {
+        state.agents = Array.isArray(data.agents) ? data.agents : [];
+        state.jobs = Array.isArray(data.jobs) ? data.jobs : [];
+        state.subagents = Array.isArray(data.subagents) ? data.subagents : [];
+        state.events = Array.isArray(data.events) ? data.events : [];
+        renderAll();
+      })
+      .catch(function (err) {
+        console.error('[agent-hub] state refresh failed:', err);
+      })
+      .finally(function () {
+        if (isManual && icon) {
+          setTimeout(function () { icon.classList.remove('spinning'); }, 500);
+        }
+      });
+  }
+
+  // Connect SSE with robust connection tracking
+  function connectSSE() {
+    try {
+      var es = new EventSource('/events');
+
+      es.onopen = function () {
+        updateConnectionBadge('live');
+      };
+
+      es.onerror = function () {
+        if (es.readyState === EventSource.CONNECTING) {
+          updateConnectionBadge('reconnecting');
+        } else {
+          updateConnectionBadge('offline');
+        }
+      };
+
+      es.onmessage = function (ev) {
+        try {
+          var event = JSON.parse(ev.data);
+          state.events.push(event);
+          if (state.events.length > 200) state.events.shift();
+          if (event.source === 'claude-hook') state.subagents.push(event);
+          refresh(false);
+        } catch (e) {
+          // ignore heartbeats or malformed packets
+        }
+      };
+    } catch (e) {
+      updateConnectionBadge('offline');
+    }
+  }
+
+  // Event Listeners setup
+  function setupEvents() {
+    // Refresh button
+    var refreshBtn = document.getElementById('btn-refresh');
+    refreshBtn.addEventListener('click', function () { refresh(true); });
+
+    // Keyboard shortcut 'r' for refresh
+    window.addEventListener('keydown', function (e) {
+      if (e.key === 'r' && !e.ctrlKey && !e.metaKey && document.activeElement.tagName !== 'INPUT') {
+        refresh(true);
+      }
+    });
+
+    // Search input (instant, no debounce needed)
+    var searchInput = document.getElementById('timeline-search');
+    var clearBtn = document.getElementById('btn-search-clear');
+
+    searchInput.addEventListener('input', function () {
+      state.timelineQuery = searchInput.value;
+      if (state.timelineQuery) {
+        clearBtn.classList.add('visible');
+      } else {
+        clearBtn.classList.remove('visible');
+      }
+      renderTimeline();
+    });
+
+    clearBtn.addEventListener('click', function () {
+      searchInput.value = '';
+      state.timelineQuery = '';
+      clearBtn.classList.remove('visible');
+      renderTimeline();
+      searchInput.focus();
+    });
+  }
+
+  // Initialization
+  setupEvents();
+  refresh(false);
+  connectSSE();
+
+  // Periodic polling fallback & live 1s elapsed timer
+  setInterval(function () { refresh(false); }, 15000);
+  setInterval(updateElapsedTimes, 1000);
+})();
+</script>
+</body>
+</html>

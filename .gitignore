@@ -1,0 +1,12 @@
+node_modules/
+.opencode/
+.codegraph/
+.tgrep/
+*.tmp
+.DS_Store
+# runtime state lives in AGENT_HUB_HOME (~/.local/share/agent-hub), never in the repo
+runs/
+events.jsonl
+preflight-cache.json
+discovery.json
+overrides.json
