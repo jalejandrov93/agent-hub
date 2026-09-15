@@ -11,7 +11,7 @@ own subagents.
 
 **Requirements**
 
-- Node.js >= 20.6.0
+- Node.js >= 20.19.0
 - At least one of `agy`, `opencode`, or `copilot` on `PATH`, already
   authenticated with that CLI's own login flow. agent-hub does not manage
   credentials — it only spawns the CLI you already use.
@@ -21,23 +21,31 @@ own subagents.
 ```
 src/
   index.mjs          MCP bootstrap (stdio) + --selftest/--version
-  config.mjs         paths, TTLs, model registry, timeouts, circuit breaker config
+  config.mjs         paths, TTLs, model registry, timeouts, adaptive-timeout and breaker constants
+  schemas.mjs        shared zod contracts (tool outputSchema + dashboard types); browser-safe
   eventlog.mjs        appendEvent() (one atomic append per line) / readTail()
-  fsutil.mjs           writeJsonAtomic() (tmp + rename) for state shared by two processes
+  fsutil.mjs           writeJsonAtomic()/updateJsonLocked() (lock + tmp + rename) for state shared by two processes
   jobstore.mjs        runs/<jobId>/{prompt.txt,stdout.log,response.txt,result.json}
   process.mjs         spawn argv, SIGTERM->SIGKILL ladder, runCommand()
-  jobrunner.mjs        ties process+jobstore+worktree+adapters into startJob/cancelJob
+  jobrunner.mjs        ties process+jobstore+worktree+timeouts+learnings+readguard into startJob/cancelJob
   preflight.mjs        L0-L3 ladder, TTL cache, circuit breaker
   preflight-cli.mjs    `agent-hub preflight` table printer
   discovery.mjs        CLI discovery (binPath/version/models), startup + on-demand
   overrides.mjs        manual per-pair hold / breaker-reset overrides
   startup.mjs          non-blocking startup discovery scheduler
-  router.mjs           delegation map + availability filtering
+  router.mjs           delegation map + availability filtering, applies accepted proposals
   worktree.mjs         write-mode gate (secondary git worktree) + single-writer lock
+  metrics.mjs          job-history aggregation (success rate, p50/p95, tokens) per agent/model/mode/taskType
+  timeouts.mjs         effective timeout: explicit > adaptive (p95 x 1.5) > static default
+  proposals.mjs        Wilson-bound chain-reorder proposals, human-accepted before they apply
+  learnings.mjs        curated pending/approved gotchas, sanitized and injected into root turns
+  readguard.mjs        git before/after snapshot for read jobs -> read_mode_violation
   hook.mjs             SubagentStart/SubagentStop -> events
-  dashboard.mjs/.html  node:http dashboard, SSE /events, /api/state, /api/config, job cancel
+  dashboard.mjs        node:http dashboard: serves dashboard/dist, SSE /events, JSON API
   adapters/{base,agy,opencode,copilot,index}.mjs
-  tools/{agents,jobs}.mjs
+  tools/{agents,jobs,insights,learnings}.mjs
+dashboard/             React 19 + TS + Vite + Tailwind v4 + shadcn/Base UI workspace, builds dist/
+scripts/               build-dashboard.mjs — the `prepare` hook (never fails npm install)
 bin/agent-hub          dispatch: mcp | hook | dashboard | preflight | selftest
 skills/                multi-agent-orchestrator and agy-delegate skills (see Install)
 test/                  node --test; fixtures/ has real+synthetic CLI output;
@@ -47,7 +55,8 @@ systemd/agent-hub-dashboard.service   NOT installed — copy it yourself if want
 
 Runtime state (never committed) lives in `AGENT_HUB_HOME`, default
 `~/.local/share/agent-hub/`: `events.jsonl`, `preflight-cache.json`,
-`discovery.json`, `overrides.json`, `runs/<jobId>/`, `runs/.locks/`.
+`discovery.json`, `overrides.json`, `proposals.json`, `learnings.json`,
+`runs/<jobId>/`, `runs/.locks/`.
 
 ## Install
 
@@ -58,6 +67,15 @@ npm install
 npm test
 node bin/agent-hub selftest
 ```
+
+`npm install` also builds the dashboard workspace through the `prepare`
+script: `scripts/build-dashboard.mjs` runs `npm run -w dashboard build` and
+always exits 0. The MCP server does not need the bundle, so a failed build
+only prints a hint and never fails the install; run `npm run build` to rebuild
+it on demand. When `dashboard/dist/` is missing, the dashboard server answers
+`/` with a 503 page naming the repo path and the `npm run build` command.
+Rebuilds are picked up without restarting the dashboard process (it re-reads
+the built `index.html` when its mtime changes).
 
 ### Register the MCP server
 
@@ -226,18 +244,94 @@ per-cwd single-writer lock — this keeps an agent CLI from editing the same
 working tree Claude Code (or another job) is using, and keeps two write jobs
 from racing on the same worktree.
 
+### Metrics and adaptive timeouts
+
+`computeMetrics()` reads the job records under `runs/`, drops non-terminal jobs
+and the operational `errorKind`s (`locked`, `worktree_denied`, `orphaned`,
+`canceled_by_user`), and aggregates the rest per
+`(agent, model, mode, taskType)`: sample count, succeeded/failed/canceled,
+success rate, p50/p95 latency over **succeeded** runs, an `errorKind`
+histogram and token totals. It backs the `agents_metrics` tool and
+`GET /api/metrics`.
+
+`resolveEffectiveTimeoutS()` picks the timeout for a job: an explicit
+`timeoutS` always wins (`source: 'explicit'`). Otherwise the static default
+from `config.mjs` is **raised, never lowered** — to `ceil(p95s x 1.5)`, capped
+at 3600 s — once a row has at least `METRICS_MIN_SAMPLES` (10) samples; thin
+`taskType` data falls back to the general (`taskType: null`) row. The job
+record keeps the value used and its `timeoutSource` (`adaptive` or `default`).
+
+### Routing proposals
+
+`refreshProposals()` compares a task type's current primary CLI candidate
+against the other CLI candidates in its chain. It proposes promoting the
+candidate with the strictly better 95% Wilson score lower bound — its lower
+bound beats the primary's upper bound — once both have at least 10 samples.
+New proposals stay `pending`: nothing changes until a human accepts one at
+`#/approvals?tab=proposals`. Accepting one supersedes any other accepted
+proposal for the same task type, and a stored proposal whose chain no longer
+matches the delegation map (its chain hash changed) is marked `superseded`.
+After a rejection, no new proposal for that task type for 7 days. `route()`
+applies an accepted proposal to the chain and returns it as `appliedProposal`.
+
+### Learnings
+
+`learning_propose` records a short gotcha about an agent, model or task type as
+`pending`; a human approves or rejects it in the dashboard. Approved learnings
+that match a job are prepended, most specific first, to the prompt of a
+**root** turn only — at most 3, each up to 300 characters — as a
+`<hub-learnings>` advisory block; a reply turn continues a conversation that
+already has it. Text is sanitized on write and again on every read (control
+characters, backticks and `<hub-learnings>` tags stripped, whitespace
+collapsed) before it can reach another model's prompt.
+
+### Read-mode guard
+
+Before a `read`-mode job starts, the hub snapshots the git-visible state of
+`cwd` (`git status --porcelain=v1 -z` plus `HEAD`) and re-snapshots it when the
+job reaches a terminal state. If the tree changed, a job the CLI reported as
+succeeded is failed with `errorKind: read_mode_violation` naming the changed
+paths; the response text and tokens are still kept. The guard exists because
+read mode is not actually enforced by the CLIs: verified, `agy --mode plan`
+writes files with or without `--dangerously-skip-permissions` (opencode's plan
+agent did respect read mode in testing). A `cwd` outside a git work tree
+produces no snapshot and is reported unverifiable rather than clean, and
+because the guard is a tree diff it also flags changes other processes make in
+the same `cwd` while the job runs.
+
 ## MCP tools
 
 | Tool | Input | Notes |
 |---|---|---|
 | `agents_status` | `{refresh?: boolean}` | L0-L2 for every pair in the delegation map. Never pings. Rows include `binPath`/`cliVersion` from `discovery.json`. |
-| `route` | `{taskType: enum, mode?: 'read'\|'write', includeCatalog?: boolean}` | Skips unavailable/breaker-open/held pairs; returns `{primary, fallbacks, skipped, discovery, reason}`. `discovery` holds `{binPath, version, modelCount, checkedAt, error}` per CLI; `includeCatalog: true` returns the full model catalog instead. |
-| `delegate` | `{agent, model, task, cwd, mode?, timeoutS?, title?, variant?}` | Returns `{jobId, status:'queued'}` immediately. `variant` is opencode's reasoning effort (minimal/low/medium/high/max); ignored by agy/copilot. |
+| `route` | `{taskType: enum, mode?: 'read'\|'write', includeCatalog?: boolean}` | Skips unavailable/breaker-open/held pairs; returns `{primary, fallbacks, skipped, discovery, reason, appliedProposal}`. `discovery` holds `{binPath, version, modelCount, checkedAt, error}` per CLI; `includeCatalog: true` returns the full model catalog instead. `appliedProposal` names the accepted proposal whose order was applied, or `null`. |
+| `delegate` | `{agent, model, task, cwd, mode?, timeoutS?, title?, variant?, taskType?}` | Returns `{jobId, status:'queued'}` immediately. `variant` is opencode's reasoning effort (minimal/low/medium/high/max); ignored by agy/copilot. Pass the same `taskType` you gave `route` so metrics, adaptive timeouts and learnings apply. |
 | `job_wait` | `{jobId, timeoutS?<=60}` | Polls until terminal or timeout. |
 | `job_status` | `{jobId}` | Current status, no waiting. |
-| `job_result` | `{jobId, maxLines?}` | Head of the response + `fullPath`, `truncated`. |
+| `job_result` | `{jobId, maxLines?, tailLines?}` | Head of the response (default 20 lines) plus extra `tailLines` from the end (default 10, never repeating a head line) and `fullPath`, `truncated`, `tailTruncated`. |
 | `job_cancel` | `{jobId}` | Kills the whole process group; marks `canceled`. |
-| `job_reply` | `{jobId, message, mode?, timeoutS?, title?}` | Starts a new turn in a **terminal** agy/opencode job's conversation, using its recorded `sessionId`. `mode` defaults to the parent job's mode; switching to `write` goes through the same worktree gate + lock as `delegate`. copilot has no session resume and returns `{status:'failed', errorKind:'unsupported'}` without spawning anything. A non-terminal parent gets `errorKind:'not_terminal'`; a parent with no `sessionId` gets `errorKind:'no_session'`. |
+| `job_reply` | `{jobId, message, mode?, timeoutS?, title?, taskType?}` | Starts a new turn in a **terminal** agy/opencode job's conversation, using its recorded `sessionId`. `mode` and `taskType` default to the parent job's; switching to `write` goes through the same worktree gate + lock as `delegate`. copilot has no session resume and returns `{status:'failed', errorKind:'unsupported'}` without spawning anything. A non-terminal parent gets `errorKind:'not_terminal'`; a parent with no `sessionId` gets `errorKind:'no_session'`. Returns `turnDepth` and, from 5 turns deep, a `warning` to start a fresh `delegate` with a short summary. |
+| `agents_metrics` | `{groupBy?: ('agent'\|'model'\|'mode'\|'taskType')[]}` | Success rate, p50/p95 latency, error kinds and tokens per group (default: all four dimensions) from job history. |
+| `learning_propose` | `{text, agent?, model?, taskType?, sourceJobId?}` | Records a gotcha as **pending**; a human must approve it in the dashboard before it is injected into a prompt. Returns `{learning, note}`. |
+
+Every tool also declares a zod `outputSchema` and returns the same payload as
+`structuredContent` for clients that want typed output (the text content stays
+JSON for compatibility).
+
+### Resources
+
+| URI | Contents |
+|---|---|
+| `agent-hub://jobs/{jobId}` | A job's full `result.json` record (the template also lists the 20 most recent jobs) |
+| `agent-hub://jobs/{jobId}/response` | A job's `response.txt` as plain text, or empty until the CLI produces text |
+
+### Prompts
+
+| Prompt | Args | Purpose |
+|---|---|---|
+| `recon` | `{goal, cwd, files?}` | Delegate a bounded, read-only recon task off Claude quota |
+| `adversarial-review` | `{goal, cwd, files?}` | Get a second, independently-hosted opinion in parallel with a third CLI |
+| `guided-write` | `{goal, cwd, files?}` | Plan → review → execute → delivery-review a non-trivial write, staying in one session via `job_reply` |
 
 ## Dashboard
 
@@ -252,12 +346,14 @@ routes, so a link can open the exact filtered view:
 | Group | Route | Shows |
 |---|---|---|
 | Monitor | `#/overview` | What needs attention: unhealthy agents, open breakers, failures in the last 24h, unresolved CLIs, recent activity |
-| Monitor | `#/agents` | Agents grouped by CLI; `?filter=unhealthy\|held\|breaker`, search, row menu, detail panel |
+| Monitor | `#/agents?filter=all\|unhealthy\|held\|breaker&q=` | Agents grouped by CLI; filter, free-text search, row menu, detail panel |
 | Monitor | `#/jobs` | Running and queued jobs with live elapsed time and Cancel |
-| Monitor | `#/history` | Terminal jobs; `?status=failed\|canceled\|succeeded`, agent filter, error detail, reply chains |
+| Monitor | `#/history?status=&agent=&q=` | Terminal jobs; `status=failed\|succeeded\|canceled`, agent filter, free-text search, error detail, reply chains |
+| Monitor | `#/metrics?taskType=` | Success-rate chart and per-pair table; `taskType` filters the rows |
 | Activity | `#/subagents` | Claude Code subagent runs recorded by the hooks |
-| Activity | `#/timeline` | Last 200 events over SSE, filtered by source and kind |
-| System | `#/config` | Delegation map, process PATH and CLIs, breaker and TTL, overrides, paths; `?section=` selects a tab |
+| Activity | `#/timeline?source=&q=` | Last 200 events over SSE, filtered by source and free text |
+| System | `#/approvals?tab=proposals\|learnings` | Routing proposals and learnings awaiting a human accept/reject |
+| System | `#/config?section=delegation\|process\|breaker\|overrides\|paths` | Delegation map, process PATH and CLIs, breaker and TTL, overrides, paths |
 
 Sidebar badges show unhealthy agents, running jobs, failures in the last 24h,
 unseen timeline events and unresolved CLIs. Agent row actions are Revalidate,
@@ -267,18 +363,29 @@ Reset breaker and Cancel job ask for confirmation first. The theme follows the
 system by default and can be set to light or dark. `preflight` events
 (`phase: discovery|agent|ping`) stream over the same SSE feed as job events.
 
-The UI is plain ES modules under `src/dashboard/` (no build step):
-`index.html`, `styles.css`, `app.js`, `router.js`, `store.js`, `api.js`,
-`contracts.js` (the shared typedefs and module signatures), `ui/*.js` and one
-module per view in `views/`.
+The UI is a React 19 + TypeScript + Vite + Tailwind v4 app in the `dashboard/`
+workspace, using shadcn/ui components on Base UI, with TanStack Router (hash
+history) and TanStack Query. It is built to `dashboard/dist/` and served
+read-only from there — see Install for the build step.
 
 | Route | Method | Body | Notes |
 |---|---|---|---|
-| `/` and dashboard assets | GET | — | App shell and its CSS/JS modules, served from an exact-match allowlist with `Content-Security-Policy: default-src 'self'` |
+| `/` and dashboard assets | GET | — | Built app (`index.html` + hashed assets), served from an exact-match allowlist; 503 with a build hint when `dashboard/dist/` is missing |
 | `/api/state` | GET | — | `{agents, jobs, subagents, events}` |
-| `/api/config` | GET | — | `{delegationMap, discovery, timeouts, breaker, ttlMs, agentHubHome, writeAllowlist, breakerState, overrides}` |
+| `/api/config` | GET | — | `{delegationMap, discovery, timeouts, breaker, ttlMs, agentHubHome, writeAllowlist, breakerState, overrides, process}` |
+| `/api/metrics` | GET | — | Same rows as `agents_metrics`; `?groupBy=agent,model,mode,taskType` |
+| `/api/proposals` | GET | — | `{proposals}` |
+| `/api/proposals/refresh` | POST | — | Recompute proposals from current metrics and store new pending ones |
+| `/api/proposals/:id/accept` | POST | — | Accept a pending proposal (supersedes the previous accepted one for that task type) |
+| `/api/proposals/:id/reject` | POST | — | Reject a pending proposal (7-day cooldown before the same task type is proposed again) |
+| `/api/learnings` | GET | — | `{learnings}`; `?status=pending\|approved\|rejected` |
+| `/api/learnings` | POST | `{text, agent?, model?, taskType?, sourceJobId?}` | Creates a **pending** learning (201) |
+| `/api/learnings/:id/approve` | POST | — | Approves a learning so matching root turns get it |
+| `/api/learnings/:id/reject` | POST | — | Rejects a learning |
+| `/api/learnings/:id` | DELETE | — | Deletes a learning |
 | `/events` | GET | — | SSE stream of `events.jsonl` |
 | `/api/jobs/:id/cancel` | POST | — | Cancels a running job |
+| `/api/jobs/:id/result` | GET | — | Same payload as `job_result`; `?maxLines=&tailLines=` |
 | `/api/agents/refresh` | POST | `{agent?, model?, ping?}` | No body = all pairs, L0-L2. `ping:true` runs L3 for exactly one agent+model. |
 | `/api/discovery/refresh` | POST | — | Forces a fresh discovery pass, ignoring the TTL |
 | `/api/overrides` | POST | `{agent, model, hold?, breakerReset?:true}` | Sets a manual hold and/or clears breaker history |
@@ -295,9 +402,12 @@ browser, because that browser connects from loopback too:
   CORS preflight the server never grants (415 otherwise). When an `Origin`
   header is present it must be the dashboard's own loopback origin (403).
 - Request bodies are capped at 64 KiB (413) and must be valid JSON (400).
-- Pages and assets send a Content-Security-Policy that allows only same-origin
-  scripts, styles and connections, with no inline script or style, plus
-  `X-Content-Type-Options: nosniff`.
+- Pages and assets send `Content-Security-Policy: default-src 'self';
+  script-src 'self'; style-src 'self'; connect-src 'self'; img-src 'self'
+  data:` with no inline script or style, plus `X-Content-Type-Options:
+  nosniff`. `style-src 'self'` is still enforced: the app runs Base UI with
+  `CSPProvider disableStyleElements`, and chart colors come from CSS variables
+  instead of injected styles.
 
 There is no authentication: any local process can call the API. Do not
 expose the port beyond loopback (no reverse proxy, no port-forward to a
@@ -318,6 +428,8 @@ shared network).
 | `preflight-cache.json` | L0-L2 results per agent:model pair, TTL-gated |
 | `discovery.json` | CLI binPath/version/model catalog per agent, from startup + on-demand discovery |
 | `overrides.json` | Manual per-pair `hold`/`breakerReset` entries |
+| `proposals.json` | Routing proposals (`pending`/`accepted`/`rejected`/`superseded`) with their evidence |
+| `learnings.json` | Curated agent/model/taskType learnings (`pending`/`approved`/`rejected`) |
 | `runs/<jobId>/` | `prompt.txt`, `stdout.log`, `response.txt`, `result.json` per job |
 | `runs/.locks/` | Per-cwd single-writer locks for write-mode jobs |
 
@@ -339,8 +451,10 @@ here, read and writable by hand, not only through the dashboard).
 ## Testing
 
 ```bash
-npm test                       # fast, hermetic, no real CLI calls
-AGENT_HUB_LIVE=1 npm run test:live   # one real PONG per adapter — uses real quota
+npm test                              # server, node --test; fast, hermetic, no real CLI calls
+npm run -w dashboard test             # dashboard, Vitest + Testing Library
+npm run -w dashboard typecheck        # dashboard, tsc --noEmit
+AGENT_HUB_LIVE=1 npm run test:live    # one real PONG per adapter — uses real quota
 ```
 
 See `test/fixtures/README.md` for exactly which adapter fixtures are real CLI
