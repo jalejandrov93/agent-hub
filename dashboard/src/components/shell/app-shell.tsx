@@ -38,7 +38,7 @@ export function AppShell() {
   return (
     <SidebarProvider>
       <AppSidebar />
-      <SidebarInset>
+      <SidebarInset className="min-w-0">
         <Topbar title={groupLabelFor(routeName) || ROUTE_LABELS[routeName]} />
         <main id="main-content" className="flex flex-1 flex-col gap-4 overflow-auto p-4">
           <Outlet />
