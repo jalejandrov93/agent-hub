@@ -6,11 +6,12 @@ description: >
   Claude subagent tiers (haiku/sonnet/opus). Trigger: multi-agent, delegate, orchestrate,
   parallelize, agent team, agent swarm, second opinion, save tokens, don't burn Claude, "agy",
   "antigravity", "gemini flash", "opencode", "muse", "copilot", free model, which agent,
-  agent dashboard, adversarial review, distribute this task, use all agents.
+  agent dashboard, adversarial review, distribute this task, use all agents, revalidate agents,
+  agent-hub dashboard.
 license: Apache-2.0
 metadata:
-  author: alejandro
-  version: "2.0"
+  author: jalejandrov93
+  version: "2.1"
 ---
 
 ## When to use / not
@@ -33,11 +34,20 @@ agents_status → route → delegate → job_wait / job_status → job_result �
 
 1. `agents_status({refresh?})` — L0-L2 preflight (no ping) for every agy/opencode/copilot
    pair in the delegation map. Returns `ready|degraded|unavailable`, `reason`, `latencyMs`,
-   `quotaSignal`, `dataPolicy` badge. Call once per session or when routing looks stale;
-   `refresh:true` bypasses the 15-min cache.
+   `quotaSignal`, `dataPolicy` badge, and `binPath`/`cliVersion` (null until a discovery row
+   exists for that agent). The MCP server fires CLI discovery (L0 `--version` + L1 model list —
+   never an L3 ping) in the background at startup, persisted to `discovery.json` under
+   `AGENT_HUB_HOME` with a 15-min TTL, so the first `agents_status` call in a session is usually
+   already warm. `AGENT_HUB_DISABLE_STARTUP_DISCOVERY=1` opts out (used by the server's own test
+   suite). Call `agents_status` once per session or when routing looks stale; `refresh:true`
+   bypasses the 15-min cache.
 2. `route({taskType, mode?})` — `taskType` is one of the keys in the Delegation map below;
-   `mode` is `'read'|'write'`. Returns `{primary:{agent,model,mode}, fallbacks[], reason}`,
-   already filtered for cached-unavailable and open-breaker pairs. `{agent:'claude', model:
+   `mode` is `'read'|'write'`. Returns `{primary:{agent,model,mode}, fallbacks[], skipped[],
+   discovery, reason}` — route stays advisory, it never blocks you, only orders/filters
+   candidates. `skipped` lists every filtered-out chain candidate as `{agent, model, reason}`:
+   `held` (a human put this pair on hold from the dashboard — don't silently route around it,
+   tell the user), `cli_not_found` (the CLI isn't installed or isn't on PATH — this needs a
+   human, not a retry), `cached_unavailable`, or `breaker_open`. `{agent:'claude', model:
    'haiku'|'sonnet'|'opus'}` in the result means run it yourself via the Agent tool — never
    pass it to `delegate`.
 3. `delegate({agent, model, task, cwd, mode?, timeoutS?, title?, variant?})` — `agent` is
@@ -138,9 +148,11 @@ Unknown `taskType` throws — call `route` with one of the exact strings above.
   but Meta trains on prompts (user-accepted, badge stays visible). Paid
   `deepseek/deepseek-v4-flash` for write-mode mechanical edits; `opencode-go/*` is capped
   ($12/5h, $30/wk, $60/mo, no usage API). Full detail: `references/agents/opencode.md`.
-- **copilot**: on this account only `--model auto` is reliable — explicit ids are rejected
-  with `model_unavailable`. `auto` covers triage, second-opinion, github-context, and
-  write-mode mechanical edits. Full detail: `references/agents/copilot.md`.
+- **copilot**: `--model` availability is subscription-specific — an explicit id can be rejected
+  with `model_unavailable` even when it's listed in `help config`; treat any explicit id as
+  unverified until an L3 ping confirms it, and default to `auto`, which is always accepted.
+  `auto` covers triage, second-opinion, github-context, and write-mode mechanical edits. Full
+  detail (incl. one verified setup): `references/agents/copilot.md`.
 - **Claude subagents** (haiku/sonnet/opus): never called via `delegate` — run through the
   Agent tool. Full detail: `references/agents/claude-subagents.md`.
 
@@ -189,15 +201,17 @@ task's header states it explicitly.
 `config.mjs`'s `WRITE_ALLOWLIST`, empty by default) — the hub refuses writes into the primary
 checkout (`errorKind:'worktree_denied'`) and serializes writers per cwd with a lock file
 (`errorKind:'locked'` if held). The file-pattern denylist is policy, not enforced by the hub —
-apply it yourself before delegating a write:
+define your repo's own never-touch list and apply it yourself before delegating a write:
+generated/derived files, migration tooling, config that changes build/deploy output, and
+anything strict TDD reserves for the user to write (tests) belong on that list by default.
 
-Never allow a delegated write to touch: `prisma/` (`migrate dev` is banned in this repo),
-anything that produces a URL (base-path rule), `src/server/openapi/**` (generated), tests
-(strict TDD — the user writes them), `next.config.ts`, `package.json`, `turbo.json`.
+> Example: author's setup (verified 2026-09), a Next.js monorepo — `prisma/` (`migrate dev`
+> banned), anything that produces a URL (a repo-specific base-path rule), `src/server/openapi/**`
+> (generated), tests (strict TDD), `next.config.ts`, `package.json`, `turbo.json`.
 
-After any delegated write, in this order: `git diff` (review it yourself), `pnpm type-check`,
-and any project-specific check your repo requires (codegen, base-path, bundle checks — set
-`AGENT_HUB_POST_EDIT_CHECK` so `agy-run.sh` prints it after a write).
+After any delegated write, in this order: `git diff` (review it yourself), your repo's own
+type-check/lint/test commands, and any other project-specific check it requires (codegen,
+bundle checks — set `AGENT_HUB_POST_EDIT_CHECK` so `agy-run.sh` prints it after a write).
 
 ## Parallel work: one worktree per block, serialize within it
 
@@ -223,6 +237,10 @@ breaking each other's tests:
   reconcile by hand.
 
 ## Failure handling by `errorKind`
+
+This table is for a `delegate`/`job_*` call that already ran. A candidate `route` filtered out
+before you ever called `delegate` shows up in `skipped` instead (see loop step 2) — `held` and
+`cli_not_found` there both mean "needs a human," not "retry."
 
 | errorKind | Meaning | Action |
 |---|---|---|
@@ -266,11 +284,26 @@ available):
 ## Dashboard
 
 `agent-hub-dashboard` (systemd `--user` unit) serves `http://127.0.0.1:7777`: Agents (health,
-quota, dataPolicy, and the `reason` behind a degraded/unavailable status), Running jobs (cancel
-button), Job history (terminal jobs — status, `errorKind` badge, `variant`, and a "reply of ..."
-hint for `job_reply` chains), Claude subagents, Timeline (last 200 events, with an `errorKind`
-badge on `job.failed`/`job.canceled` rows). Point the user there instead of re-describing job
-state in chat when they ask "what's running" or "what failed."
+quota, dataPolicy, binPath/cliVersion, and the `reason` behind a degraded/unavailable status —
+per-row **Revalidate**, **Ping (L3)** (shown only when degraded/unavailable), **Hold**/
+**Release**, **Reset breaker**; header **Revalidate all** / **Rediscover CLIs**), Running jobs
+(cancel button), Job history (terminal jobs — status, `errorKind` badge, `variant`, and a "reply
+of ..." hint for `job_reply` chains), Claude subagents, Timeline (last 200 events, with an
+`errorKind` badge on `job.failed`/`job.canceled` rows), and a read-only **Config** panel
+(delegation map, timeouts, breaker settings, TTL, write allowlist, current overrides — changed
+only through the Agents panel's buttons, never edited directly there). HTTP surface: `GET
+/api/config`, `POST /api/agents/refresh {agent?,model?,ping?}`, `POST /api/discovery/refresh`,
+`POST /api/overrides`, `DELETE /api/overrides/:agent/:model`.
+
+`overrides.json` (`{ "agent:model": {hold?, breakerReset?, reason?, setAt} }`, under
+`AGENT_HUB_HOME`) is how a human holds a pair or resets its breaker via the dashboard's
+Hold/Release/Reset breaker buttons — agents must never edit this file themselves, only through
+those actions or the HTTP endpoints above.
+
+Point the user to the dashboard to revalidate a pair, hold/release it, or reset its breaker,
+rather than re-running a long preflight in chat; `agents_status({refresh:true})` is the
+in-session equivalent when the user isn't looking at the dashboard. Point them there too instead
+of re-describing job state in chat when they ask "what's running" or "what failed."
 
 ## Security
 
@@ -283,5 +316,7 @@ outside Claude Code's sandboxing.
 - Per-agent invocation, models, health signals, measured numbers, gotchas:
   `references/agents/agy.md`, `references/agents/opencode.md`,
   `references/agents/copilot.md`, `references/agents/claude-subagents.md`.
-- MCP server source of truth: `~/.claude/mcp-servers/agent-hub/README.md`,
-  `src/router.mjs`, `src/config.mjs`.
+- MCP server source of truth lives in this same repo, relative to this skill:
+  `../../README.md`, `../../src/router.mjs`, `../../src/config.mjs`, `../../src/discovery.mjs`,
+  `../../src/dashboard.mjs`. A default install puts the repo at
+  `~/.claude/mcp-servers/agent-hub/`.

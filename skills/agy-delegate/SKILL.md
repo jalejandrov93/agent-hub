@@ -8,8 +8,8 @@ description: >
   "use my antigravity quota", "don't burn Claude", "cheap model", "second opinion".
 license: Apache-2.0
 metadata:
-  author: alejandro
-  version: "2.0"
+  author: jalejandrov93
+  version: "2.1"
 ---
 
 ## Use `agent-hub`, not this skill directly
@@ -35,12 +35,16 @@ If `agent-hub` is not registered in this session, use the wrapper script directl
 
 Aliases resolve to `gemini-3.8-flash-{low,medium,high}`, `gemini-3.1-pro-high` (`pro`),
 `claude-sonnet-4-6` (`sonnet`), `claude-opus-4-6-thinking` (`opus`), `gpt-oss-120b-medium`
-(`oss`) — verified against `agy models` (agy 1.2.1, 2026-09-11). It writes the full response to
-the scratchpad and prints only a header (`model · seconds · tokens · lines · mode`), the file
-path, and the first `--max-lines` lines; injects `<cwd>/GEMINI.md` (if <8KB) as project rules
-since `agy -p` does not auto-load it; and always passes `--dangerously-skip-permissions` +
-`--add-dir` (required for the hosted Claude models). Never call `agy` directly — the wrapper's
-output contract is the difference between 108s/~27k tokens and 4s/233 tokens.
+(`oss`) — check them against your own `agy models` output, since agy's catalog moves over time.
+It writes the full response to the scratchpad and prints only a header (`model · seconds ·
+tokens · lines · mode`), the file path, and the first `--max-lines` lines; injects
+`<cwd>/GEMINI.md` (if <8KB) as project rules since `agy -p` does not auto-load it; and always
+passes `--dangerously-skip-permissions` + `--add-dir` (required for the hosted Claude models).
+Never call `agy` directly — the wrapper's output contract is the difference between 108s/~27k
+tokens and 4s/233 tokens.
+
+> Author's setup (verified 2026-09-11 against agy 1.2.1's `agy models` output): the aliases
+> above matched these exact ids.
 
 ## Resources
 

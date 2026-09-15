@@ -20,6 +20,11 @@
 #   --cwd <path>        Working directory for agy (default: current)
 #   --raw               Print the full response to stdout instead of the head
 #
+# Environment:
+#   AGENT_HUB_POST_EDIT_CHECK   Command printed as a post-write reminder (your repo's
+#                               type-check/lint/test/codegen command). Cosmetic only:
+#                               printed verbatim after a --write run, never executed.
+#
 # Exit codes: 0 ok · 1 usage error · 2 agy failure/CANCELED · 3 timeout
 
 set -uo pipefail
@@ -45,7 +50,7 @@ while [[ $# -gt 0 ]]; do
     --cwd)       RUN_CWD="$2";     shift 2 ;;
     --raw)       RAW=true;         shift ;;
     --no-rules)  INJECT_RULES=false; shift ;;
-    -h|--help)   sed -n '2,25p' "$0"; exit 0 ;;
+    -h|--help)   sed -n '2,28p' "$0"; exit 0 ;;
     *) echo "agy-run: unknown argument: $1" >&2; exit 1 ;;
   esac
 done

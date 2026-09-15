@@ -21,9 +21,10 @@ delegating.
 
 ## Model selection
 
-Verified against `agy models` on 2026-09-11 (agy 1.2.1; supersedes the 2026-09-01 reading —
-the CLI moved from `gemini-3.7-flash-*` to `gemini-3.8-flash-*`, and `agy-run.sh`'s aliases
-were updated to match).
+> Author's setup (verified 2026-09-11, agy 1.2.1): the aliases below matched `agy models`'s
+> output, superseding a 2026-09-01 reading — the CLI had moved from `gemini-3.7-flash-*` to
+> `gemini-3.8-flash-*`, and `agy-run.sh`'s aliases were updated to match. Re-verify against your
+> own `agy models` output; alias-to-id mappings shift as agy's catalog moves.
 
 | Alias | Model id | Use it for | Measured latency |
 |---|---|---|---|
@@ -75,7 +76,7 @@ Every one of these was validated against this monorepo.
 | Relying on `--json-schema` | Returned an empty `structured_output` while the text was right | Shape the output in the prompt |
 | Several small sequential calls | ~21k baseline tokens each | Batch related questions into one `--task` |
 | Delegating a design decision | You re-read the code to trust it — paid twice | Use `agy` for the *evidence*, decide yourself |
-| Letting `agy` write in `prisma/` or any URL | It never read this repo's `CLAUDE.md` | Keep those out of `--write` |
+| Letting `agy` write into your repo's denylisted paths (migrations, generated files, etc.) | It never read this repo's `CLAUDE.md`/`AGENTS.md`, so it has no idea what's off-limits | State the denylist explicitly in the task; keep those paths out of `--write` |
 | Calling `agy` directly instead of the wrapper | No output contract → context flood, and no project rules | Always `agy-run.sh` |
 | Assuming `agy` read the repo's `GEMINI.md` | It does not. Verified: it answered `NO` when asked if a repo-only app name was in its context | The wrapper injects it; keep it under 8KB |
 

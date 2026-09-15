@@ -21,8 +21,9 @@ timeline — it is observability only, not a routing mechanism.
 ## When to route here vs. an external CLI
 
 - `implementation-with-repo-rules` → always Claude `sonnet`: only Claude Code loads this
-  repo's `CLAUDE.md`, skills, and hooks (base-path rules, Prisma migration ban, OpenAPI sync,
-  TDD). An external CLI editing this repo does not know these rules exist.
+  repo's `CLAUDE.md`, skills, and hooks — whatever project-specific rules those encode (build
+  conventions, migration bans, generated-file sync, TDD). An external CLI editing this repo does
+  not know these rules exist.
 - `architecture` → Claude `opus` primary, agy `claude-opus-4-6-thinking` fallback (same model
   family, hosted externally, zero Claude-quota cost as a second pass).
 - `structured-mechanical` → Claude `haiku`, cheapest tier, for repo-aware but low-reasoning

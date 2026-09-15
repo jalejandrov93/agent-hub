@@ -33,13 +33,14 @@ it just never blocks routing):
 
 | Model | dataPolicy | Use it for |
 |---|---|---|
-| `opencode/muse-spark-1.3-contributor-free` | trains | research/recon fallback, brainstorming, 1M ctx — **verified working** in live tests. This account runs it (OpenCode Zen free) at `--variant high` by default (`MODEL_REGISTRY` default); a live ping with `--variant high --agent plan` answered correctly. |
+| `opencode/muse-spark-1.3-contributor-free` | trains | research/recon fallback, brainstorming, 1M ctx — **verified working** in live tests, defaults to `--variant high` (`MODEL_REGISTRY` default); a live ping with `--variant high --agent plan` answered correctly. |
 | `opencode/nemotron-3-ultra-free` | logs | call-chain-trace fallback |
 | `opencode/mimo-v2.5-free` | logs | library/docs research |
 | `opencode/big-pickle` | logs | general purpose free fallback |
 | `opencode/nemotron-3.5-lightning-free` | logs | **do not use as primary** — hung indefinitely (full 90s timeout, SIGKILLed) in live testing 2026-09-11, despite being a real listed model id. `muse-spark-1.3-contributor-free` answered the same prompt in ~3s. |
 
-Paid (this account has a default set):
+Paid (availability depends on which providers your opencode account has configured; example
+below is one working set):
 
 | Model | Use it for |
 |---|---|
@@ -60,9 +61,9 @@ Paid (this account has a default set):
 
 ## Gotchas (measured)
 
-1. Free-model prompts are not private by default — this is a deliberate, user-accepted policy
-   for this setup, not an oversight. Never route a task containing secrets/`.env`/credentials
-   to any agent regardless of tier.
+1. Free-model prompts are not private by default — accepting the free tier's data-training terms
+   is a deliberate per-user choice, not an oversight to fix. Never route a task containing
+   secrets/`.env`/credentials to any agent regardless of tier.
 2. A job that appears to hang past its timeout is likely `nemotron-3.5-lightning-free` — do not
    retry the same model, switch to `muse-spark-1.3-contributor-free`.
 3. Cancel is not instant: SIGTERM is ignored, so `job_cancel` takes as long as the SIGKILL grace
