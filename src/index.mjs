@@ -1,29 +1,60 @@
-import { McpServer } from '@modelcontextprotocol/sdk/server/mcp.js'
+import { McpServer, ResourceTemplate } from '@modelcontextprotocol/sdk/server/mcp.js'
 import { StdioServerTransport } from '@modelcontextprotocol/sdk/server/stdio.js'
 import { execFileSync } from 'node:child_process'
 import fs from 'node:fs'
 import { z } from 'zod'
 
 import { paths } from './config.mjs'
-import { reconcileOrphans } from './jobstore.mjs'
+import { reconcileOrphans, listJobs, readResult, responsePath } from './jobstore.mjs'
 import { agentsStatusTool, routeTool, knownTaskTypes } from './tools/agents.mjs'
 import { delegateTool, jobWaitTool, jobStatusTool, jobResultTool, jobCancelTool, jobReplyTool } from './tools/jobs.mjs'
+import { metricsTool } from './tools/insights.mjs'
+import { learningProposeTool } from './tools/learnings.mjs'
 import { scheduleStartupDiscovery } from './startup.mjs'
+import {
+  TASK_TYPES,
+  LEARNING_TEXT_MAX,
+  AgentStatusRow,
+  RouteResult,
+  DelegateResponse,
+  JobRecord,
+  JobResultResponse,
+  MetricsResponse,
+  Learning,
+} from './schemas.mjs'
 
 const VERSION = '1.2.0'
 const TESTED_VERSIONS = { agy: '1.2.1', opencode: '1.18.30', copilot: '1.0.31' }
 
 const log = (...args) => console.error('[agent-hub]', ...args)
 
-const ok = (payload) => ({ content: [{ type: 'text', text: JSON.stringify(payload, null, 2) }] })
+// structuredContent must always be a plain object (the MCP outputSchema
+// contract requires an object at the top level), so a tool whose "natural"
+// payload is a bare array (agents_status) or a subset of shared fields
+// (job_reply) gets its own small wrapper schema/shape below instead of
+// changing the shared schemas.mjs contracts other consumers (the dashboard)
+// rely on.
+const AgentsStatusResponse = z.object({ agents: z.array(AgentStatusRow) }).passthrough()
+const LearningProposeResponse = z.object({ learning: Learning, note: z.string() }).passthrough()
+
+const ok = (payload, structuredContent) => ({
+  content: [{ type: 'text', text: JSON.stringify(payload, null, 2) }],
+  ...(structuredContent !== undefined ? { structuredContent } : {}),
+})
 const fail = (error) => ({
   content: [{ type: 'text', text: `agent-hub error: ${error?.message ?? String(error)}` }],
   isError: true,
 })
 
-const guard = (handler) => async (args) => {
+// `wrap` lets a handler's text payload (kept byte-for-byte backward
+// compatible) differ from its structuredContent shape — only agents_status
+// (bare array -> {agents}) and learning_propose (already an object) need it;
+// every other tool's payload already matches its outputSchema, so `wrap`
+// defaults to identity.
+const guard = (handler, wrap = (payload) => payload) => async (args) => {
   try {
-    return ok(await handler(args ?? {}))
+    const payload = await handler(args ?? {})
+    return ok(payload, wrap(payload))
   } catch (error) {
     return fail(error)
   }
@@ -32,6 +63,10 @@ const guard = (handler) => async (args) => {
 const agentEnum = z.enum(['agy', 'opencode', 'copilot'])
 const modeEnum = z.enum(['read', 'write'])
 const jobIdArg = z.string().min(1).describe('A jobId returned by delegate().')
+const taskTypeArg = z
+  .enum(TASK_TYPES)
+  .optional()
+  .describe('Pass the same taskType used for route() — it feeds metrics, adaptive timeouts and learnings.')
 
 export function buildServer() {
   const server = new McpServer({ name: 'agent-hub', version: VERSION })
@@ -44,9 +79,13 @@ export function buildServer() {
         `Preflight (L0-L2, no ping) every agy/opencode/copilot model in the delegation map. ` +
         `Returns ready|degraded|unavailable with reason, latency, an advisory quota/dataPolicy badge.`,
       inputSchema: { refresh: z.boolean().optional().describe('Bypass the 15-minute cache and re-run the ladder.') },
-      annotations: { readOnlyHint: true, openWorldHint: true },
+      outputSchema: AgentsStatusResponse,
+      annotations: { readOnlyHint: true, openWorldHint: true, idempotentHint: true },
     },
-    guard(({ refresh }) => agentsStatusTool({ refresh: !!refresh, cwd: process.cwd() }))
+    guard(
+      ({ refresh }) => agentsStatusTool({ refresh: !!refresh, cwd: process.cwd() }),
+      (agents) => ({ agents })
+    )
   )
 
   server.registerTool(
@@ -65,7 +104,8 @@ export function buildServer() {
           .optional()
           .describe('Return the full discovered model catalog per CLI instead of a {binPath, version, modelCount, checkedAt, error} summary.'),
       },
-      annotations: { readOnlyHint: true },
+      outputSchema: RouteResult,
+      annotations: { readOnlyHint: true, idempotentHint: true },
     },
     guard(({ taskType, mode, includeCatalog }) => routeTool({ taskType, mode, includeCatalog: !!includeCatalog }))
   )
@@ -86,10 +126,14 @@ export function buildServer() {
         timeoutS: z.number().int().positive().optional(),
         title: z.string().optional(),
         variant: z.string().optional().describe('opencode reasoning effort (minimal/low/medium/high/max); ignored by agy/copilot.'),
+        taskType: taskTypeArg,
       },
+      outputSchema: DelegateResponse,
       annotations: { readOnlyHint: false, openWorldHint: true },
     },
-    guard(({ agent, model, task, cwd, mode, timeoutS, title, variant }) => delegateTool({ agent, model, task, cwd, mode, timeoutS, title, variant }))
+    guard(({ agent, model, task, cwd, mode, timeoutS, title, variant, taskType }) =>
+      delegateTool({ agent, model, task, cwd, mode, timeoutS, title, variant, taskType })
+    )
   )
 
   server.registerTool(
@@ -98,7 +142,8 @@ export function buildServer() {
       title: 'Wait for a job to finish',
       description: 'Poll a job until it reaches a terminal state or timeoutS (max 60s) elapses.',
       inputSchema: { jobId: jobIdArg, timeoutS: z.number().int().positive().max(60).optional().default(30) },
-      annotations: { readOnlyHint: true },
+      outputSchema: JobRecord,
+      annotations: { readOnlyHint: true, idempotentHint: true },
     },
     guard(({ jobId, timeoutS }) => jobWaitTool({ jobId, timeoutS }))
   )
@@ -109,7 +154,8 @@ export function buildServer() {
       title: 'Read a job status',
       description: 'Current status of one job, without waiting.',
       inputSchema: { jobId: jobIdArg },
-      annotations: { readOnlyHint: true },
+      outputSchema: JobRecord,
+      annotations: { readOnlyHint: true, idempotentHint: true },
     },
     guard(({ jobId }) => jobStatusTool({ jobId }))
   )
@@ -119,10 +165,15 @@ export function buildServer() {
     {
       title: 'Read a job result (head only)',
       description: 'The first maxLines of a finished job\'s response, plus fullPath for the complete text.',
-      inputSchema: { jobId: jobIdArg, maxLines: z.number().int().positive().max(500).optional().default(20) },
-      annotations: { readOnlyHint: true },
+      inputSchema: {
+        jobId: jobIdArg,
+        maxLines: z.number().int().positive().max(500).optional().default(20),
+        tailLines: z.number().int().min(0).max(200).optional().default(10).describe('Extra lines from the end of the response to include alongside the head.'),
+      },
+      outputSchema: JobResultResponse,
+      annotations: { readOnlyHint: true, idempotentHint: true },
     },
-    guard(({ jobId, maxLines }) => jobResultTool({ jobId, maxLines }))
+    guard(({ jobId, maxLines, tailLines }) => jobResultTool({ jobId, maxLines, tailLines }))
   )
 
   server.registerTool(
@@ -131,6 +182,7 @@ export function buildServer() {
       title: 'Cancel a running job',
       description: 'Kill a running job\'s whole process group and mark it canceled.',
       inputSchema: { jobId: jobIdArg },
+      outputSchema: JobRecord,
       annotations: { readOnlyHint: false, destructiveHint: true },
     },
     guard(({ jobId }) => jobCancelTool({ jobId }))
@@ -151,10 +203,191 @@ export function buildServer() {
         mode: modeEnum.optional(),
         timeoutS: z.number().int().positive().optional(),
         title: z.string().optional(),
+        taskType: taskTypeArg,
       },
+      outputSchema: DelegateResponse,
       annotations: { readOnlyHint: false, openWorldHint: true },
     },
-    guard(({ jobId, message, mode, timeoutS, title }) => jobReplyTool({ jobId, message, mode, timeoutS, title }))
+    guard(({ jobId, message, mode, timeoutS, title, taskType }) => jobReplyTool({ jobId, message, mode, timeoutS, title, taskType }))
+  )
+
+  server.registerTool(
+    'agents_metrics',
+    {
+      title: 'Delegation metrics',
+      description: 'Success rate, p50/p95 latency, error kinds and tokens per agent/model/mode/taskType from job history.',
+      inputSchema: {
+        groupBy: z
+          .array(z.enum(['agent', 'model', 'mode', 'taskType']))
+          .optional()
+          .describe('Dimensions to group by. Default: agent, model, mode, taskType.'),
+      },
+      outputSchema: MetricsResponse,
+      annotations: { readOnlyHint: true, idempotentHint: true },
+    },
+    guard(({ groupBy }) => metricsTool({ groupBy }))
+  )
+
+  server.registerTool(
+    'learning_propose',
+    {
+      title: 'Propose a learning',
+      description:
+        'Record a gotcha about an agent/model/task type (e.g. "X hangs on long prompts"). Stored as pending until a human ' +
+        'approves it in the dashboard; approved learnings are prepended to future prompts for a matching agent/model/taskType.',
+      inputSchema: {
+        text: z.string().trim().min(1).max(LEARNING_TEXT_MAX).describe('The gotcha, short and specific.'),
+        agent: z.string().min(1).optional().describe("The CLI or Claude subagent tier this learning is about, e.g. 'agy', 'opencode', 'copilot', 'claude'."),
+        model: z.string().min(1).optional(),
+        taskType: taskTypeArg,
+        sourceJobId: jobIdArg.optional(),
+      },
+      outputSchema: LearningProposeResponse,
+      annotations: { readOnlyHint: false, idempotentHint: true },
+    },
+    guard(({ text, agent, model, taskType, sourceJobId }) => learningProposeTool({ text, agent, model, taskType, sourceJobId }))
+  )
+
+  server.registerResource(
+    'agent-hub-job',
+    new ResourceTemplate('agent-hub://jobs/{jobId}', {
+      list: async () => ({
+        resources: listJobs(process.env)
+          .slice(0, 20)
+          .map((job) => ({
+            uri: `agent-hub://jobs/${job.jobId}`,
+            name: job.title || job.jobId,
+            mimeType: 'application/json',
+          })),
+      }),
+    }),
+    { title: 'Job record', description: 'The full job record (result.json) for one job.', mimeType: 'application/json' },
+    async (uri, { jobId }) => {
+      let record
+      try {
+        record = readResult(jobId)
+      } catch {
+        throw new Error('job not found')
+      }
+      return { contents: [{ uri: uri.href, mimeType: 'application/json', text: JSON.stringify(record, null, 2) }] }
+    }
+  )
+
+  server.registerResource(
+    'agent-hub-job-response',
+    new ResourceTemplate('agent-hub://jobs/{jobId}/response', { list: undefined }),
+    { title: 'Job response text', description: 'response.txt for one job, or empty string if it has none yet.', mimeType: 'text/plain' },
+    async (uri, { jobId }) => {
+      try {
+        readResult(jobId) // throws when the job does not exist
+      } catch {
+        throw new Error('job not found')
+      }
+      let text = ''
+      try {
+        text = fs.readFileSync(responsePath(jobId), 'utf8')
+      } catch {
+        // queued/running job, or a job whose CLI never produced response text
+      }
+      return { contents: [{ uri: uri.href, mimeType: 'text/plain', text }] }
+    }
+  )
+
+  const promptArgsSchema = {
+    goal: z.string().describe('What the orchestrator is trying to accomplish.'),
+    cwd: z.string().describe('Absolute working directory / worktree path for the delegated work.'),
+    files: z.string().optional().describe('Relevant file(s)/path(s), if already known.'),
+  }
+
+  server.registerPrompt(
+    'recon',
+    {
+      title: 'Recon via agent-hub',
+      description: 'Delegate a bounded, read-only recon task off Claude quota.',
+      argsSchema: promptArgsSchema,
+    },
+    ({ goal, cwd, files }) => ({
+      messages: [
+        {
+          role: 'user',
+          content: {
+            type: 'text',
+            text:
+              `Goal: ${goal}\nWorking directory: ${cwd}\n${files ? `Relevant files: ${files}\n` : ''}\n` +
+              `Run this recon through agent-hub instead of reading everything yourself:\n` +
+              `1) route({taskType:'recon'}) to pick an agent+model.\n` +
+              `2) delegate({agent, model, cwd:'${cwd}', mode:'read', taskType:'recon', task:'<bounded question>'}) — ` +
+              `pass the SAME taskType ('recon') you gave route(), it feeds metrics, adaptive timeouts and learnings. ` +
+              `Shape the task with an explicit output format and a hard line budget, e.g. "List files under src/ ` +
+              `that define X. One relative path per line. Max 15 lines."\n` +
+              `3) job_wait or job_status({jobId}) until terminal, then job_result({jobId}) for the head of the response.\n` +
+              `4) Synthesize what was found; do not restate the raw output.`,
+          },
+        },
+      ],
+    })
+  )
+
+  server.registerPrompt(
+    'adversarial-review',
+    {
+      title: 'Adversarial review via agent-hub',
+      description: 'Get a second, independently-hosted opinion in parallel with a third CLI.',
+      argsSchema: promptArgsSchema,
+    },
+    ({ goal, cwd, files }) => ({
+      messages: [
+        {
+          role: 'user',
+          content: {
+            type: 'text',
+            text:
+              `Goal: ${goal}\nWorking directory: ${cwd}\n${files ? `Relevant files: ${files}\n` : ''}\n` +
+              `Run an adversarial review through agent-hub:\n` +
+              `1) route({taskType:'adversarial-review'}) — the delegation map's primary for this taskType is agy ` +
+              `claude-sonnet-4-6 run in parallel with copilot auto (see the returned chain's parallelWith pair), ` +
+              `fallback agy claude-opus-4-6-thinking.\n` +
+              `2) delegate({agent, model, cwd:'${cwd}', mode:'read', taskType:'adversarial-review', task:'<the change ` +
+              `to review, plus what to check>'}) for BOTH the primary and its parallelWith pair — pass the same ` +
+              `taskType ('adversarial-review') to each so metrics/learnings track the pair together. Name the exact ` +
+              `output format (numbered findings, file:line evidence) and a line budget in the task text.\n` +
+              `3) job_wait/job_status + job_result for each jobId.\n` +
+              `4) Synthesize both: flag disagreements explicitly, do not just merge lists silently.`,
+          },
+        },
+      ],
+    })
+  )
+
+  server.registerPrompt(
+    'guided-write',
+    {
+      title: 'Guided write via agent-hub',
+      description: 'Plan -> review -> execute -> delivery-review a non-trivial write, using job_reply to stay in one session.',
+      argsSchema: promptArgsSchema,
+    },
+    ({ goal, cwd, files }) => ({
+      messages: [
+        {
+          role: 'user',
+          content: {
+            type: 'text',
+            text:
+              `Goal: ${goal}\nWorking directory: ${cwd}\n${files ? `Relevant files: ${files}\n` : ''}\n` +
+              `Do NOT go straight to a write-mode delegate. Use the guided workflow instead:\n` +
+              `1) Plan (read mode): route({taskType:'mechanical-edit'}) then delegate({..., cwd:'${cwd}', mode:'read', ` +
+              `taskType:'mechanical-edit', task:'propose a plan for <goal>, do not edit anything'}).\n` +
+              `2) Review the plan against the real tree yourself (not just internal consistency). If it needs ` +
+              `changes, job_reply({jobId, message:'<numbered feedback>', mode:'read'}) and repeat until it is right.\n` +
+              `3) Execute: job_reply({jobId:<last reply's jobId>, message:'execute the approved plan', mode:'write', ` +
+              `taskType:'mechanical-edit'}) — the one call allowed to touch the filesystem.\n` +
+              `4) Run this project's own required verification commands yourself and read the diff.\n` +
+              `5) Delivery review: if anything is off, job_reply({jobId:<execute job's id>, message:'<numbered ` +
+              `corrections>', mode:'write'}) in the same conversation, without committing yet. Only stop once it is clean.`,
+          },
+        },
+      ],
+    })
   )
 
   return server
