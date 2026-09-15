@@ -4,7 +4,10 @@ import { createJob, updateResult, appendStdout, stdoutPath, responsePath, readRe
 import { appendEvent } from './eventlog.mjs'
 import { adapterFor as defaultAdapterFor } from './adapters/index.mjs'
 import { checkWriteAllowed, acquireWriteLock, releaseWriteLock } from './worktree.mjs'
-import { resolveTimeoutS, resolveVariant, KILL_GRACE_S } from './config.mjs'
+import { resolveVariant, KILL_GRACE_S } from './config.mjs'
+import { resolveEffectiveTimeoutS as defaultResolveEffectiveTimeoutS } from './timeouts.mjs'
+import { selectLearnings as defaultSelectLearnings, augmentTask as defaultAugmentTask } from './learnings.mjs'
+import { takeSnapshot as defaultTakeSnapshot, diffSnapshots as defaultDiffSnapshots, formatViolation as defaultFormatViolation } from './readguard.mjs'
 
 // jobId -> { pgid } for jobs still running in THIS process. Used by
 // cancelJob for an immediate kill; reconcileOrphans (jobstore.mjs) covers
@@ -32,6 +35,8 @@ export function startJob({
   title = '',
   maxLines = 20,
   timeoutS,
+  taskType = null,
+  turnDepth = 0,
   allowlist = [],
   env = process.env,
   spawn = spawnDetached,
@@ -40,42 +45,89 @@ export function startJob({
   variant,
   sessionId,
   parentJobId,
+  resolveEffectiveTimeoutSFn = defaultResolveEffectiveTimeoutS,
+  selectLearningsFn = defaultSelectLearnings,
+  augmentTaskFn = defaultAugmentTask,
+  takeSnapshotFn = defaultTakeSnapshot,
+  diffSnapshotsFn = defaultDiffSnapshots,
+  formatViolationFn = defaultFormatViolation,
 }) {
+  // Only a root turn (no resumed session, depth 0) gets curated learnings
+  // prepended — a reply turn continues a conversation that already has them.
+  const isRootTurn = !sessionId && (turnDepth ?? 0) === 0
+  let effectiveTask = task
+  let learningIds = []
+  if (isRootTurn) {
+    const selected = selectLearningsFn({ agent, model, taskType, env })
+    const augmented = augmentTaskFn(task, selected)
+    effectiveTask = augmented.task
+    learningIds = Array.isArray(augmented.learningIds) ? augmented.learningIds : []
+  }
+
+  // Resolve the effective timeout BEFORE createJob so the record persists the
+  // value actually used for the adapter and the kill timer, not the raw input.
+  const { timeoutS: effectiveTimeoutS, source: timeoutSource } = resolveEffectiveTimeoutSFn({
+    agent,
+    model,
+    mode,
+    taskType,
+    explicit: timeoutS,
+    env,
+  })
   const effectiveVariant = resolveVariant(agent, model, variant)
-  const job = createJob({ agent, model, task, cwd, title, mode, timeoutS, env, variant: effectiveVariant, sessionId, parentJobId })
-  appendEvent({ kind: 'job.queued', agent, model, cwd, title, jobId: job.jobId }, { env })
+  const job = createJob({
+    agent,
+    model,
+    task: effectiveTask,
+    cwd,
+    title,
+    mode,
+    timeoutS: effectiveTimeoutS,
+    timeoutSource,
+    taskType,
+    turnDepth,
+    learningIds,
+    env,
+    variant: effectiveVariant,
+    sessionId,
+    parentJobId,
+  })
+  appendEvent({ kind: 'job.queued', agent, model, cwd, title, jobId: job.jobId, taskType }, { env })
 
   if (mode === 'write') {
     const gate = checkWriteAllowed({ cwd, allowlist })
     if (!gate.allowed) {
       updateResult(job.jobId, { status: 'failed', errorKind: 'worktree_denied', error: gate.reason }, env)
-      appendEvent({ kind: 'job.failed', agent, model, cwd, title, jobId: job.jobId, errorKind: 'worktree_denied', summary: gate.reason }, { env })
+      appendEvent({ kind: 'job.failed', agent, model, cwd, title, jobId: job.jobId, errorKind: 'worktree_denied', taskType, summary: gate.reason }, { env })
       return { job: readResult(job.jobId, env), done: Promise.resolve() }
     }
     const lock = acquireWriteLock({ cwd, jobId: job.jobId, env })
     if (!lock.acquired) {
       updateResult(job.jobId, { status: 'failed', errorKind: 'locked', error: lock.reason }, env)
-      appendEvent({ kind: 'job.failed', agent, model, cwd, title, jobId: job.jobId, errorKind: 'locked', summary: lock.reason }, { env })
+      appendEvent({ kind: 'job.failed', agent, model, cwd, title, jobId: job.jobId, errorKind: 'locked', taskType, summary: lock.reason }, { env })
       return { job: readResult(job.jobId, env), done: Promise.resolve() }
     }
   }
 
   const adapter = adapterFor(agent)
-  const effectiveTimeoutS = timeoutS ?? resolveTimeoutS(agent, model)
-  const argv = adapter.buildArgv({ model, prompt: task, cwd, mode, title, variant: effectiveVariant, timeoutS: effectiveTimeoutS, sessionId })
+  const argv = adapter.buildArgv({ model, prompt: effectiveTask, cwd, mode, title, variant: effectiveVariant, timeoutS: effectiveTimeoutS, sessionId })
+
+  // Snapshot right before spawning, AFTER the write gate/lock: a gate failure
+  // must never be judged by a snapshot it never ran against.
+  const snapshot = mode === 'read' ? takeSnapshotFn(cwd) : null
 
   let child
   try {
     child = spawn(adapter.cmd, argv, { cwd })
   } catch (error) {
     updateResult(job.jobId, { status: 'failed', errorKind: 'crash', error: String(error?.message ?? error) }, env)
-    appendEvent({ kind: 'job.failed', agent, model, cwd, title, jobId: job.jobId, errorKind: 'crash', summary: String(error?.message ?? error) }, { env })
+    appendEvent({ kind: 'job.failed', agent, model, cwd, title, jobId: job.jobId, errorKind: 'crash', taskType, summary: String(error?.message ?? error) }, { env })
     if (mode === 'write') releaseWriteLock({ cwd, env })
     return { job: readResult(job.jobId, env), done: Promise.resolve() }
   }
 
   updateResult(job.jobId, { status: 'running', pid: child.pid, pgid: child.pid }, env)
-  appendEvent({ kind: 'job.started', agent, model, cwd, title, jobId: job.jobId }, { env })
+  appendEvent({ kind: 'job.started', agent, model, cwd, title, jobId: job.jobId, taskType }, { env })
   active.set(job.jobId, { pgid: child.pid })
 
   // Hard-kill at timeoutS + KILL_GRACE_S, not at timeoutS itself: agy is
@@ -90,7 +142,7 @@ export function startJob({
   })
 
   const done = exitPromise
-    .then(({ timedOut }) => finishJob({ jobId: job.jobId, agent, model, cwd, title, adapter, mode, env, timedOut }))
+    .then(({ timedOut }) => finishJob({ jobId: job.jobId, agent, model, cwd, title, adapter, mode, env, timedOut, taskType, snapshot, takeSnapshotFn, diffSnapshotsFn, formatViolationFn }))
     .finally(() => {
       active.delete(job.jobId)
       if (mode === 'write') releaseWriteLock({ cwd, env })
@@ -99,7 +151,22 @@ export function startJob({
   return { job: readResult(job.jobId, env), done }
 }
 
-function finishJob({ jobId, agent, model, cwd, title, adapter, mode, env, timedOut }) {
+function finishJob({
+  jobId,
+  agent,
+  model,
+  cwd,
+  title,
+  adapter,
+  mode,
+  env,
+  timedOut,
+  taskType = null,
+  snapshot = null,
+  takeSnapshotFn = defaultTakeSnapshot,
+  diffSnapshotsFn = defaultDiffSnapshots,
+  formatViolationFn = defaultFormatViolation,
+}) {
   const current = readResult(jobId, env)
   if (current.status === 'canceled') return // cancelJob already finalized this job
 
@@ -109,6 +176,11 @@ function finishJob({ jobId, agent, model, cwd, title, adapter, mode, env, timedO
   } catch {
     // no output captured — parse/classify will treat this as empty
   }
+
+  // A read-mode job is re-snapshotted at the terminal transition. A non-git
+  // cwd produced no baseline, so the diff stays null and nothing changes.
+  const diff = snapshot ? diffSnapshotsFn(snapshot, takeSnapshotFn(cwd)) : null
+  const violation = diff?.changed ? formatViolationFn(diff) : null
 
   const error = adapter.classifyError(stdout, { timedOut })
   if (error) {
@@ -122,13 +194,21 @@ function finishJob({ jobId, agent, model, cwd, title, adapter, mode, env, timedO
         // best-effort — a failed job still gets reported even if this write fails
       }
     }
+    // The original failure stays the errorKind; a read-mode violation is
+    // recorded alongside it rather than replacing the primary cause.
     updateResult(
       jobId,
-      { status: 'failed', errorKind: error.kind, error: error.message, sessionId: error.sessionId ?? current.sessionId ?? null },
+      {
+        status: 'failed',
+        errorKind: error.kind,
+        error: error.message,
+        sessionId: error.sessionId ?? current.sessionId ?? null,
+        ...(violation ? { readModeViolation: violation } : {}),
+      },
       env
     )
     appendEvent(
-      { kind: 'job.failed', agent, model, cwd, title, jobId, errorKind: error.kind, summary: summarize(error.message) },
+      { kind: 'job.failed', agent, model, cwd, title, jobId, errorKind: error.kind, taskType, summary: summarize(error.message) },
       { env }
     )
     return
@@ -136,6 +216,31 @@ function finishJob({ jobId, agent, model, cwd, title, adapter, mode, env, timedO
 
   const result = adapter.parseResult(stdout)
   fs.writeFileSync(responsePath(jobId, env), result.text ?? '', 'utf8')
+
+  if (violation) {
+    // A "read" job that modified its worktree is a failure even though the CLI
+    // succeeded. response.txt and tokens are still kept so the caller can see
+    // the work that was produced.
+    updateResult(
+      jobId,
+      {
+        status: 'failed',
+        errorKind: 'read_mode_violation',
+        error: violation,
+        tokens: result.tokens ?? null,
+        costUsd: result.costUsd ?? null,
+        sessionId: result.sessionId ?? null,
+        toolDenials: result.toolDenials ?? [],
+      },
+      env
+    )
+    appendEvent(
+      { kind: 'job.failed', agent, model, cwd, title, jobId, errorKind: 'read_mode_violation', taskType, summary: summarize(violation) },
+      { env }
+    )
+    return
+  }
+
   updateResult(
     jobId,
     {
@@ -148,7 +253,7 @@ function finishJob({ jobId, agent, model, cwd, title, adapter, mode, env, timedO
     env
   )
   appendEvent(
-    { kind: 'job.finished', agent, model, cwd, title, jobId, tokens: result.tokens ?? null, costUsd: result.costUsd ?? null, summary: summarize(result.text) },
+    { kind: 'job.finished', agent, model, cwd, title, jobId, taskType, tokens: result.tokens ?? null, costUsd: result.costUsd ?? null, summary: summarize(result.text) },
     { env }
   )
 }
@@ -172,7 +277,7 @@ export async function cancelJob(jobId, { env = process.env } = {}) {
     await killProcessGroup(pgid, {})
   }
   appendEvent(
-    { kind: 'job.canceled', agent: result.agent, model: result.model, cwd: result.cwd, title: result.title, jobId },
+    { kind: 'job.canceled', agent: result.agent, model: result.model, cwd: result.cwd, title: result.title, jobId, taskType: result.taskType ?? null },
     { env }
   )
   active.delete(jobId)

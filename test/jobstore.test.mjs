@@ -61,6 +61,42 @@ test('createJob defaults variant, sessionId and parentJobId to null when omitted
   assert.equal(result.parentJobId, null)
 })
 
+test('createJob persists the v2 record fields: taskType, turnDepth, timeoutSource and learningIds', async () => {
+  const home = tmpHome()
+  const { createJob, readResult } = await freshJobstore(home)
+
+  const job = createJob({
+    agent: 'agy',
+    model: 'x',
+    task: 't',
+    cwd: '/tmp',
+    title: 't',
+    taskType: 'recon',
+    turnDepth: 2,
+    timeoutS: 600,
+    timeoutSource: 'adaptive',
+    learningIds: ['l-1', 'l-2'],
+  })
+
+  const result = readResult(job.jobId)
+  assert.equal(result.taskType, 'recon')
+  assert.equal(result.turnDepth, 2)
+  assert.equal(result.timeoutS, 600)
+  assert.equal(result.timeoutSource, 'adaptive')
+  assert.deepEqual(result.learningIds, ['l-1', 'l-2'])
+})
+
+test('createJob defaults taskType to null, turnDepth to 0, timeoutSource to "default" and learningIds to []', async () => {
+  const home = tmpHome()
+  const { createJob, readResult } = await freshJobstore(home)
+
+  const result = readResult(createJob({ agent: 'agy', model: 'x', task: 't', cwd: '/tmp', title: 't' }).jobId)
+  assert.equal(result.taskType, null)
+  assert.equal(result.turnDepth, 0)
+  assert.equal(result.timeoutSource, 'default')
+  assert.deepEqual(result.learningIds, [])
+})
+
 test('two createJob calls never collide on jobId', async () => {
   const home = tmpHome()
   const { createJob } = await freshJobstore(home)
