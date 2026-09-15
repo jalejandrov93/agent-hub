@@ -11,45 +11,34 @@ function tmpHome() {
   return fs.mkdtempSync(path.join(os.tmpdir(), 'agent-hub-dashboard-'))
 }
 
-// The full allowlisted dashboard bundle: [urlPath, relative file under
-// assetDir, expected Content-Type regex]. Mirrors the ASSET_MAP contract in
-// src/dashboard.mjs one-to-one.
-const ASSET_ROUTES = [
-  ['/', 'index.html', /^text\/html; charset=utf-8$/],
-  ['/styles.css', 'styles.css', /^text\/css; charset=utf-8$/],
-  ['/app.js', 'app.js', /^text\/javascript; charset=utf-8$/],
-  ['/router.js', 'router.js', /^text\/javascript; charset=utf-8$/],
-  ['/store.js', 'store.js', /^text\/javascript; charset=utf-8$/],
-  ['/api.js', 'api.js', /^text\/javascript; charset=utf-8$/],
-  ['/contracts.js', 'contracts.js', /^text\/javascript; charset=utf-8$/],
-  ['/ui/dom.js', 'ui/dom.js', /^text\/javascript; charset=utf-8$/],
-  ['/ui/format.js', 'ui/format.js', /^text\/javascript; charset=utf-8$/],
-  ['/ui/badges.js', 'ui/badges.js', /^text\/javascript; charset=utf-8$/],
-  ['/ui/dialog.js', 'ui/dialog.js', /^text\/javascript; charset=utf-8$/],
-  ['/ui/menu.js', 'ui/menu.js', /^text\/javascript; charset=utf-8$/],
-  ['/ui/icons.js', 'ui/icons.js', /^text\/javascript; charset=utf-8$/],
-  ['/views/overview.js', 'views/overview.js', /^text\/javascript; charset=utf-8$/],
-  ['/views/agents.js', 'views/agents.js', /^text\/javascript; charset=utf-8$/],
-  ['/views/jobs.js', 'views/jobs.js', /^text\/javascript; charset=utf-8$/],
-  ['/views/history.js', 'views/history.js', /^text\/javascript; charset=utf-8$/],
-  ['/views/subagents.js', 'views/subagents.js', /^text\/javascript; charset=utf-8$/],
-  ['/views/timeline.js', 'views/timeline.js', /^text\/javascript; charset=utf-8$/],
-  ['/views/config.js', 'views/config.js', /^text\/javascript; charset=utf-8$/],
-]
-
 const DASHBOARD_CSP =
   "default-src 'self'; script-src 'self'; style-src 'self'; connect-src 'self'; img-src 'self' data:; base-uri 'none'; frame-ancestors 'none'"
 
-/** A temp asset directory populated with a dummy file for every ASSET_ROUTES entry. */
-function assetFixture() {
-  const dir = fs.mkdtempSync(path.join(os.tmpdir(), 'agent-hub-dashboard-assets-'))
-  for (const [, relPath] of ASSET_ROUTES) {
-    const full = path.join(dir, relPath)
-    fs.mkdirSync(path.dirname(full), { recursive: true })
-    const content = relPath.endsWith('.html') ? '<!doctype html><html><head><title>agent-hub dashboard</title></head><body></body></html>' : `export const marker = ${JSON.stringify(relPath)}\n`
-    fs.writeFileSync(full, content)
-  }
-  return dir
+/**
+ * A temp Vite `dist/` fixture: index.html referencing a hashed JS+CSS pair,
+ * a `.vite/manifest.json` listing them plus a woff2 font asset, and the
+ * actual asset files on disk.
+ */
+function distFixture({ jsName = 'index-abc123.js', cssName = 'index-abc123.css' } = {}) {
+  const dir = fs.mkdtempSync(path.join(os.tmpdir(), 'agent-hub-dashboard-dist-'))
+  fs.mkdirSync(path.join(dir, 'assets'), { recursive: true })
+  fs.mkdirSync(path.join(dir, '.vite'), { recursive: true })
+
+  fs.writeFileSync(
+    path.join(dir, 'index.html'),
+    `<!doctype html><html><head><title>agent-hub dashboard</title><link rel="stylesheet" href="./assets/${cssName}"></head><body><script type="module" src="./assets/${jsName}"></script></body></html>`
+  )
+  fs.writeFileSync(path.join(dir, 'assets', jsName), `export const marker = ${JSON.stringify(jsName)}\n`)
+  fs.writeFileSync(path.join(dir, 'assets', cssName), 'body { color: black; }\n')
+  fs.writeFileSync(path.join(dir, 'assets', 'font-xyz.woff2'), 'fake-woff2-bytes')
+  fs.writeFileSync(
+    path.join(dir, '.vite', 'manifest.json'),
+    JSON.stringify({
+      'index.html': { file: `assets/${jsName}`, css: [`assets/${cssName}`], src: 'index.html', isEntry: true },
+      'font.woff2': { file: 'assets/font-xyz.woff2', src: 'font.woff2' },
+    })
+  )
+  return { dir, jsName, cssName }
 }
 
 function listen(server) {
@@ -220,31 +209,54 @@ test('buildState jobs carry variant, sessionId, parentJobId and errorKind throug
   assert.equal(jobsById[reply.jobId].parentJobId, parent.jobId)
 })
 
-test('GET / serves the dashboard shell from the default asset directory', async () => {
+test('GET / serves the built dashboard shell (index.html, no-cache)', async () => {
+  const { dir } = distFixture()
   const env = { AGENT_HUB_HOME: tmpHome() }
-  const server = createServer({ env })
+  const server = createServer({ env, distDir: dir })
   const port = await listen(server)
   try {
     const res = await get(port, '/')
     assert.equal(res.status, 200)
     assert.match(res.headers['content-type'], /text\/html/)
     assert.match(res.body, /<title>/i)
+    assert.equal(res.headers['cache-control'], 'no-cache')
+    assert.equal(res.headers['content-security-policy'], DASHBOARD_CSP)
+    assert.equal(res.headers['x-content-type-options'], 'nosniff')
   } finally {
     server.close()
   }
 })
 
-test('every allowlisted dashboard asset is served 200 with the correct Content-Type, no-cache, CSP and nosniff', async () => {
-  const assetDir = assetFixture()
+test('GET /index.html serves the same shell as GET /', async () => {
+  const { dir } = distFixture()
   const env = { AGENT_HUB_HOME: tmpHome() }
-  const server = createServer({ env, assetDir })
+  const server = createServer({ env, distDir: dir })
   const port = await listen(server)
   try {
-    for (const [urlPath, , typeRe] of ASSET_ROUTES) {
+    const res = await get(port, '/index.html')
+    assert.equal(res.status, 200)
+    assert.match(res.headers['content-type'], /text\/html/)
+  } finally {
+    server.close()
+  }
+})
+
+test('hashed JS/CSS/font assets referenced from index.html and the manifest are served 200 with immutable caching, CSP and nosniff', async () => {
+  const { dir, jsName, cssName } = distFixture()
+  const env = { AGENT_HUB_HOME: tmpHome() }
+  const server = createServer({ env, distDir: dir })
+  const port = await listen(server)
+  try {
+    const cases = [
+      [`/assets/${jsName}`, /^text\/javascript; charset=utf-8$/],
+      [`/assets/${cssName}`, /^text\/css; charset=utf-8$/],
+      ['/assets/font-xyz.woff2', /^font\/woff2$/],
+    ]
+    for (const [urlPath, typeRe] of cases) {
       const res = await get(port, urlPath)
       assert.equal(res.status, 200, urlPath)
       assert.match(res.headers['content-type'], typeRe, urlPath)
-      assert.equal(res.headers['cache-control'], 'no-cache', urlPath)
+      assert.equal(res.headers['cache-control'], 'public, max-age=31536000, immutable', urlPath)
       assert.equal(res.headers['content-security-policy'], DASHBOARD_CSP, urlPath)
       assert.equal(res.headers['x-content-type-options'], 'nosniff', urlPath)
     }
@@ -253,13 +265,34 @@ test('every allowlisted dashboard asset is served 200 with the correct Content-T
   }
 })
 
-test('unknown paths and dot-segment traversal attempts against the dashboard asset map return 404 JSON', async () => {
-  const assetDir = assetFixture()
+test('the manifest.json itself is never served', async () => {
+  const { dir } = distFixture()
   const env = { AGENT_HUB_HOME: tmpHome() }
-  const server = createServer({ env, assetDir })
+  const server = createServer({ env, distDir: dir })
   const port = await listen(server)
   try {
-    for (const urlPath of ['/does-not-exist.js', '/../dashboard.mjs', '/%2e%2e/dashboard.mjs', '/views/../dashboard.mjs', '/ui/evil.js']) {
+    for (const urlPath of ['/.vite/manifest.json', '/assets/.vite/manifest.json']) {
+      const res = await get(port, urlPath)
+      assert.equal(res.status, 404, urlPath)
+    }
+  } finally {
+    server.close()
+  }
+})
+
+test('unknown paths and traversal attempts against the dist allowlist return 404 JSON', async () => {
+  const { dir } = distFixture()
+  const env = { AGENT_HUB_HOME: tmpHome() }
+  const server = createServer({ env, distDir: dir })
+  const port = await listen(server)
+  try {
+    for (const urlPath of [
+      '/does-not-exist.js',
+      '/assets/../src/config.mjs',
+      '/%2e%2e/dashboard.mjs',
+      '/assets/%2e%2e%2fconfig.mjs',
+      '/../dashboard.mjs',
+    ]) {
       const res = await get(port, urlPath)
       assert.equal(res.status, 404, urlPath)
       assert.match(res.headers['content-type'], /application\/json/, urlPath)
@@ -269,13 +302,27 @@ test('unknown paths and dot-segment traversal attempts against the dashboard ass
   }
 })
 
-test('a bad Host header on a dashboard asset request is rejected 403 (blocks DNS rebinding for the static bundle too)', async () => {
-  const assetDir = assetFixture()
+test('an asset with an unallowlisted extension is never served', async () => {
+  const { dir } = distFixture()
+  fs.writeFileSync(path.join(dir, 'assets', 'secret.exe'), 'nope')
   const env = { AGENT_HUB_HOME: tmpHome() }
-  const server = createServer({ env, assetDir })
+  const server = createServer({ env, distDir: dir })
   const port = await listen(server)
   try {
-    const res = await rawRequest(port, '/app.js', { headers: { Host: 'evil.example' } })
+    const res = await get(port, '/assets/secret.exe')
+    assert.equal(res.status, 404)
+  } finally {
+    server.close()
+  }
+})
+
+test('a bad Host header on a dashboard asset request is rejected 403 (blocks DNS rebinding for the static bundle too)', async () => {
+  const { dir, jsName } = distFixture()
+  const env = { AGENT_HUB_HOME: tmpHome() }
+  const server = createServer({ env, distDir: dir })
+  const port = await listen(server)
+  try {
+    const res = await rawRequest(port, `/assets/${jsName}`, { headers: { Host: 'evil.example' } })
     assert.equal(res.status, 403)
   } finally {
     server.close()
@@ -283,14 +330,75 @@ test('a bad Host header on a dashboard asset request is rejected 403 (blocks DNS
 })
 
 test('an allowlisted-but-missing asset file returns 404 JSON instead of throwing', async () => {
-  const assetDir = fs.mkdtempSync(path.join(os.tmpdir(), 'agent-hub-dashboard-assets-empty-'))
+  const { dir, jsName } = distFixture()
+  fs.rmSync(path.join(dir, 'assets', jsName))
   const env = { AGENT_HUB_HOME: tmpHome() }
-  const server = createServer({ env, assetDir })
+  const server = createServer({ env, distDir: dir })
   const port = await listen(server)
   try {
-    const res = await get(port, '/app.js')
+    const res = await get(port, `/assets/${jsName}`)
     assert.equal(res.status, 404)
     assert.match(res.headers['content-type'], /application\/json/)
+  } finally {
+    server.close()
+  }
+})
+
+test('when dashboard/dist/index.html is missing, GET / returns a 503 HTML page and other asset paths 404', async () => {
+  const dir = fs.mkdtempSync(path.join(os.tmpdir(), 'agent-hub-dashboard-dist-empty-'))
+  const env = { AGENT_HUB_HOME: tmpHome() }
+  const server = createServer({ env, distDir: dir })
+  const port = await listen(server)
+  try {
+    const rootRes = await get(port, '/')
+    assert.equal(rootRes.status, 503)
+    assert.match(rootRes.headers['content-type'], /text\/html/)
+    assert.match(rootRes.body, /npm run build/)
+
+    const assetRes = await get(port, '/assets/whatever.js')
+    assert.equal(assetRes.status, 404)
+  } finally {
+    server.close()
+  }
+})
+
+test('HEAD works for the shell and for hashed assets', async () => {
+  const { dir, jsName } = distFixture()
+  const env = { AGENT_HUB_HOME: tmpHome() }
+  const server = createServer({ env, distDir: dir })
+  const port = await listen(server)
+  try {
+    for (const urlPath of ['/', `/assets/${jsName}`]) {
+      const res = await get(port, urlPath, { method: 'HEAD' })
+      assert.equal(res.status, 200, urlPath)
+      assert.equal(res.body, '', urlPath)
+    }
+  } finally {
+    server.close()
+  }
+})
+
+test('the allowlist refreshes after rewriting index.html with a newly hashed asset name (no restart needed)', async () => {
+  const { dir, jsName: oldJsName } = distFixture()
+  const env = { AGENT_HUB_HOME: tmpHome() }
+  const server = createServer({ env, distDir: dir })
+  const port = await listen(server)
+  try {
+    const before = await get(port, `/assets/${oldJsName}`)
+    assert.equal(before.status, 200)
+
+    // Rebuild dist/ in place with a new hashed filename, forcing index.html's mtime forward.
+    const newJsName = 'index-def456.js'
+    fs.writeFileSync(path.join(dir, 'assets', newJsName), `export const marker = ${JSON.stringify(newJsName)}\n`)
+    const future = new Date(Date.now() + 5000)
+    fs.writeFileSync(
+      path.join(dir, 'index.html'),
+      `<!doctype html><html><head><title>agent-hub dashboard</title></head><body><script type="module" src="./assets/${newJsName}"></script></body></html>`
+    )
+    fs.utimesSync(path.join(dir, 'index.html'), future, future)
+
+    const after = await get(port, `/assets/${newJsName}`)
+    assert.equal(after.status, 200)
   } finally {
     server.close()
   }
