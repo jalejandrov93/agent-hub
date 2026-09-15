@@ -276,7 +276,8 @@ export function createServer({ env = process.env, commandRunner = runCommand, as
     // application/json on every write route forces a preflight, which this
     // server's lack of CORS headers will always fail — closing the
     // <form enctype="text/plain">/no-cors-fetch CSRF path.
-    if (req.method !== 'GET') {
+    // GET and HEAD are safe methods; only state-changing methods need the write guard.
+    if (req.method !== 'GET' && req.method !== 'HEAD') {
       if (!isLoopback(remoteAddress)) {
         return sendJson(res, 403, { error: 'forbidden: dashboard only accepts loopback connections' })
       }
@@ -288,7 +289,8 @@ export function createServer({ env = process.env, commandRunner = runCommand, as
       }
     }
 
-    if (req.method === 'GET' && Object.prototype.hasOwnProperty.call(ASSET_MAP, url.pathname)) {
+    // Node's ServerResponse drops the body automatically for HEAD requests.
+    if ((req.method === 'GET' || req.method === 'HEAD') && Object.prototype.hasOwnProperty.call(ASSET_MAP, url.pathname)) {
       return sendAsset(res, assetDir, ASSET_MAP[url.pathname])
     }
 

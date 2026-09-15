@@ -114,3 +114,14 @@ for (const view of VIEWS) {
     for (const fn of ['mount', 'render', 'unmount']) assert.equal(typeof mod[fn], 'function', `${view}.${fn}`)
   })
 }
+
+test('HEAD is a safe method: shell and assets answer with headers and no body', async () => {
+  await withServer(async (base) => {
+    for (const asset of ['/', '/app.js', '/styles.css']) {
+      const res = await fetch(base + asset, { method: 'HEAD' })
+      assert.equal(res.status, 200, `HEAD ${asset}`)
+      assert.match(res.headers.get('content-security-policy') || '', /default-src 'self'/)
+      assert.equal((await res.text()).length, 0)
+    }
+  })
+})

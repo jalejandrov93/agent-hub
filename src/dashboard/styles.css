@@ -806,3 +806,13 @@ dialog.confirm p { color: var(--text-muted); margin-bottom: 1rem; }
 }
 .btn-icon svg { width: 18px; height: 18px; }
 .empty-state svg { width: 28px; height: 28px; }
+
+/* Integration: the drawer toggle also carries .btn/.btn-icon, whose display
+   rule is declared later and would show the toggle on wide screens. */
+.topbar .drawer-toggle { display: none; }
+@media (max-width: 959.98px) {
+  .topbar .drawer-toggle { display: inline-flex; }
+}
+/* Focus moves to the view heading for screen readers on navigation; the
+   heading is not interactive, so it needs no visible ring. */
+.view-title:focus { outline: none; }

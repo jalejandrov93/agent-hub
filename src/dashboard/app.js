@@ -55,6 +55,8 @@ function injectNavIcons(root) {
   root.querySelectorAll('[data-icon]').forEach((el) => {
     el.innerHTML = icon(el.dataset.icon)
   })
+  const drawerToggle = document.getElementById('drawer-toggle')
+  if (drawerToggle && !drawerToggle.querySelector('svg')) drawerToggle.innerHTML = icon('menu')
 }
 
 /** Clones #nav's group structure into the drawer sheet (kept in sync at boot; both stay static after that). */
@@ -99,8 +101,11 @@ function boot() {
       const [stateSnapshot, config] = await Promise.all([api.fetchState(), api.fetchConfig()])
       store.setState((s) => applyServerState(s, stateSnapshot, Date.now()))
       store.setState((s) => applyConfig(s, config))
-    } catch {
-      // transient failure — the next SSE/poll/manual refresh will catch up
+    } catch (error) {
+      // Keep retrying through SSE/poll/manual refresh, but say so: a silent
+      // failure here leaves every view empty with no hint why.
+      console.error('[dashboard] refresh failed', error)
+      showToast(`Could not load dashboard data: ${error && error.message ? error.message : error}`, 'unavailable')
     }
   }
 
@@ -174,8 +179,20 @@ function boot() {
     }
 
     currentView = mod
-    mod.mount(section, ctx)
-    mod.render(store.getState())
+    try {
+      mod.mount(section, ctx)
+      mod.render(store.getState())
+    } catch (error) {
+      // A throwing view must stay visible instead of leaving an empty page and
+      // silently skipping the navigation state updates below.
+      console.error(`[dashboard] view "${route.name}" failed`, error)
+      currentView = null
+      const callout = document.createElement('div')
+      callout.className = 'callout callout-warn'
+      callout.dataset.viewError = route.name
+      callout.textContent = `The ${route.name} view failed to render: ${error && error.message ? error.message : error}`
+      section.replaceChildren(callout)
+    }
 
     updateNavCurrent(route.name)
     const meta = ROUTES[route.name]
@@ -214,7 +231,14 @@ function boot() {
   }
 
   store.subscribe((state) => {
-    if (currentView && typeof currentView.render === 'function') currentView.render(state)
+    if (currentView && typeof currentView.render === 'function') {
+      try {
+        currentView.render(state)
+      } catch (error) {
+        console.error('[dashboard] view render failed', error)
+        showToast(`View render failed: ${error && error.message ? error.message : error}`, 'unavailable')
+      }
+    }
     renderNavBadges(state)
     renderConnBadge(state)
     renderLastUpdated(state)
