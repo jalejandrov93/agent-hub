@@ -20,6 +20,58 @@ export function isLoopback(remoteAddress) {
   return remoteAddress === '127.0.0.1' || remoteAddress === '::1' || remoteAddress === '::ffff:127.0.0.1'
 }
 
+// Hostnames a request is allowed to address this dashboard as. Anything else
+// (an attacker-controlled DNS name that resolves to 127.0.0.1, e.g. DNS
+// rebinding) is rejected regardless of remote address.
+const ALLOWED_HOSTNAMES = new Set(['127.0.0.1', 'localhost', '::1'])
+
+// Extract the hostname portion of a Host header, stripping the port and any
+// IPv6 brackets (e.g. "[::1]:7777" -> "::1"). Returns null when there is
+// nothing usable (missing header, or a malformed IPv6 literal).
+function hostnameFromHostHeader(hostHeader) {
+  if (!hostHeader) return null
+  let h = hostHeader.trim()
+  if (!h) return null
+  if (h.startsWith('[')) {
+    const end = h.indexOf(']')
+    return end === -1 ? null : h.slice(1, end).toLowerCase()
+  }
+  // A single colon is "host:port"; more than one, unbracketed, is a bare
+  // IPv6 literal like "::1" (no port is possible in that form) — leave it be.
+  const colonCount = (h.match(/:/g) || []).length
+  if (colonCount === 1) {
+    const idx = h.indexOf(':')
+    if (/^\d+$/.test(h.slice(idx + 1))) h = h.slice(0, idx)
+  }
+  return h.toLowerCase()
+}
+
+/** Host header validation against DNS rebinding: hostname must be a loopback name, any port. Missing header is rejected. */
+export function isAllowedHost(hostHeader) {
+  const hostname = hostnameFromHostHeader(hostHeader)
+  return hostname !== null && ALLOWED_HOSTNAMES.has(hostname)
+}
+
+/** True when the media type (ignoring parameters like charset) is exactly application/json. */
+export function isJsonContentType(contentType) {
+  if (!contentType) return false
+  const mediaType = contentType.split(';')[0].trim().toLowerCase()
+  return mediaType === 'application/json'
+}
+
+/** A missing Origin header is allowed (same-origin browser navigations, and non-browser callers, don't send one). Present, it must be a loopback origin. */
+export function isAllowedOrigin(origin) {
+  if (origin == null) return true
+  try {
+    const u = new URL(origin)
+    if (u.protocol !== 'http:') return false
+    const hostname = u.hostname.toLowerCase()
+    return hostname === '127.0.0.1' || hostname === 'localhost' || hostname === '[::1]' || hostname === '::1'
+  } catch {
+    return false
+  }
+}
+
 /** State for GET /api/state: agents (from the preflight cache), jobs, and the last 200 events (subagents included). */
 export function buildState({ env = process.env } = {}) {
   const discovery = readDiscovery(env)
@@ -55,19 +107,47 @@ export function buildConfig({ env = process.env } = {}) {
   }
 }
 
-/** Buffer and parse a request body as JSON; {} for an empty or malformed body (never throws). */
-function readJsonBody(req) {
-  return new Promise((resolve) => {
+const MAX_BODY_BYTES = 64 * 1024
+
+/**
+ * Buffer and parse a request body as JSON; {} for an empty body. Rejects
+ * (never throws synchronously) with a tagged error for a payload over
+ * MAX_BODY_BYTES or malformed JSON, so a write route can answer 413/400
+ * instead of silently treating either as {}.
+ */
+function readJsonBody(req, { maxBytes = MAX_BODY_BYTES } = {}) {
+  return new Promise((resolve, reject) => {
     let data = ''
+    let size = 0
+    let oversize = false
     req.on('data', (chunk) => {
+      // Once over the cap, stop buffering (free the memory) but keep
+      // draining the stream — destroying `req` would tear down the shared
+      // socket and the response below would never reach the client.
+      if (oversize) return
+      size += chunk.length
+      if (size > maxBytes) {
+        oversize = true
+        data = ''
+        return
+      }
       data += chunk
     })
     req.on('end', () => {
+      if (oversize) {
+        const err = new Error('payload too large')
+        err.statusCode = 413
+        err.expose = 'payload too large'
+        return reject(err)
+      }
       if (!data) return resolve({})
       try {
         resolve(JSON.parse(data))
       } catch {
-        resolve({})
+        const err = new Error('invalid JSON body')
+        err.statusCode = 400
+        err.expose = 'invalid JSON body'
+        reject(err)
       }
     })
     req.on('error', () => resolve({}))
@@ -79,12 +159,44 @@ function sendJson(res, status, payload) {
   res.end(JSON.stringify(payload))
 }
 
+/** Map a readJsonBody rejection (413/400) or a route-thrown error (500 default) to a JSON error response. */
+function sendError(res, error) {
+  const status = error?.statusCode ?? 500
+  const message = error?.expose ?? String(error?.message ?? error)
+  sendJson(res, status, { error: message })
+}
+
 export function createServer({ env = process.env, commandRunner = runCommand } = {}) {
   const sseClients = new Set()
 
   const server = http.createServer((req, res) => {
     const remoteAddress = req.socket.remoteAddress
     const url = new URL(req.url, 'http://localhost')
+
+    // Every request (GET included) must address this dashboard by a loopback
+    // hostname — otherwise a DNS-rebinding page could read state/config from
+    // "inside" the browser's same-origin policy.
+    if (!isAllowedHost(req.headers.host)) {
+      return sendJson(res, 403, { error: 'forbidden: invalid Host header' })
+    }
+
+    // A browser can only be tricked into a "simple request" (no CORS
+    // preflight) for GET/HEAD or a POST with one of a few whitelisted
+    // Content-Types, none of which is application/json. So requiring
+    // application/json on every write route forces a preflight, which this
+    // server's lack of CORS headers will always fail — closing the
+    // <form enctype="text/plain">/no-cors-fetch CSRF path.
+    if (req.method !== 'GET') {
+      if (!isLoopback(remoteAddress)) {
+        return sendJson(res, 403, { error: 'forbidden: dashboard only accepts loopback connections' })
+      }
+      if (!isJsonContentType(req.headers['content-type'])) {
+        return sendJson(res, 415, { error: 'unsupported media type: application/json required' })
+      }
+      if (!isAllowedOrigin(req.headers.origin)) {
+        return sendJson(res, 403, { error: 'forbidden: cross-origin request' })
+      }
+    }
 
     if (url.pathname === '/' && req.method === 'GET') {
       res.writeHead(200, { 'Content-Type': 'text/html; charset=utf-8' })
@@ -117,25 +229,13 @@ export function createServer({ env = process.env, commandRunner = runCommand } =
 
     const cancelMatch = url.pathname.match(/^\/api\/jobs\/([^/]+)\/cancel$/)
     if (cancelMatch && req.method === 'POST') {
-      if (!isLoopback(remoteAddress)) {
-        res.writeHead(403, { 'Content-Type': 'application/json' })
-        res.end(JSON.stringify({ error: 'forbidden: dashboard only accepts loopback connections' }))
-        return
-      }
       cancelJob(cancelMatch[1], { env })
-        .then((result) => {
-          res.writeHead(200, { 'Content-Type': 'application/json' })
-          res.end(JSON.stringify(result))
-        })
-        .catch((error) => {
-          res.writeHead(500, { 'Content-Type': 'application/json' })
-          res.end(JSON.stringify({ error: String(error?.message ?? error) }))
-        })
+        .then((result) => sendJson(res, 200, result))
+        .catch((error) => sendError(res, error))
       return
     }
 
     if (url.pathname === '/api/agents/refresh' && req.method === 'POST') {
-      if (!isLoopback(remoteAddress)) return sendJson(res, 403, { error: 'forbidden: dashboard only accepts loopback connections' })
       readJsonBody(req)
         .then(async (body) => {
           const cwd = process.cwd()
@@ -166,20 +266,18 @@ export function createServer({ env = process.env, commandRunner = runCommand } =
           return { results }
         })
         .then((payload) => sendJson(res, 200, payload))
-        .catch((error) => sendJson(res, 500, { error: String(error?.message ?? error) }))
+        .catch((error) => sendError(res, error))
       return
     }
 
     if (url.pathname === '/api/discovery/refresh' && req.method === 'POST') {
-      if (!isLoopback(remoteAddress)) return sendJson(res, 403, { error: 'forbidden: dashboard only accepts loopback connections' })
       runDiscovery({ env, commandRunner, force: true })
         .then((discovery) => sendJson(res, 200, discovery))
-        .catch((error) => sendJson(res, 500, { error: String(error?.message ?? error) }))
+        .catch((error) => sendError(res, error))
       return
     }
 
     if (url.pathname === '/api/overrides' && req.method === 'POST') {
-      if (!isLoopback(remoteAddress)) return sendJson(res, 403, { error: 'forbidden: dashboard only accepts loopback connections' })
       readJsonBody(req)
         .then((body) => {
           if (!body.agent || !body.model) throw new Error('overrides require both "agent" and "model"')
@@ -189,7 +287,7 @@ export function createServer({ env = process.env, commandRunner = runCommand } =
           const entry = setOverride(overrideKey(body.agent, body.model), patch, env)
           sendJson(res, 200, entry)
         })
-        .catch((error) => sendJson(res, 500, { error: String(error?.message ?? error) }))
+        .catch((error) => sendError(res, error))
       return
     }
 
@@ -197,7 +295,6 @@ export function createServer({ env = process.env, commandRunner = runCommand } =
     // so the model segment must be URL-encoded by the caller and decoded here.
     const overrideMatch = url.pathname.match(/^\/api\/overrides\/([^/]+)\/(.+)$/)
     if (overrideMatch && req.method === 'DELETE') {
-      if (!isLoopback(remoteAddress)) return sendJson(res, 403, { error: 'forbidden: dashboard only accepts loopback connections' })
       const agent = decodeURIComponent(overrideMatch[1])
       const model = decodeURIComponent(overrideMatch[2])
       sendJson(res, 200, clearOverride(overrideKey(agent, model), env))

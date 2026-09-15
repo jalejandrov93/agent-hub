@@ -4,7 +4,8 @@ import fs from 'node:fs'
 import path from 'node:path'
 import os from 'node:os'
 import http from 'node:http'
-import { isLoopback, createServer, buildState } from '../src/dashboard.mjs'
+import net from 'node:net'
+import { isLoopback, isAllowedHost, isJsonContentType, isAllowedOrigin, createServer, buildState } from '../src/dashboard.mjs'
 
 function tmpHome() {
   return fs.mkdtempSync(path.join(os.tmpdir(), 'agent-hub-dashboard-'))
@@ -41,6 +42,51 @@ function postJson(port, urlPath, data, { method = 'POST' } = {}) {
     )
     req.on('error', reject)
     req.end(payload)
+  })
+}
+
+// Raw http.request so tests can set Host/Origin/Content-Type exactly as
+// wanted — fetch() forbids setting Host, and the postJson() helper above
+// always sends a well-formed JSON Content-Type.
+function rawRequest(port, urlPath, { method = 'GET', headers = {}, body } = {}) {
+  return new Promise((resolve, reject) => {
+    const req = http.request({ host: '127.0.0.1', port, path: urlPath, method, headers }, (res) => {
+      let raw = ''
+      res.on('data', (c) => (raw += c))
+      res.on('end', () => {
+        let parsed = null
+        try {
+          parsed = raw ? JSON.parse(raw) : null
+        } catch {
+          parsed = raw
+        }
+        resolve({ status: res.statusCode, headers: res.headers, body: parsed })
+      })
+    })
+    req.on('error', reject)
+    req.end(body)
+  })
+}
+
+// A raw socket write is the only way to send a request with no Host header
+// at all — http.request always injects one unless overridden. Node's own
+// HTTP/1.1 parser rejects a Host-less HTTP/1.1 request with its own 400
+// before our request listener ever runs (stricter than what our handler
+// could do), so this must speak HTTP/1.0 — which never mandated a Host
+// header — to reach dashboard.mjs's own isAllowedHost() check.
+function requestWithoutHostHeader(port, urlPath) {
+  return new Promise((resolve, reject) => {
+    const socket = net.connect(port, '127.0.0.1', () => {
+      socket.write(`GET ${urlPath} HTTP/1.0\r\n\r\n`)
+    })
+    let raw = ''
+    socket.on('data', (c) => (raw += c))
+    socket.on('end', () => {
+      const statusLine = raw.split('\r\n')[0] || ''
+      const match = statusLine.match(/^HTTP\/1\.\d (\d+)/)
+      resolve({ status: match ? Number(match[1]) : null, raw })
+    })
+    socket.on('error', reject)
   })
 }
 
@@ -384,6 +430,198 @@ test('write routes (agents/refresh, discovery/refresh, overrides) are loopback-g
   try {
     const res = await postJson(port, '/api/overrides', { agent: 'agy', model: 'x', hold: true })
     assert.equal(res.status, 403)
+  } finally {
+    server.close()
+  }
+})
+
+// --- Host/Origin/Content-Type hardening against browser-borne CSRF/DNS-rebinding ---
+
+test('isAllowedHost accepts loopback hostnames (any port) and rejects everything else', () => {
+  assert.equal(isAllowedHost('127.0.0.1:53211'), true)
+  assert.equal(isAllowedHost('127.0.0.1'), true)
+  assert.equal(isAllowedHost('localhost:53211'), true)
+  assert.equal(isAllowedHost('[::1]:53211'), true)
+  assert.equal(isAllowedHost('::1'), true)
+  assert.equal(isAllowedHost('evil.example'), false)
+  assert.equal(isAllowedHost('attacker.example:80'), false)
+  assert.equal(isAllowedHost(undefined), false)
+  assert.equal(isAllowedHost(''), false)
+})
+
+test('isJsonContentType requires the application/json media type, params allowed', () => {
+  assert.equal(isJsonContentType('application/json'), true)
+  assert.equal(isJsonContentType('application/json; charset=utf-8'), true)
+  assert.equal(isJsonContentType('Application/JSON'), true)
+  assert.equal(isJsonContentType('text/plain'), false)
+  assert.equal(isJsonContentType('text/plain;application/json'), false)
+  assert.equal(isJsonContentType(undefined), false)
+  assert.equal(isJsonContentType(''), false)
+})
+
+test('isAllowedOrigin allows a missing Origin header and any loopback origin, rejects a foreign origin', () => {
+  assert.equal(isAllowedOrigin(undefined), true)
+  assert.equal(isAllowedOrigin('http://127.0.0.1:7777'), true)
+  assert.equal(isAllowedOrigin('http://localhost:7777'), true)
+  assert.equal(isAllowedOrigin('http://[::1]:7777'), true)
+  assert.equal(isAllowedOrigin('http://evil.example'), false)
+  assert.equal(isAllowedOrigin('https://127.0.0.1:7777'), false)
+  assert.equal(isAllowedOrigin('not a url'), false)
+})
+
+test('GET with a bad Host header is rejected with 403 (blocks DNS rebinding)', async () => {
+  const env = { AGENT_HUB_HOME: tmpHome() }
+  const server = createServer({ env })
+  const port = await listen(server)
+  try {
+    const res = await rawRequest(port, '/api/state', { headers: { Host: 'evil.example' } })
+    assert.equal(res.status, 403)
+    assert.match(res.body.error, /invalid Host header/)
+  } finally {
+    server.close()
+  }
+})
+
+test('GET with no Host header at all is rejected with 403', async () => {
+  const env = { AGENT_HUB_HOME: tmpHome() }
+  const server = createServer({ env })
+  const port = await listen(server)
+  try {
+    const res = await requestWithoutHostHeader(port, '/api/state')
+    assert.equal(res.status, 403)
+  } finally {
+    server.close()
+  }
+})
+
+test('POST /api/overrides with Content-Type: text/plain is rejected 415 and does not write the override (defeats a text/plain <form> CSRF)', async () => {
+  const env = { AGENT_HUB_HOME: tmpHome() }
+  const server = createServer({ env })
+  const port = await listen(server)
+  try {
+    const res = await rawRequest(port, '/api/overrides', {
+      method: 'POST',
+      headers: { Host: '127.0.0.1', 'Content-Type': 'text/plain' },
+      body: JSON.stringify({ agent: 'agy', model: 'gemini-3.8-flash-low', hold: true }),
+    })
+    assert.equal(res.status, 415)
+    assert.match(res.body.error, /application\/json/)
+
+    const { readOverrides } = await import('../src/overrides.mjs?t=' + Date.now())
+    assert.equal('agy:gemini-3.8-flash-low' in readOverrides(env), false, 'text/plain request must have no side effect')
+  } finally {
+    server.close()
+  }
+})
+
+test('POST /api/agents/refresh with Content-Type: text/plain is rejected 415 and never calls the commandRunner', async () => {
+  const env = { AGENT_HUB_HOME: tmpHome() }
+  const runner = fakeRunner([])
+  const server = createServer({ env, commandRunner: runner })
+  const port = await listen(server)
+  try {
+    const res = await rawRequest(port, '/api/agents/refresh', {
+      method: 'POST',
+      headers: { Host: '127.0.0.1', 'Content-Type': 'text/plain' },
+      body: JSON.stringify({ ping: true, agent: 'agy', model: 'gemini-3.8-flash-low' }),
+    })
+    assert.equal(res.status, 415)
+    assert.equal(runner.calls.length, 0, 'text/plain request must never reach the command runner (no L3 ping)')
+  } finally {
+    server.close()
+  }
+})
+
+test('POST /api/overrides with a cross-origin Origin header is rejected 403', async () => {
+  const env = { AGENT_HUB_HOME: tmpHome() }
+  const server = createServer({ env })
+  const port = await listen(server)
+  try {
+    const res = await rawRequest(port, '/api/overrides', {
+      method: 'POST',
+      headers: { Host: '127.0.0.1', 'Content-Type': 'application/json', Origin: 'http://evil.example' },
+      body: JSON.stringify({ agent: 'agy', model: 'gemini-3.8-flash-low', hold: true }),
+    })
+    assert.equal(res.status, 403)
+    assert.match(res.body.error, /cross-origin/)
+  } finally {
+    server.close()
+  }
+})
+
+test('POST /api/overrides with a matching loopback Origin header is allowed', async () => {
+  const env = { AGENT_HUB_HOME: tmpHome() }
+  const server = createServer({ env })
+  const port = await listen(server)
+  try {
+    const res = await rawRequest(port, '/api/overrides', {
+      method: 'POST',
+      headers: { Host: '127.0.0.1', 'Content-Type': 'application/json', Origin: `http://127.0.0.1:${port}` },
+      body: JSON.stringify({ agent: 'agy', model: 'gemini-3.8-flash-low', hold: true }),
+    })
+    assert.equal(res.status, 200)
+    assert.equal(res.body.hold, true)
+  } finally {
+    server.close()
+  }
+})
+
+test('POST /api/overrides with a body over 64 KiB is rejected 413', async () => {
+  const env = { AGENT_HUB_HOME: tmpHome() }
+  const server = createServer({ env })
+  const port = await listen(server)
+  try {
+    const oversized = JSON.stringify({ agent: 'agy', model: 'x'.repeat(70 * 1024), hold: true })
+    const res = await rawRequest(port, '/api/overrides', {
+      method: 'POST',
+      headers: { Host: '127.0.0.1', 'Content-Type': 'application/json', 'Content-Length': Buffer.byteLength(oversized) },
+      body: oversized,
+    })
+    assert.equal(res.status, 413)
+    assert.match(res.body.error, /payload too large/)
+  } finally {
+    server.close()
+  }
+})
+
+test('POST /api/overrides with malformed JSON is rejected 400 (not silently treated as {})', async () => {
+  const env = { AGENT_HUB_HOME: tmpHome() }
+  const server = createServer({ env })
+  const port = await listen(server)
+  try {
+    const res = await rawRequest(port, '/api/overrides', {
+      method: 'POST',
+      headers: { Host: '127.0.0.1', 'Content-Type': 'application/json' },
+      body: '{not json',
+    })
+    assert.equal(res.status, 400)
+    assert.match(res.body.error, /invalid JSON body/)
+  } finally {
+    server.close()
+  }
+})
+
+test('a well-formed loopback JSON request still works end-to-end: refresh, overrides POST/DELETE and job cancel', async () => {
+  const env = { AGENT_HUB_HOME: tmpHome() }
+  const runner = fakeRunner([
+    ['--version', { stdout: 'v', stderr: '', code: 0 }],
+    [/models|help config/, { stdout: 'gemini-3.8-flash-low\tlabel\n', stderr: '', code: 0 }],
+  ])
+  const server = createServer({ env, commandRunner: runner })
+  const port = await listen(server)
+  try {
+    const refreshRes = await postJson(port, '/api/agents/refresh', {})
+    assert.equal(refreshRes.status, 200)
+
+    const setRes = await postJson(port, '/api/overrides', { agent: 'agy', model: 'gemini-3.8-flash-low', hold: true })
+    assert.equal(setRes.status, 200)
+
+    const delRes = await postJson(port, '/api/overrides/agy/gemini-3.8-flash-low', undefined, { method: 'DELETE' })
+    assert.equal(delRes.status, 200)
+
+    const cancelRes = await postJson(port, '/api/jobs/does-not-exist/cancel', undefined, { method: 'POST' })
+    assert.notEqual(cancelRes.status, 403)
+    assert.notEqual(cancelRes.status, 415)
   } finally {
     server.close()
   }

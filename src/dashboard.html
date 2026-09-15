@@ -1048,11 +1048,13 @@
     document.getElementById('count-events').textContent = String(state.events.length);
   }
 
-  // POST/DELETE JSON helper shared by every dashboard write action.
+  // POST/DELETE JSON helper shared by every dashboard write action. The
+  // server now requires application/json on every write route (it forces a
+  // CORS preflight, closing a cross-site <form>/no-cors-fetch path), so the
+  // header goes on every request here regardless of whether it carries a body.
   function apiRequest(method, url, body) {
-    var opts = { method: method };
+    var opts = { method: method, headers: { 'Content-Type': 'application/json' } };
     if (body !== undefined) {
-      opts.headers = { 'Content-Type': 'application/json' };
       opts.body = JSON.stringify(body);
     }
     return fetch(url, opts).then(function (r) {
@@ -1259,7 +1261,7 @@
         btn.disabled = true;
         if (label) label.textContent = 'Canceling…';
 
-        fetch('/api/jobs/' + encodeURIComponent(jobId) + '/cancel', { method: 'POST' })
+        fetch('/api/jobs/' + encodeURIComponent(jobId) + '/cancel', { method: 'POST', headers: { 'Content-Type': 'application/json' } })
           .then(function (r) {
             if (!r.ok) throw new Error('Failed with status ' + r.status);
             return r.json();
