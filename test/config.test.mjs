@@ -1,6 +1,6 @@
 import { test } from 'node:test'
 import assert from 'node:assert/strict'
-import { DEFAULT_TIMEOUTS_S, resolveTimeoutS, KILL_GRACE_S, MODEL_REGISTRY, resolveVariant, CIRCUIT_BREAKER } from '../src/config.mjs'
+import { DEFAULT_TIMEOUTS_S, resolveTimeoutS, KILL_GRACE_S, MODEL_REGISTRY, resolveVariant, CIRCUIT_BREAKER, paths } from '../src/config.mjs'
 
 test('agy timeouts match observed real runs (278s/303s on medium/high were being cut by the old 90s/180s defaults)', () => {
   assert.equal(DEFAULT_TIMEOUTS_S.agy['gemini-3.8-flash-low'], 300)
@@ -39,4 +39,10 @@ test('the circuit breaker treats billing as an immediate-open kind, distinct fro
   assert.ok(CIRCUIT_BREAKER.failureKinds.has('billing'))
   assert.ok(CIRCUIT_BREAKER.immediateKinds.has('billing'))
   assert.ok(!CIRCUIT_BREAKER.immediateKinds.has('quota'))
+})
+
+test('paths() exposes discoveryFile and overridesFile under the state home', () => {
+  const p = paths({ AGENT_HUB_HOME: '/tmp/fake-home' })
+  assert.equal(p.discoveryFile, '/tmp/fake-home/discovery.json')
+  assert.equal(p.overridesFile, '/tmp/fake-home/overrides.json')
 })

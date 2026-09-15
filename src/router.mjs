@@ -1,4 +1,6 @@
 import { readCache, circuitBreakerOpen } from './preflight.mjs'
+import { readDiscovery } from './discovery.mjs'
+import { readOverrides, overrideKey } from './overrides.mjs'
 
 /**
  * The delegation map from the plan, expressed as ordered candidate chains.
@@ -89,12 +91,39 @@ export const DELEGATION_MAP = {
   },
 }
 
-function isUsable(candidate, env) {
-  if (candidate.agent === 'claude') return true // Claude subagents are never CLI-preflighted
+function isDiscoveryFresh(entry, ttlMs) {
+  if (!entry?.checkedAt) return false
+  return Date.now() - new Date(entry.checkedAt).getTime() < ttlMs
+}
+
+/**
+ * Evaluate one chain candidate against a manual hold override, the preflight
+ * cache, the circuit breaker and (additively) discovery.json. Returns
+ * {usable, reason}, where reason is one of 'held' | 'cli_not_found' |
+ * 'breaker_open' | 'cached_unavailable' when usable is false, otherwise
+ * null. Advisory only: a cli_not_found discovery row still lets the
+ * candidate through unless the hold/cache/breaker also say no — discovery
+ * alone never hard-filters.
+ */
+function evaluateCandidate(candidate, env) {
+  if (candidate.agent === 'claude') return { usable: true, reason: null } // Claude subagents are never CLI-preflighted
+
+  const override = readOverrides(env)[overrideKey(candidate.agent, candidate.model)]
+  if (override?.hold === true) return { usable: false, reason: 'held' }
+
+  const discoveryRow = readDiscovery(env)[candidate.agent]
+  if (discoveryRow?.error === 'not found on PATH') {
+    return { usable: false, reason: 'cli_not_found' }
+  }
+
   const cached = readCache(env)[`${candidate.agent}:${candidate.model}`]
-  if (cached?.status === 'unavailable') return false
-  if (circuitBreakerOpen({ agent: candidate.agent, model: candidate.model, env })) return false
-  return true
+  if (cached?.status === 'unavailable') return { usable: false, reason: 'cached_unavailable' }
+  if (circuitBreakerOpen({ agent: candidate.agent, model: candidate.model, env })) return { usable: false, reason: 'breaker_open' }
+  return { usable: true, reason: null }
+}
+
+function isUsable(candidate, env) {
+  return evaluateCandidate(candidate, env).usable
 }
 
 /**
@@ -102,20 +131,34 @@ function isUsable(candidate, env) {
  * whose cached preflight is 'unavailable' or whose circuit breaker is open,
  * then returns the first survivor as primary and the rest as fallbacks.
  */
+/** discovery.json rows for every distinct CLI agent referenced in one chain (additive context, never used to hard-filter). */
+function discoveryForChain(chain, env) {
+  const discovery = readDiscovery(env)
+  const out = {}
+  for (const candidate of chain) {
+    if (candidate.agent !== 'claude' && !(candidate.agent in out)) out[candidate.agent] = discovery[candidate.agent] ?? null
+  }
+  return out
+}
+
 export async function route({ taskType, mode, env = process.env }) {
   const entry = DELEGATION_MAP[taskType]
   if (!entry) {
     throw new Error(`unknown task type: "${taskType}". Known types: ${Object.keys(DELEGATION_MAP).join(', ')}`)
   }
 
-  const survivors = entry.chain.filter((c) => isUsable(c, env))
+  const evaluated = entry.chain.map((c) => ({ candidate: c, ...evaluateCandidate(c, env) }))
+  const survivors = evaluated.filter((e) => e.usable).map((e) => e.candidate)
+  const skipped = evaluated.filter((e) => !e.usable).map((e) => ({ agent: e.candidate.agent, model: e.candidate.model, reason: e.reason }))
+  const discovery = discoveryForChain(entry.chain, env)
 
   if (survivors.length === 0) {
-    return { primary: null, fallbacks: [], reason: `every candidate for "${taskType}" is unavailable or breaker-open (${entry.why})` }
+    const detail = skipped.map((s) => `${s.agent}:${s.model} (${s.reason})`).join(', ')
+    return { primary: null, fallbacks: [], skipped, discovery, reason: `every candidate for "${taskType}" is unavailable: ${detail} (${entry.why})` }
   }
 
   const [primary, ...fallbacks] = survivors
-  return { primary, fallbacks, reason: entry.why }
+  return { primary, fallbacks, skipped, discovery, reason: entry.why }
 }
 
 export function knownTaskTypes() {

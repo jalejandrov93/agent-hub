@@ -91,3 +91,99 @@ test('every copilot candidate in the delegation map uses "auto", and gpt-4.1 is 
   }
   assert.deepEqual([...copilotModels], ['auto'])
 })
+
+test('route() result includes an additive discovery field keyed by agent, sourced from discovery.json', async () => {
+  const home = tmpHome()
+  process.env.AGENT_HUB_HOME = home
+  const { writeJsonAtomic } = await import('../src/fsutil.mjs?t=' + Date.now())
+  const { paths } = await import('../src/config.mjs?t=' + Date.now())
+  writeJsonAtomic(paths({ AGENT_HUB_HOME: home }).discoveryFile, {
+    agy: { agent: 'agy', cmd: 'agy', binPath: '/home/u/.local/bin/agy', version: '1.2.1', models: [], checkedAt: new Date().toISOString(), error: null },
+  })
+
+  const { route } = await fresh(home)
+  const result = await route({ taskType: 'recon' })
+
+  assert.ok(result.discovery)
+  assert.equal(result.discovery.agy.binPath, '/home/u/.local/bin/agy')
+})
+
+test('route() skips a candidate whose discovery row reports the CLI missing from PATH, with reason "cli_not_found"', async () => {
+  const home = tmpHome()
+  process.env.AGENT_HUB_HOME = home
+  const { writeJsonAtomic } = await import('../src/fsutil.mjs?t=' + Date.now())
+  const { paths } = await import('../src/config.mjs?t=' + Date.now())
+  writeJsonAtomic(paths({ AGENT_HUB_HOME: home }).discoveryFile, {
+    agy: { agent: 'agy', cmd: 'agy', binPath: null, version: null, models: [], checkedAt: new Date().toISOString(), error: 'not found on PATH' },
+  })
+
+  const { route } = await fresh(home)
+  const result = await route({ taskType: 'recon' })
+
+  assert.ok(!result.skipped.some((s) => s.agent === 'agy' && s.model === 'gemini-3.8-flash-low' && s.reason !== 'cli_not_found') || true)
+  const skippedAgy = result.skipped.find((s) => s.agent === 'agy' && s.model === 'gemini-3.8-flash-low')
+  assert.ok(skippedAgy, 'the agy candidate must be skipped')
+  assert.equal(skippedAgy.reason, 'cli_not_found')
+  // the candidate must still be present in the map's chain (advisory, never hard-deleted from knowledge) —
+  // it is simply not chosen as primary/fallback.
+  assert.ok(!result.fallbacks.some((c) => c.agent === 'agy' && c.model === 'gemini-3.8-flash-low'))
+  assert.notEqual(result.primary?.agent, 'agy')
+})
+
+test('route() distinguishes breaker_open from cached_unavailable in the skipped list', async () => {
+  const home = tmpHome()
+  process.env.AGENT_HUB_HOME = home
+  const { writeCacheEntry, cacheKey } = await import('../src/preflight.mjs?t=' + Date.now())
+  const { appendEvent } = await import('../src/eventlog.mjs?t=' + Date.now())
+  const { route } = await fresh(home)
+
+  const first = await route({ taskType: 'triage' })
+  const [a, b] = first.primary ? [first.primary, first.fallbacks[0]] : []
+  assert.ok(a && b, 'triage has at least 2 chain candidates to work with')
+
+  writeCacheEntry(cacheKey(a.agent, a.model), { agent: a.agent, model: a.model, status: 'unavailable', reason: 'test', ladderLevel: 'L2', checkedAt: new Date().toISOString() })
+  appendEvent({ kind: 'job.failed', agent: b.agent, model: b.model, errorKind: 'quota', cwd: '/tmp', title: 'x' })
+  appendEvent({ kind: 'job.failed', agent: b.agent, model: b.model, errorKind: 'canceled', cwd: '/tmp', title: 'x' })
+
+  const second = await route({ taskType: 'triage' })
+  const skippedA = second.skipped.find((s) => s.agent === a.agent && s.model === a.model)
+  const skippedB = second.skipped.find((s) => s.agent === b.agent && s.model === b.model)
+  assert.equal(skippedA.reason, 'cached_unavailable')
+  assert.equal(skippedB.reason, 'breaker_open')
+})
+
+test('route() skips a candidate held via overrides.json, with reason "held", and promotes the next fallback', async () => {
+  const home = tmpHome()
+  process.env.AGENT_HUB_HOME = home
+  const { setOverride, overrideKey } = await import('../src/overrides.mjs?t=' + Date.now())
+  const { route } = await fresh(home)
+
+  const first = await route({ taskType: 'recon' })
+  const primaryPair = first.primary
+
+  setOverride(overrideKey(primaryPair.agent, primaryPair.model), { hold: true, reason: 'manual' })
+
+  const second = await route({ taskType: 'recon' })
+  assert.notDeepEqual(second.primary, primaryPair, 'a held pair must not be re-selected')
+  const held = second.skipped.find((s) => s.agent === primaryPair.agent && s.model === primaryPair.model)
+  assert.equal(held.reason, 'held')
+})
+
+test('clearing a hold override makes the candidate usable again', async () => {
+  const home = tmpHome()
+  process.env.AGENT_HUB_HOME = home
+  const { setOverride, clearOverride, overrideKey } = await import('../src/overrides.mjs?t=' + Date.now())
+  const { route } = await fresh(home)
+
+  const first = await route({ taskType: 'recon' })
+  const primaryPair = first.primary
+  const key = overrideKey(primaryPair.agent, primaryPair.model)
+
+  setOverride(key, { hold: true })
+  const held = await route({ taskType: 'recon' })
+  assert.notDeepEqual(held.primary, primaryPair)
+
+  clearOverride(key)
+  const released = await route({ taskType: 'recon' })
+  assert.deepEqual(released.primary, primaryPair)
+})

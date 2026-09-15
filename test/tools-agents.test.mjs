@@ -1,0 +1,74 @@
+import { test } from 'node:test'
+import assert from 'node:assert/strict'
+import fs from 'node:fs'
+import path from 'node:path'
+import os from 'node:os'
+
+function tmpHome() {
+  return fs.mkdtempSync(path.join(os.tmpdir(), 'agent-hub-tools-agents-'))
+}
+
+async function fresh(home) {
+  process.env.AGENT_HUB_HOME = home
+  return import('../src/tools/agents.mjs?t=' + Date.now() + Math.random())
+}
+
+function fakeRunner(responses) {
+  const calls = []
+  const runner = async (cmd, args) => {
+    calls.push({ cmd, args })
+    const key = `${cmd} ${args.join(' ')}`
+    for (const [pattern, response] of responses) {
+      if (typeof pattern === 'string' ? key.includes(pattern) : pattern.test(key)) return response
+    }
+    throw new Error(`fakeRunner: no response configured for "${key}"`)
+  }
+  runner.calls = calls
+  return runner
+}
+
+test('defaultPairs lists every distinct agent:model pair from DELEGATION_MAP, excluding claude tiers', async () => {
+  const { defaultPairs } = await fresh(tmpHome())
+  const pairs = defaultPairs()
+  assert.ok(pairs.length > 0)
+  assert.ok(!pairs.some((p) => p.agent === 'claude'))
+  const keys = pairs.map((p) => `${p.agent}:${p.model}`)
+  assert.equal(new Set(keys).size, keys.length, 'no duplicate pairs')
+})
+
+test('agentsStatusTool rows include binPath/cliVersion resolved from discovery.json (null when discovery has no row)', async () => {
+  const home = tmpHome()
+  const { agentsStatusTool } = await fresh(home)
+  const runner = fakeRunner([
+    ['--version', { stdout: 'v', stderr: '', code: 0 }],
+    [/models|help config/, { stdout: 'gemini-3.8-flash-low\tlabel\n', stderr: '', code: 0 }],
+  ])
+
+  const rows = await agentsStatusTool({ cwd: '/tmp', env: { AGENT_HUB_HOME: home }, commandRunner: runner })
+
+  assert.ok(rows.length > 0)
+  for (const row of rows) {
+    assert.ok('binPath' in row)
+    assert.ok('cliVersion' in row)
+  }
+})
+
+test('agentsStatusTool surfaces the real binPath/cliVersion once discovery.json has a fresh row for that agent', async () => {
+  const home = tmpHome()
+  const { writeJsonAtomic } = await import('../src/fsutil.mjs?t=' + Date.now())
+  const { paths } = await import('../src/config.mjs?t=' + Date.now())
+  writeJsonAtomic(paths({ AGENT_HUB_HOME: home }).discoveryFile, {
+    agy: { agent: 'agy', cmd: 'agy', binPath: '/home/u/.local/bin/agy', version: '1.2.1', models: [], checkedAt: new Date().toISOString(), error: null },
+  })
+
+  const { agentsStatusTool } = await fresh(home)
+  const runner = fakeRunner([
+    ['--version', { stdout: 'v', stderr: '', code: 0 }],
+    [/models|help config/, { stdout: 'gemini-3.8-flash-low\tlabel\n', stderr: '', code: 0 }],
+  ])
+
+  const rows = await agentsStatusTool({ cwd: '/tmp', env: { AGENT_HUB_HOME: home }, commandRunner: runner })
+  const agyRow = rows.find((r) => r.agent === 'agy')
+  assert.equal(agyRow.binPath, '/home/u/.local/bin/agy')
+  assert.equal(agyRow.cliVersion, '1.2.1')
+})

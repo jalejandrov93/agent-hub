@@ -14,7 +14,10 @@ async function connect() {
   const transport = new StdioClientTransport({
     command: process.execPath,
     args: [ENTRY],
-    env: { ...process.env, AGENT_HUB_HOME: home },
+    // Startup discovery (src/startup.mjs) spawns real agy/opencode/copilot
+    // processes in the background once the server boots for real; this
+    // suite must never do that, so every spawned server disables it.
+    env: { ...process.env, AGENT_HUB_HOME: home, AGENT_HUB_DISABLE_STARTUP_DISCOVERY: '1' },
     stderr: 'ignore',
   })
   const client = new Client({ name: 'test', version: '1.0.0' })
@@ -30,6 +33,17 @@ test('the server boots over stdio and exposes the full tool set', async () => {
       tools.map((t) => t.name).sort(),
       ['agents_status', 'delegate', 'job_cancel', 'job_reply', 'job_result', 'job_status', 'job_wait', 'route']
     )
+  } finally {
+    await close()
+  }
+})
+
+test('listTools() resolves quickly — startup discovery (background CLI spawns) never blocks the stdio handshake', async () => {
+  const { client, close } = await connect()
+  try {
+    const startedAt = Date.now()
+    await client.listTools()
+    assert.ok(Date.now() - startedAt < 2000, 'the handshake + first tool call should never wait on CLI discovery')
   } finally {
     await close()
   }

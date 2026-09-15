@@ -293,3 +293,209 @@ test('pingAgent (L3): copilot writes the model-unavailable rejection to STDERR (
   assert.equal(entry.status, 'unavailable')
   assert.match(entry.reason, /model_unavailable/)
 })
+
+test('runPreflight consumes an optional modelsById and never spawns the models-list command', async () => {
+  const { runPreflight } = await fresh(tmpHome())
+  const runner = fakeRunner([['--version', { stdout: '1.2.1', stderr: '', code: 0 }]])
+
+  const entry = await runPreflight({
+    agent: 'agy',
+    model: 'gemini-3.8-flash-low',
+    cwd: '/tmp',
+    commandRunner: runner,
+    level: 'L2',
+    modelsById: { 'gemini-3.8-flash-low': { id: 'gemini-3.8-flash-low' } },
+  })
+
+  assert.equal(entry.status, 'ready')
+  assert.ok(!runner.calls.some((c) => c.args.includes('models')), 'the models-list command must never be spawned when modelsById is given')
+})
+
+test('runPreflight marks unavailable a model absent from a given modelsById, without spawning a fallback listing', async () => {
+  const { runPreflight } = await fresh(tmpHome())
+  const runner = fakeRunner([['--version', { stdout: '1.2.1', stderr: '', code: 0 }]])
+
+  const entry = await runPreflight({
+    agent: 'agy',
+    model: 'not-in-discovery',
+    cwd: '/tmp',
+    commandRunner: runner,
+    level: 'L2',
+    modelsById: { 'gemini-3.8-flash-low': { id: 'gemini-3.8-flash-low' } },
+  })
+
+  assert.equal(entry.status, 'unavailable')
+  assert.match(entry.reason, /not listed/i)
+  assert.equal(runner.calls.length, 1, 'only --version ran; no models-list spawn')
+})
+
+test('agentsStatus lists the models-list command only once for 3 pairs of the same agent', async () => {
+  const home = tmpHome()
+  const { agentsStatus } = await fresh(home)
+  const runner = fakeRunner([
+    ['--version', { stdout: '1.2.1', stderr: '', code: 0 }],
+    [
+      'models',
+      {
+        stdout: ['gemini-3.8-flash-low', 'gemini-3.8-flash-medium', 'gemini-3.8-flash-high']
+          .map((id) => `${id}\tlabel`)
+          .join('\n'),
+        stderr: '',
+        code: 0,
+      },
+    ],
+  ])
+
+  const results = await agentsStatus({
+    agents: [
+      { agent: 'agy', model: 'gemini-3.8-flash-low' },
+      { agent: 'agy', model: 'gemini-3.8-flash-medium' },
+      { agent: 'agy', model: 'gemini-3.8-flash-high' },
+    ],
+    cwd: '/tmp',
+    commandRunner: runner,
+  })
+
+  assert.equal(results.length, 3)
+  assert.ok(results.every((r) => r.status === 'ready'))
+  const modelsCalls = runner.calls.filter((c) => c.args.includes('models'))
+  assert.equal(modelsCalls.length, 1, 'the models-list command must be spawned once, not once per pair')
+})
+
+test('agentsStatus preserves the input pair order in its results', async () => {
+  const home = tmpHome()
+  const { agentsStatus } = await fresh(home)
+  const runner = fakeRunner([
+    ['--version', { stdout: 'v', stderr: '', code: 0 }],
+    [/models|help config/, { stdout: 'gemini-3.8-flash-low\tlabel\n', stderr: '', code: 0 }],
+  ])
+
+  const results = await agentsStatus({
+    agents: [
+      { agent: 'copilot', model: 'auto' },
+      { agent: 'agy', model: 'gemini-3.8-flash-low' },
+    ],
+    cwd: '/tmp',
+    commandRunner: runner,
+  })
+
+  assert.deepEqual(results.map((r) => `${r.agent}:${r.model}`), ['copilot:auto', 'agy:gemini-3.8-flash-low'])
+})
+
+test('agentsStatus runs different agents in parallel, not one after another', async () => {
+  const home = tmpHome()
+  const { agentsStatus } = await fresh(home)
+  const DELAY_MS = 120
+  const runner = async (cmd, args) => {
+    await new Promise((r) => setTimeout(r, DELAY_MS))
+    if (args.includes('--version')) return { stdout: 'v', stderr: '', code: 0 }
+    return { stdout: 'gemini-3.8-flash-low\tlabel\n', stderr: '', code: 0 }
+  }
+
+  const startedAt = Date.now()
+  await agentsStatus({
+    agents: [
+      { agent: 'agy', model: 'gemini-3.8-flash-low' },
+      { agent: 'copilot', model: 'auto' },
+    ],
+    cwd: '/tmp',
+    commandRunner: runner,
+  })
+  const elapsed = Date.now() - startedAt
+
+  // Serial would be roughly 2 agents * 2 calls (version+models) * DELAY_MS =
+  // ~480ms for agy (copilot auto skips the models call: ~120ms). Parallel
+  // across agents means total wall time should track the slower agent
+  // (agy, ~240ms) plus scheduling slack, well under the serial sum.
+  assert.ok(elapsed < DELAY_MS * 3, `expected parallel agents to finish well under ${DELAY_MS * 3}ms, took ${elapsed}ms`)
+})
+
+test('agentsStatus consumes a fresh discovery.json for an agent instead of spawning its own models-list call', async () => {
+  const home = tmpHome()
+  process.env.AGENT_HUB_HOME = home
+  const { writeJsonAtomic } = await import('../src/fsutil.mjs?t=' + Date.now())
+  const { paths } = await import('../src/config.mjs?t=' + Date.now())
+  writeJsonAtomic(paths({ AGENT_HUB_HOME: home }).discoveryFile, {
+    agy: {
+      agent: 'agy',
+      cmd: 'agy',
+      binPath: '/fake/agy',
+      version: '1.2.1',
+      models: [{ id: 'gemini-3.8-flash-low', label: 'label' }],
+      checkedAt: new Date().toISOString(),
+      error: null,
+    },
+  })
+
+  const { agentsStatus } = await fresh(home)
+  const runner = fakeRunner([['--version', { stdout: '1.2.1', stderr: '', code: 0 }]])
+
+  const results = await agentsStatus({ agents: [{ agent: 'agy', model: 'gemini-3.8-flash-low' }], cwd: '/tmp', commandRunner: runner })
+
+  assert.equal(results[0].status, 'ready')
+  assert.ok(!runner.calls.some((c) => c.args.includes('models')), 'a fresh discovery.json row must be reused instead of spawning models-list')
+})
+
+test('circuitBreakerOpen ignores quota/canceled failures at or before an override breakerReset timestamp', async () => {
+  const home = tmpHome()
+  process.env.AGENT_HUB_HOME = home
+  const { appendEvent } = await import('../src/eventlog.mjs?t=' + Date.now())
+  appendEvent({ kind: 'job.failed', agent: 'agy', model: 'gemini-3.8-flash-low', errorKind: 'quota', cwd: '/tmp', title: 'x' })
+  appendEvent({ kind: 'job.failed', agent: 'agy', model: 'gemini-3.8-flash-low', errorKind: 'canceled', cwd: '/tmp', title: 'x' })
+
+  const { setOverride, overrideKey } = await import('../src/overrides.mjs?t=' + Date.now())
+  // breakerReset set to "now" (after both failures above) must wipe them out.
+  setOverride(overrideKey('agy', 'gemini-3.8-flash-low'), { breakerReset: new Date().toISOString() })
+
+  const { circuitBreakerOpen } = await fresh(home)
+  assert.equal(circuitBreakerOpen({ agent: 'agy', model: 'gemini-3.8-flash-low' }), false)
+})
+
+test('circuitBreakerOpen still counts a failure that happens after the breakerReset timestamp', async () => {
+  const home = tmpHome()
+  process.env.AGENT_HUB_HOME = home
+  const { setOverride, overrideKey } = await import('../src/overrides.mjs?t=' + Date.now())
+  setOverride(overrideKey('agy', 'gemini-3.8-flash-low'), { breakerReset: new Date(Date.now() - 60_000).toISOString() })
+
+  const { appendEvent } = await import('../src/eventlog.mjs?t=' + Date.now())
+  appendEvent({ kind: 'job.failed', agent: 'agy', model: 'gemini-3.8-flash-low', errorKind: 'quota', cwd: '/tmp', title: 'x' })
+  appendEvent({ kind: 'job.failed', agent: 'agy', model: 'gemini-3.8-flash-low', errorKind: 'canceled', cwd: '/tmp', title: 'x' })
+
+  const { circuitBreakerOpen } = await fresh(home)
+  assert.equal(circuitBreakerOpen({ agent: 'agy', model: 'gemini-3.8-flash-low' }), true, 'failures after breakerReset must still open the breaker')
+})
+
+test('agentsStatus emits one "preflight" event per pair when announce:true (dashboard/refresh paths only)', async () => {
+  const home = tmpHome()
+  process.env.AGENT_HUB_HOME = home
+  const { agentsStatus } = await fresh(home)
+  const { readTail } = await import('../src/eventlog.mjs?t=' + Date.now())
+  const runner = fakeRunner([
+    ['--version', { stdout: 'v', stderr: '', code: 0 }],
+    [/models|help config/, { stdout: 'gemini-3.8-flash-low\tlabel\n', stderr: '', code: 0 }],
+  ])
+
+  await agentsStatus({ agents: [{ agent: 'agy', model: 'gemini-3.8-flash-low' }], cwd: '/tmp', commandRunner: runner, announce: true })
+
+  const events = readTail({ env: { AGENT_HUB_HOME: home } }).filter((e) => e.kind === 'preflight' && e.phase === 'agent')
+  assert.equal(events.length, 1)
+  assert.equal(events[0].agent, 'agy')
+  assert.equal(events[0].model, 'gemini-3.8-flash-low')
+  assert.equal(events[0].status, 'ready')
+})
+
+test('agentsStatus emits no "preflight" event when announce is false (the default)', async () => {
+  const home = tmpHome()
+  process.env.AGENT_HUB_HOME = home
+  const { agentsStatus } = await fresh(home)
+  const { readTail } = await import('../src/eventlog.mjs?t=' + Date.now())
+  const runner = fakeRunner([
+    ['--version', { stdout: 'v', stderr: '', code: 0 }],
+    [/models|help config/, { stdout: 'gemini-3.8-flash-low\tlabel\n', stderr: '', code: 0 }],
+  ])
+
+  await agentsStatus({ agents: [{ agent: 'agy', model: 'gemini-3.8-flash-low' }], cwd: '/tmp', commandRunner: runner })
+
+  const events = readTail({ env: { AGENT_HUB_HOME: home } }).filter((e) => e.kind === 'preflight')
+  assert.equal(events.length, 0)
+})

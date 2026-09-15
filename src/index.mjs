@@ -8,6 +8,7 @@ import { paths } from './config.mjs'
 import { reconcileOrphans } from './jobstore.mjs'
 import { agentsStatusTool, routeTool, knownTaskTypes } from './tools/agents.mjs'
 import { delegateTool, jobWaitTool, jobStatusTool, jobResultTool, jobCancelTool, jobReplyTool } from './tools/jobs.mjs'
+import { scheduleStartupDiscovery } from './startup.mjs'
 
 const VERSION = '1.0.0'
 const TESTED_VERSIONS = { agy: '1.2.1', opencode: '1.18.30', copilot: '1.0.31' }
@@ -203,6 +204,10 @@ async function main() {
 
   const changed = reconcileOrphans()
   if (changed.length > 0) log(`reconciled ${changed.length} orphaned job(s) on startup: ${changed.join(', ')}`)
+
+  // Fire-and-forget: never awaited, so a slow/missing CLI never delays the
+  // stdio handshake below. See src/startup.mjs for the non-blocking wiring.
+  scheduleStartupDiscovery()
 
   const server = buildServer()
   await server.connect(new StdioServerTransport())

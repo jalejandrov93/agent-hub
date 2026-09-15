@@ -15,6 +15,8 @@ export function paths(env = process.env) {
     home,
     eventsFile: path.join(home, 'events.jsonl'),
     preflightCacheFile: path.join(home, 'preflight-cache.json'),
+    discoveryFile: path.join(home, 'discovery.json'),
+    overridesFile: path.join(home, 'overrides.json'),
     runsDir: path.join(home, 'runs'),
     locksDir: path.join(home, 'runs', '.locks'),
   }
@@ -39,8 +41,6 @@ export const CIRCUIT_BREAKER = {
  * graceful exit time to happen before jobrunner's outer SIGTERM->SIGKILL.
  */
 export const KILL_GRACE_S = 30
-
-export const CONCURRENCY_CAP_PER_AGENT = 2
 
 /**
  * Cwd paths allowed to accept a write-mode job even outside a secondary git
