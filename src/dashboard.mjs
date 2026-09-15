@@ -12,64 +12,164 @@ import { readOverrides, setOverride, clearOverride, overrideKey } from './overri
 import { DELEGATION_MAP } from './router.mjs'
 import { defaultPairs } from './tools/agents.mjs'
 import { runCommand } from './process.mjs'
+import { computeMetrics } from './metrics.mjs'
+import { listProposals, refreshProposals, decideProposal } from './proposals.mjs'
+import { listLearnings, proposeLearning, decideLearning, deleteLearning } from './learnings.mjs'
+import { jobResultTool } from './tools/jobs.mjs'
 
 const HERE = path.dirname(fileURLToPath(import.meta.url))
-const DEFAULT_ASSET_DIR = path.join(HERE, 'dashboard')
+// The Vite-built React app lands here (built by a separate package); this
+// server only serves its output, never its sources.
+const DEFAULT_DIST_DIR = path.join(HERE, '..', 'dashboard', 'dist')
 
-// Exact-string allowlist of the dashboard's static bundle. Every value here
-// is a fixed, known-safe relative path baked into this file — never derived
-// from the request URL — so joining it onto assetDir can never escape
-// assetDir, regardless of what a client sends as the request path. A
-// request path not present as a KEY here is 404, full stop; there is no
-// filesystem path join from the URL itself.
-const ASSET_MAP = Object.freeze({
-  '/': 'index.html',
-  '/styles.css': 'styles.css',
-  '/app.js': 'app.js',
-  '/router.js': 'router.js',
-  '/store.js': 'store.js',
-  '/api.js': 'api.js',
-  '/contracts.js': 'contracts.js',
-  '/ui/dom.js': 'ui/dom.js',
-  '/ui/format.js': 'ui/format.js',
-  '/ui/badges.js': 'ui/badges.js',
-  '/ui/dialog.js': 'ui/dialog.js',
-  '/ui/menu.js': 'ui/menu.js',
-  '/ui/icons.js': 'ui/icons.js',
-  '/views/overview.js': 'views/overview.js',
-  '/views/agents.js': 'views/agents.js',
-  '/views/jobs.js': 'views/jobs.js',
-  '/views/history.js': 'views/history.js',
-  '/views/subagents.js': 'views/subagents.js',
-  '/views/timeline.js': 'views/timeline.js',
-  '/views/config.js': 'views/config.js',
-})
+const METRICS_GROUP_DIMENSIONS = new Set(['agent', 'model', 'mode', 'taskType'])
 
 const DASHBOARD_CSP =
   "default-src 'self'; script-src 'self'; style-src 'self'; connect-src 'self'; img-src 'self' data:; base-uri 'none'; frame-ancestors 'none'"
 
-/** Content-Type for a served dashboard asset, by its (fixed, allowlisted) file extension. */
-function assetContentType(relPath) {
-  if (relPath.endsWith('.html')) return 'text/html; charset=utf-8'
-  if (relPath.endsWith('.css')) return 'text/css; charset=utf-8'
-  return 'text/javascript; charset=utf-8'
+/** Content-Type for a known, safe static-asset extension; null (never served) for anything else. */
+function distContentType(ext) {
+  switch (ext) {
+    case '.js':
+      return 'text/javascript; charset=utf-8'
+    case '.css':
+      return 'text/css; charset=utf-8'
+    case '.woff2':
+      return 'font/woff2'
+    case '.woff':
+      return 'font/woff'
+    case '.svg':
+      return 'image/svg+xml'
+    case '.png':
+      return 'image/png'
+    case '.ico':
+      return 'image/x-icon'
+    case '.json':
+      return 'application/json; charset=utf-8'
+    default:
+      return null
+  }
 }
 
-/** Serve one allowlisted dashboard asset. relPath is always a fixed ASSET_MAP value, never request-derived. */
-function sendAsset(res, assetDir, relPath) {
+/** The `assets/<name>` tail of a manifest file entry or an index.html reference, or null when it isn't under assets/. */
+function assetBaseName(ref) {
+  const idx = ref.lastIndexOf('assets/')
+  if (idx === -1) return null
+  return ref.slice(idx + 'assets/'.length)
+}
+
+/**
+ * Exact-match allowlist (urlPath -> {file, contentType, cacheControl}) built
+ * from distDir's index.html and (when present) its .vite/manifest.json.
+ * Every `file` value here is a path this function itself joined from a
+ * discovered, known-safe asset name — never from a request URL — so the
+ * request-handling side only ever does a Map lookup by exact decoded
+ * pathname, with no filesystem path join from client input. Returns null
+ * when index.html itself is missing (dashboard not built).
+ */
+function buildDistAllowlist(distDir) {
+  const indexPath = path.join(distDir, 'index.html')
+  let indexHtml
+  try {
+    indexHtml = fs.readFileSync(indexPath, 'utf8')
+  } catch {
+    return null
+  }
+
+  const assetNames = new Set()
+
+  try {
+    const manifest = JSON.parse(fs.readFileSync(path.join(distDir, '.vite', 'manifest.json'), 'utf8'))
+    for (const entry of Object.values(manifest)) {
+      const refs = [entry.file, ...(entry.css ?? []), ...(entry.assets ?? [])].filter(Boolean)
+      for (const ref of refs) {
+        const base = assetBaseName(ref)
+        if (base) assetNames.add(base)
+      }
+    }
+  } catch {
+    // No manifest, or it's malformed — index.html's own asset references (below) still work.
+  }
+
+  for (const match of indexHtml.matchAll(/assets\/[^"'\s>]+/g)) {
+    const base = assetBaseName(match[0])
+    if (base) assetNames.add(base)
+  }
+
+  const allowlist = new Map()
+  const indexEntry = { file: indexPath, contentType: 'text/html; charset=utf-8', cacheControl: 'no-cache' }
+  allowlist.set('/', indexEntry)
+  allowlist.set('/index.html', indexEntry)
+
+  for (const base of assetNames) {
+    const contentType = distContentType(path.extname(base))
+    if (!contentType) continue // unknown extension — never allowlisted
+    allowlist.set(`/assets/${base}`, {
+      file: path.join(distDir, 'assets', base),
+      contentType,
+      cacheControl: 'public, max-age=31536000, immutable',
+    })
+  }
+
+  return allowlist
+}
+
+/** Escape text for safe interposition inside an HTML response (the repo-root path in the "not built" page). */
+function escapeHtml(text) {
+  return text.replace(/&/g, '&amp;').replace(/</g, '&lt;').replace(/>/g, '&gt;').replace(/"/g, '&quot;')
+}
+
+/** 503 shown for GET/HEAD "/" when dashboard/dist/index.html doesn't exist yet. */
+function sendDistNotBuilt(res, distDir) {
+  const repoRoot = path.dirname(path.dirname(distDir))
+  const html = `<!doctype html><html><head><meta charset="utf-8"><title>Dashboard not built</title></head><body><h1>Dashboard not built</h1><p>Run <code>npm run build</code> in <code>${escapeHtml(repoRoot)}</code>.</p></body></html>`
+  res.writeHead(503, {
+    'Content-Type': 'text/html; charset=utf-8',
+    'Content-Security-Policy': DASHBOARD_CSP,
+    'X-Content-Type-Options': 'nosniff',
+  })
+  res.end(html)
+}
+
+/** Serve one allowlisted dist asset. `entry` always comes from buildDistAllowlist, never from the request. */
+function sendDistAsset(res, entry) {
   let body
   try {
-    body = fs.readFileSync(path.join(assetDir, relPath))
+    body = fs.readFileSync(entry.file)
   } catch {
     return sendJson(res, 404, { error: 'not found' })
   }
   res.writeHead(200, {
-    'Content-Type': assetContentType(relPath),
-    'Cache-Control': 'no-cache',
+    'Content-Type': entry.contentType,
+    'Cache-Control': entry.cacheControl,
     'Content-Security-Policy': DASHBOARD_CSP,
     'X-Content-Type-Options': 'nosniff',
   })
+  // Node's ServerResponse drops the body automatically for HEAD requests.
   res.end(body)
+}
+
+/** Maps a domain-thrown Error (proposals/learnings/jobs) to a statusCode + expose message sendError() can use. */
+function domainError(error) {
+  if (error?.name === 'ZodError') {
+    const message = error.errors?.[0]?.message ?? 'invalid input'
+    const err = new Error(message)
+    err.statusCode = 400
+    err.expose = message
+    return err
+  }
+  const message = String(error?.message ?? error)
+  if (/not found/i.test(message)) {
+    error.statusCode = 404
+    error.expose = message
+  } else if (/not pending/i.test(message)) {
+    error.statusCode = 409
+    error.expose = message
+  } else if (/invalid|empty/i.test(message)) {
+    error.statusCode = 400
+    error.expose = message
+  }
+  return error
 }
 
 export function isLoopback(remoteAddress) {
@@ -256,8 +356,26 @@ function sendError(res, error) {
   sendJson(res, status, { error: message })
 }
 
-export function createServer({ env = process.env, commandRunner = runCommand, assetDir = DEFAULT_ASSET_DIR } = {}) {
+export function createServer({ env = process.env, commandRunner = runCommand, distDir = DEFAULT_DIST_DIR } = {}) {
   const sseClients = new Set()
+
+  // Rebuilt whenever index.html's mtime changes, so `npm run build` is
+  // picked up without restarting the dashboard process — checked with one
+  // cheap stat() per request rather than a filesystem watcher.
+  let allowlistCache = { mtimeMs: null, map: null }
+  function getDistAllowlist() {
+    let stat
+    try {
+      stat = fs.statSync(path.join(distDir, 'index.html'))
+    } catch {
+      allowlistCache = { mtimeMs: null, map: null }
+      return null
+    }
+    if (allowlistCache.map && allowlistCache.mtimeMs === stat.mtimeMs) return allowlistCache.map
+    const map = buildDistAllowlist(distDir)
+    allowlistCache = { mtimeMs: stat.mtimeMs, map }
+    return map
+  }
 
   const handleRequest = (req, res) => {
     const remoteAddress = req.socket.remoteAddress
@@ -289,9 +407,14 @@ export function createServer({ env = process.env, commandRunner = runCommand, as
       }
     }
 
-    // Node's ServerResponse drops the body automatically for HEAD requests.
-    if ((req.method === 'GET' || req.method === 'HEAD') && Object.prototype.hasOwnProperty.call(ASSET_MAP, url.pathname)) {
-      return sendAsset(res, assetDir, ASSET_MAP[url.pathname])
+    if (req.method === 'GET' || req.method === 'HEAD') {
+      const allowlist = getDistAllowlist()
+      if (!allowlist) {
+        if (url.pathname === '/') return sendDistNotBuilt(res, distDir)
+      } else {
+        const entry = allowlist.get(url.pathname)
+        if (entry) return sendDistAsset(res, entry)
+      }
     }
 
     if (url.pathname === '/api/state' && req.method === 'GET') {
@@ -485,6 +608,119 @@ export function createServer({ env = process.env, commandRunner = runCommand, as
         return sendJson(res, 400, { error: 'invalid URL encoding' })
       }
       sendJson(res, 200, clearOverride(overrideKey(agent, model), env))
+      return
+    }
+
+    if (url.pathname === '/api/metrics' && req.method === 'GET') {
+      const groupByParam = url.searchParams.get('groupBy')
+      let groupBy
+      if (groupByParam) {
+        const requested = groupByParam
+          .split(',')
+          .map((s) => s.trim())
+          .filter((d) => METRICS_GROUP_DIMENSIONS.has(d))
+        if (requested.length > 0) groupBy = requested
+      }
+      sendJson(res, 200, groupBy ? computeMetrics({ env, groupBy }) : computeMetrics({ env }))
+      return
+    }
+
+    if (url.pathname === '/api/proposals' && req.method === 'GET') {
+      sendJson(res, 200, { proposals: listProposals({}, env) })
+      return
+    }
+
+    if (url.pathname === '/api/proposals/refresh' && req.method === 'POST') {
+      try {
+        sendJson(res, 200, { proposals: refreshProposals({ env, map: DELEGATION_MAP }) })
+      } catch (error) {
+        sendError(res, domainError(error))
+      }
+      return
+    }
+
+    const proposalDecisionMatch = url.pathname.match(/^\/api\/proposals\/([^/]+)\/(accept|reject)$/)
+    if (proposalDecisionMatch && req.method === 'POST') {
+      let id
+      try {
+        id = decodeURIComponent(proposalDecisionMatch[1])
+      } catch {
+        return sendJson(res, 400, { error: 'invalid URL encoding' })
+      }
+      const status = proposalDecisionMatch[2] === 'accept' ? 'accepted' : 'rejected'
+      try {
+        sendJson(res, 200, decideProposal(id, status, env))
+      } catch (error) {
+        sendError(res, domainError(error))
+      }
+      return
+    }
+
+    if (url.pathname === '/api/learnings' && req.method === 'GET') {
+      const status = url.searchParams.get('status') ?? undefined
+      sendJson(res, 200, { learnings: listLearnings({ status }, env) })
+      return
+    }
+
+    if (url.pathname === '/api/learnings' && req.method === 'POST') {
+      readJsonBody(req)
+        .then((body) => proposeLearning(body, env, { source: 'dashboard' }))
+        .then((learning) => sendJson(res, 201, learning))
+        .catch((error) => sendError(res, domainError(error)))
+      return
+    }
+
+    const learningDecisionMatch = url.pathname.match(/^\/api\/learnings\/([^/]+)\/(approve|reject)$/)
+    if (learningDecisionMatch && req.method === 'POST') {
+      let id
+      try {
+        id = decodeURIComponent(learningDecisionMatch[1])
+      } catch {
+        return sendJson(res, 400, { error: 'invalid URL encoding' })
+      }
+      const status = learningDecisionMatch[2] === 'approve' ? 'approved' : 'rejected'
+      try {
+        sendJson(res, 200, decideLearning(id, status, env))
+      } catch (error) {
+        sendError(res, domainError(error))
+      }
+      return
+    }
+
+    const learningDeleteMatch = url.pathname.match(/^\/api\/learnings\/([^/]+)$/)
+    if (learningDeleteMatch && req.method === 'DELETE') {
+      let id
+      try {
+        id = decodeURIComponent(learningDeleteMatch[1])
+      } catch {
+        return sendJson(res, 400, { error: 'invalid URL encoding' })
+      }
+      try {
+        sendJson(res, 200, deleteLearning(id, env))
+      } catch (error) {
+        sendError(res, domainError(error))
+      }
+      return
+    }
+
+    const jobResultMatch = url.pathname.match(/^\/api\/jobs\/([^/]+)\/result$/)
+    if (jobResultMatch && req.method === 'GET') {
+      let jobId
+      try {
+        jobId = decodeURIComponent(jobResultMatch[1])
+      } catch {
+        return sendJson(res, 400, { error: 'invalid URL encoding' })
+      }
+      const options = { jobId }
+      const maxLinesParam = url.searchParams.get('maxLines')
+      const tailLinesParam = url.searchParams.get('tailLines')
+      if (maxLinesParam !== null && Number.isFinite(Number(maxLinesParam))) options.maxLines = Number(maxLinesParam)
+      if (tailLinesParam !== null && Number.isFinite(Number(tailLinesParam))) options.tailLines = Number(tailLinesParam)
+      try {
+        sendJson(res, 200, jobResultTool(options))
+      } catch (error) {
+        sendError(res, domainError(error))
+      }
       return
     }
 
