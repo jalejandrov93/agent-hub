@@ -297,7 +297,9 @@ writes files with or without `--dangerously-skip-permissions` (opencode's plan
 agent did respect read mode in testing). A `cwd` outside a git work tree
 produces no snapshot and is reported unverifiable rather than clean, and
 because the guard is a tree diff it also flags changes other processes make in
-the same `cwd` while the job runs.
+the same `cwd` while the job runs. Files ignored by git (for example `.env` or
+build output) are outside the snapshot, so edits to them are not detected: run
+read jobs from a disposable worktree when that matters.
 
 ## MCP tools
 
