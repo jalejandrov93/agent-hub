@@ -1,7 +1,7 @@
 import { test, describe } from 'node:test'
 import assert from 'node:assert/strict'
 
-import { esc, formatAge, formatDuration } from '../src/dashboard/ui/format.js'
+import { esc, formatAge, formatDuration, formatLatency } from '../src/dashboard/ui/format.js'
 import {
   errorBadge,
   navBadges,
@@ -40,6 +40,21 @@ describe('ui/format', () => {
     assert.equal(formatDuration(42), '42s')
     assert.equal(formatDuration(185), '3m 05s')
     assert.equal(formatDuration(3720), '1h 02m')
+  })
+
+  test('formatLatency returns em dash for null', () => {
+    assert.equal(formatLatency(null), '—')
+  })
+
+  test('formatLatency renders sub-second values in ms', () => {
+    assert.equal(formatLatency(0), '0 ms')
+    assert.equal(formatLatency(420), '420 ms')
+    assert.equal(formatLatency(999), '999 ms')
+  })
+
+  test('formatLatency renders one-decimal seconds at 1000ms or more', () => {
+    assert.equal(formatLatency(1000), '1.0 s')
+    assert.equal(formatLatency(3812), '3.8 s')
   })
 })
 

@@ -239,7 +239,14 @@ a { color: var(--primary); }
   border-bottom: 1px solid var(--panel-border);
 }
 
-.topbar-title { font-size: 1rem; font-weight: 600; margin-right: auto; }
+.topbar-title {
+  font-size: 0.75rem;
+  font-weight: 600;
+  text-transform: uppercase;
+  letter-spacing: 0.04em;
+  color: var(--text-muted);
+  margin-right: auto;
+}
 
 .topbar-meta { display: flex; align-items: center; gap: 0.625rem; }
 
@@ -791,6 +798,23 @@ dialog.confirm p { color: var(--text-muted); margin-bottom: 1rem; }
   .topbar-title { order: 1; flex-basis: 100%; }
   .kpi-grid { grid-template-columns: 1fr; }
   .search-input { min-width: 0; width: 100%; }
+}
+
+/* Tighter phone override (390px-class devices): the topbar must stay on one
+   row, the toolbar search must not overflow, and KPI cards read better as a
+   2-up grid than a single column. Kept as its own block, after the rule
+   above, so equal-specificity selectors here win the cascade without
+   rewriting it. */
+@media (max-width: 480px) {
+  .topbar { flex-wrap: nowrap; overflow: hidden; }
+  .topbar-title, #last-updated { display: none; }
+  #theme-select { min-width: 0; width: auto; padding: 0.35rem 0.4rem; }
+  .row.gap-md { flex-wrap: wrap; }
+  .search { width: 100%; flex: 1 1 100%; }
+  .search-input { width: 100%; }
+  .chips { flex-wrap: wrap; }
+  .kpi-grid { grid-template-columns: repeat(2, minmax(0, 1fr)); }
+  .view-actions { flex-basis: 100%; }
 }
 
 /* ---------------------------------------------------------------------------

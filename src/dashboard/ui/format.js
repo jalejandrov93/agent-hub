@@ -56,6 +56,14 @@ export function formatAge(iso, now = Date.now()) {
   return `${Math.floor(h / 24)}d ago`
 }
 
+/** Latency formatter: milliseconds below 1000, one-decimal seconds at 1000+, e.g. '3.8 s'. */
+export function formatLatency(ms) {
+  if (ms == null || Number.isNaN(Number(ms))) return '—'
+  const n = Number(ms)
+  if (n < 1000) return `${n} ms`
+  return `${(n / 1000).toFixed(1)} s`
+}
+
 /** Duration formatter for a count of seconds, e.g. '42s', '3m 05s', '1h 02m'. */
 export function formatDuration(seconds) {
   if (seconds == null || Number.isNaN(Number(seconds))) return '—'

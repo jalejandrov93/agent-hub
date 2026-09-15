@@ -7,7 +7,7 @@
  */
 
 import { ROUTES, NAV_GROUPS } from './contracts.js'
-import { createStore, initialState, applyServerState, applyConfig, appendEvent, setConnection, setBusy, shouldRefetchState } from './store.js'
+import { createStore, initialState, applyServerState, applyConfig, appendEvent, setConnection, setBusy, shouldRefetchState, markTimelineSeen } from './store.js'
 import * as api from './api.js'
 import * as router from './router.js'
 import { icon } from './ui/icons.js'
@@ -18,6 +18,7 @@ import { openRowMenu } from './ui/menu.js'
 import { clear } from './ui/dom.js'
 
 const THEME_STORAGE_KEY = 'agent-hub:theme'
+const TIMELINE_SEEN_STORAGE_KEY = 'agent-hub:timeline-seen'
 const POLL_INTERVAL_MS = 15000
 const TICK_INTERVAL_MS = 1000
 const SSE_DEBOUNCE_MS = 2000
@@ -39,6 +40,30 @@ function saveTheme(theme) {
   } catch {
     // ignore: storage unavailable, theme just won't persist across reloads
   }
+}
+
+/** Read the persisted 'newest timeline event seen' ts; null when unset or storage is unavailable. */
+function loadTimelineSeen() {
+  try {
+    return window.localStorage.getItem(TIMELINE_SEEN_STORAGE_KEY) || null
+  } catch {
+    return null
+  }
+}
+
+function saveTimelineSeen(ts) {
+  if (!ts) return
+  try {
+    window.localStorage.setItem(TIMELINE_SEEN_STORAGE_KEY, ts)
+  } catch {
+    // ignore: storage unavailable, the timeline badge just won't persist across reloads
+  }
+}
+
+/** app.js owns `#topbar-title`: the NAV_GROUPS label containing this route, e.g. 'Monitor'. */
+function groupLabelFor(routeName) {
+  const group = NAV_GROUPS.find((g) => g.items.indexOf(routeName) !== -1)
+  return group ? group.label : ''
 }
 
 /** 'system' removes the data-theme override so prefers-color-scheme decides. */
@@ -77,6 +102,9 @@ function boot() {
   store.setState({ theme })
   applyTheme(theme)
 
+  const persistedTimelineSeen = loadTimelineSeen()
+  if (persistedTimelineSeen) store.setState({ lastSeenTimelineTs: persistedTimelineSeen })
+
   const sidebar = document.getElementById('sidebar')
   if (sidebar) injectNavIcons(sidebar)
   cloneNavIntoDrawer()
@@ -101,6 +129,13 @@ function boot() {
       const [stateSnapshot, config] = await Promise.all([api.fetchState(), api.fetchConfig()])
       store.setState((s) => applyServerState(s, stateSnapshot, Date.now()))
       store.setState((s) => applyConfig(s, config))
+      // First successful load, nothing seen yet (in memory or persisted): the
+      // timeline badge should only count events that arrive from here on, so
+      // treat everything already loaded as seen instead of showing a stale count.
+      const cur = store.getState()
+      if (cur.lastSeenTimelineTs == null && cur.events.length) {
+        store.setState((s) => markTimelineSeen(s))
+      }
     } catch (error) {
       // Keep retrying through SSE/poll/manual refresh, but say so: a silent
       // failure here leaves every view empty with no hint why.
@@ -197,7 +232,7 @@ function boot() {
     updateNavCurrent(route.name)
     const meta = ROUTES[route.name]
     const title = document.getElementById('topbar-title')
-    if (title) title.textContent = meta.label
+    if (title) title.textContent = groupLabelFor(route.name)
     document.title = `${meta.label} — agent-hub dashboard`
     const heading = document.getElementById('view-title')
     if (heading) heading.focus()
@@ -230,7 +265,7 @@ function boot() {
     el.textContent = state.lastUpdatedAt ? `updated ${formatAge(new Date(state.lastUpdatedAt).toISOString())}` : 'updated —'
   }
 
-  store.subscribe((state) => {
+  store.subscribe((state, prev) => {
     if (currentView && typeof currentView.render === 'function') {
       try {
         currentView.render(state)
@@ -242,6 +277,7 @@ function boot() {
     renderNavBadges(state)
     renderConnBadge(state)
     renderLastUpdated(state)
+    if (state.lastSeenTimelineTs !== prev.lastSeenTimelineTs) saveTimelineSeen(state.lastSeenTimelineTs)
   })
   renderNavBadges(store.getState())
   renderConnBadge(store.getState())

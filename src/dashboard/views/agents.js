@@ -3,7 +3,7 @@
 // #agents panel plus the unresolved-CLI banner text (dashboard.html
 // renderAgents/unresolvedAgents), now split across CLI groups.
 import { h, on, clear } from '../ui/dom.js'
-import { formatModel, formatNumber, formatAge } from '../ui/format.js'
+import { formatModel, formatNumber, formatAge, formatLatency } from '../ui/format.js'
 import {
   overrideFor, breakerFor, isUnhealthy, unhealthyAgents, heldPairs,
   openBreakers, unresolvedAgents, statusBadge,
@@ -93,6 +93,21 @@ function groupByCli(rows) {
   return order.map((agent) => ({ agent, rows: groups.get(agent) }))
 }
 
+/** Group header parts: only what's actually known, joined by the caller with ' · '. */
+function groupHeaderParts(state, agent, first, rowCount) {
+  const resolvedBins = state.config && state.config.process ? state.config.process.resolvedBins : undefined
+  const parts = []
+  if (first.cliVersion) parts.push(`v${first.cliVersion}`)
+  const bin = first.binPath || (resolvedBins ? resolvedBins[agent] : null)
+  if (bin) {
+    parts.push(bin)
+  } else if (resolvedBins && Object.prototype.hasOwnProperty.call(resolvedBins, agent) && resolvedBins[agent] === null) {
+    parts.push('not on dashboard PATH')
+  }
+  parts.push(`${rowCount} model${rowCount === 1 ? '' : 's'}`)
+  return parts
+}
+
 function closeDetail() {
   ui.selectedKey = null
   if (els) { clear(els.detail); els.detail.hidden = true }
@@ -119,7 +134,7 @@ function openDetail(state, row) {
   const entries = [
     ['Reason', row.reason || '—'],
     ['Ladder level', row.ladderLevel || '—'],
-    ['Latency', row.latencyMs != null ? `${formatNumber(row.latencyMs)}ms` : '—'],
+    ['Latency', formatLatency(row.latencyMs)],
     ['Quota signal', row.quotaSignal || '—'],
     ['Data policy', row.dataPolicy || '—'],
     ['Bin path', row.binPath || '—'],
@@ -214,7 +229,6 @@ function renderTable(state) {
     return
   }
 
-  const missing = unresolvedAgents(state)
   const table = h('table', { class: 'table table-dense' })
   const thead = h('thead', {}, [
     h('tr', {}, ['Model', 'Status', 'Ladder', 'Latency', 'Data policy', 'Checked', 'Tags', 'Actions'].map((t) => h('th', { text: t }))),
@@ -223,12 +237,11 @@ function renderTable(state) {
 
   for (const group of groupByCli(rows)) {
     const first = group.rows[0]
-    const isUnresolved = missing.indexOf(group.agent) !== -1
-    const binText = isUnresolved ? 'not on dashboard PATH' : (first.binPath || '—')
+    const parts = groupHeaderParts(state, group.agent, first, group.rows.length)
     tbody.append(h('tr', { class: 'group-row' }, [
       h('td', { colspan: '8' }, [
         h('strong', { text: group.agent }),
-        h('span', { class: 'muted', text: ` ${first.cliVersion || '—'} — ${binText} — ${group.rows.length} row(s)` }),
+        h('span', { class: 'muted', text: ` · ${parts.join(' · ')}` }),
       ]),
     ]))
 
@@ -255,7 +268,7 @@ function renderTable(state) {
         h('td', {}, [h('span', { title: row.model, text: formatModel(row.model) })]),
         statusCell,
         h('td', { text: row.ladderLevel || '—' }),
-        h('td', { class: 'num', text: row.latencyMs != null ? `${formatNumber(row.latencyMs)}ms` : '—' }),
+        h('td', { class: 'num', text: formatLatency(row.latencyMs) }),
         h('td', { text: row.dataPolicy || '—' }),
         h('td', { text: formatAge(row.checkedAt) }),
         tagsCell,

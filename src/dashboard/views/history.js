@@ -135,10 +135,13 @@ function renderTable(state) {
         text: `↳ reply of …${String(j.parentJobId).slice(-8)}`,
       }))
     }
+    const errorCell = j.errorKind
+      ? h('td', {}, [badgeEl(errorBadge(j.errorKind))])
+      : h('td', {}, [h('span', { class: 'muted', text: '—' })])
     const tr = h('tr', { class: 'is-clickable' }, [
       agentCell, taskCell,
       h('td', {}, [badgeEl(statusBadge(j.status))]),
-      h('td', {}, [badgeEl(errorBadge(j.errorKind))]),
+      errorCell,
       h('td', { class: 'num', text: j.tokens != null ? formatNumber(j.tokens) : '—' }),
       h('td', { text: formatAge(j.updatedAt) }),
     ])
