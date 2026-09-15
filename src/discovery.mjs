@@ -43,6 +43,23 @@ export function resolveBinPath(cmd, env = process.env) {
 }
 
 /**
+ * Whether `agent`'s CLI is resolvable on `env`'s own PATH, without spawning
+ * anything. The dashboard process (systemd --user, minimal PATH) and the MCP
+ * server process (spawned by Claude Code, full user PATH) are separate
+ * processes that share preflight-cache.json/discovery.json — a dashboard
+ * write route must check this on ITS OWN env before ever calling
+ * runPreflight/pingAgent/discovery for an agent, or a missing PATH entry on
+ * the dashboard side alone would overwrite a good cached row with
+ * 'unavailable' (ENOENT from spawn) even though the CLI is actually
+ * installed and reachable by the MCP server.
+ */
+export function resolveAgentCli(agent, env = process.env) {
+  const adapter = adapterFor(agent)
+  const binPath = resolveBinPath(adapter.cmd, env)
+  return { agent, cmd: adapter.cmd, binPath, resolvable: binPath !== null }
+}
+
+/**
  * Probe one agent CLI: binPath (PATH scan), L0 --version, L1 model catalog.
  * Never throws — every failure mode (missing binary, --version failure,
  * models-list timeout) is reported as an `error` string on the returned row.

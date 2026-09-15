@@ -7,7 +7,7 @@ import { listJobs } from './jobstore.mjs'
 import { readCache, agentsStatus, pingAgent, breakerStatus } from './preflight.mjs'
 import { cancelJob } from './jobrunner.mjs'
 import { paths, DEFAULT_TIMEOUTS_S, CIRCUIT_BREAKER, PREFLIGHT_TTL_MS, WRITE_ALLOWLIST, MODEL_REGISTRY } from './config.mjs'
-import { runDiscovery, readDiscovery } from './discovery.mjs'
+import { runDiscovery, readDiscovery, resolveAgentCli, KNOWN_AGENTS, pruneCacheForMap } from './discovery.mjs'
 import { readOverrides, setOverride, clearOverride, overrideKey } from './overrides.mjs'
 import { DELEGATION_MAP } from './router.mjs'
 import { defaultPairs } from './tools/agents.mjs'
@@ -87,8 +87,32 @@ export function buildState({ env = process.env } = {}) {
   return { agents, jobs, subagents, events }
 }
 
+/** PATH entries of `env`, split on the platform delimiter — used for the Config panel's "what does this process see" display. */
+function pathEntries(env) {
+  const pathVar = env.PATH ?? env.Path ?? ''
+  return pathVar.split(path.delimiter).filter(Boolean)
+}
+
+/** Every distinct real CLI agent (never 'claude') reachable from DELEGATION_MAP. */
+function delegationMapAgents() {
+  return [...new Set(defaultPairs().map((p) => p.agent))]
+}
+
+/**
+ * The reason string used on every 'skipped' row/entry below — shared so the
+ * dashboard HTML, tests and every route agree on the exact wording.
+ */
+function cliNotFoundReason(cmd) {
+  return `cli_not_found_in_dashboard_process: ${cmd} is not on this process PATH`
+}
+
 /** Read-only snapshot for GET /api/config: everything the Config panel renders, plus current overrides/breaker state. */
 export function buildConfig({ env = process.env } = {}) {
+  const resolvedBins = {}
+  for (const agent of delegationMapAgents()) {
+    resolvedBins[agent] = resolveAgentCli(agent, env).binPath
+  }
+
   return {
     delegationMap: DELEGATION_MAP,
     discovery: readDiscovery(env),
@@ -104,6 +128,16 @@ export function buildConfig({ env = process.env } = {}) {
     writeAllowlist: WRITE_ALLOWLIST,
     breakerState: defaultPairs().map((p) => breakerStatus({ agent: p.agent, model: p.model, env })),
     overrides: readOverrides(env),
+    // What THIS process (the dashboard, possibly a minimal systemd --user
+    // PATH) actually sees — surfaced so a misconfigured PATH is diagnosable
+    // from the UI instead of silently poisoning shared cache/discovery state.
+    process: {
+      pid: process.pid,
+      nodeVersion: process.version,
+      platform: process.platform,
+      pathEntries: pathEntries(env),
+      resolvedBins,
+    },
   }
 }
 
@@ -231,7 +265,15 @@ export function createServer({ env = process.env, commandRunner = runCommand } =
     if (cancelMatch && req.method === 'POST') {
       cancelJob(cancelMatch[1], { env })
         .then((result) => sendJson(res, 200, result))
-        .catch((error) => sendError(res, error))
+        .catch((error) => {
+          // readResult (jobstore.mjs) throws a plain, unstatused Error for an
+          // unknown job id — map that specific message to 404 here rather
+          // than the generic 500 sendError() would otherwise send.
+          if (typeof error?.message === 'string' && error.message.startsWith('job not found:')) {
+            return sendJson(res, 404, { error: error.message })
+          }
+          return sendError(res, error)
+        })
       return
     }
 
@@ -243,6 +285,28 @@ export function createServer({ env = process.env, commandRunner = runCommand } =
           // one explicit agent+model pair, never a bulk refresh.
           if (body.ping === true) {
             if (!body.agent || !body.model) throw new Error('ping requires both "agent" and "model"')
+
+            // Resolve on THIS process's own PATH before ever spawning —
+            // see cliNotFoundReason's callers for why (dashboard vs. MCP
+            // server are separate processes with separate PATHs).
+            const info = resolveAgentCli(body.agent, env)
+            if (!info.resolvable) {
+              const reason = cliNotFoundReason(info.cmd)
+              appendEvent(
+                {
+                  kind: 'preflight',
+                  phase: 'ping',
+                  agent: body.agent,
+                  model: body.model,
+                  status: 'skipped',
+                  reason,
+                  summary: `${body.agent}:${body.model} L3 ping skipped — ${reason}`,
+                },
+                { env }
+              )
+              return { results: [{ agent: body.agent, model: body.model, status: 'skipped', reason, written: false }] }
+            }
+
             const entry = await pingAgent({ agent: body.agent, model: body.model, cwd, env, commandRunner })
             appendEvent(
               {
@@ -259,10 +323,45 @@ export function createServer({ env = process.env, commandRunner = runCommand } =
             )
             return { results: [entry] }
           }
+
           let pairs = defaultPairs()
           if (body.agent) pairs = pairs.filter((p) => p.agent === body.agent)
           if (body.model) pairs = pairs.filter((p) => p.model === body.model)
-          const results = await agentsStatus({ agents: pairs, cwd, env, commandRunner, refresh: true, announce: true })
+
+          // Partition by resolvability on THIS process's own PATH — an
+          // unresolvable agent must never reach runPreflight (which spawns
+          // `--version` directly), or a dashboard with a minimal PATH would
+          // overwrite a good cached row with 'unavailable' (spawn ENOENT).
+          const infoByAgent = new Map()
+          const resolvedPairs = []
+          const skippedRows = []
+          for (const pair of pairs) {
+            if (!infoByAgent.has(pair.agent)) infoByAgent.set(pair.agent, resolveAgentCli(pair.agent, env))
+            const info = infoByAgent.get(pair.agent)
+            if (info.resolvable) {
+              resolvedPairs.push(pair)
+            } else {
+              const reason = cliNotFoundReason(info.cmd)
+              skippedRows.push({ agent: pair.agent, model: pair.model, status: 'skipped', reason, written: false })
+            }
+          }
+
+          for (const [agent, info] of infoByAgent) {
+            if (info.resolvable) continue
+            appendEvent(
+              { kind: 'preflight', phase: 'agent', agent, status: 'skipped', reason: cliNotFoundReason(info.cmd), summary: `${agent} refresh skipped — ${cliNotFoundReason(info.cmd)}` },
+              { env }
+            )
+          }
+
+          const resolvedResults = resolvedPairs.length > 0 ? await agentsStatus({ agents: resolvedPairs, cwd, env, commandRunner, refresh: true, announce: true }) : []
+
+          // Report results back in the same order the pairs were requested.
+          const byKey = new Map()
+          for (const r of resolvedResults) byKey.set(`${r.agent}:${r.model}`, r)
+          for (const r of skippedRows) byKey.set(`${r.agent}:${r.model}`, r)
+          const results = pairs.map((p) => byKey.get(`${p.agent}:${p.model}`))
+
           return { results }
         })
         .then((payload) => sendJson(res, 200, payload))
@@ -271,8 +370,34 @@ export function createServer({ env = process.env, commandRunner = runCommand } =
     }
 
     if (url.pathname === '/api/discovery/refresh' && req.method === 'POST') {
-      runDiscovery({ env, commandRunner, force: true })
-        .then((discovery) => sendJson(res, 200, discovery))
+      Promise.resolve()
+        .then(async () => {
+          const infos = KNOWN_AGENTS.map((agent) => resolveAgentCli(agent, env))
+          const resolvableAgents = infos.filter((i) => i.resolvable).map((i) => i.agent)
+          const skippedInfos = infos.filter((i) => !i.resolvable)
+
+          for (const info of skippedInfos) {
+            const reason = cliNotFoundReason(info.cmd)
+            appendEvent(
+              { kind: 'preflight', phase: 'discovery', agent: info.agent, status: 'skipped', reason, summary: `${info.agent} discovery skipped — ${reason}` },
+              { env }
+            )
+          }
+
+          // Only ever probe agents resolvable on THIS process's PATH.
+          // runDiscovery merges into the existing file and only overwrites
+          // the agents it was asked to probe, so every other agent's
+          // discovery.json row (including any skipped here) survives
+          // untouched on disk.
+          const discovery = resolvableAgents.length > 0 ? await runDiscovery({ agents: resolvableAgents, env, commandRunner, force: true }) : readDiscovery(env)
+
+          const payload = { ...discovery }
+          for (const info of skippedInfos) {
+            payload[info.agent] = { agent: info.agent, cmd: info.cmd, skipped: true, reason: cliNotFoundReason(info.cmd) }
+          }
+          return payload
+        })
+        .then((payload) => sendJson(res, 200, payload))
         .catch((error) => sendError(res, error))
       return
     }
@@ -363,6 +488,12 @@ export function createServer({ env = process.env, commandRunner = runCommand } =
 }
 
 export function startDashboard({ port = 7777, env = process.env } = {}) {
+  // "The board does not lie": drop zombie preflight-cache rows once at boot,
+  // same as the MCP server's own startup path (startup.mjs). Pure fs
+  // read/write — never a CLI spawn or a discovery probe, so this is safe to
+  // run unconditionally regardless of what this process's PATH looks like.
+  pruneCacheForMap(env)
+
   const server = createServer({ env })
   server.listen(port, '127.0.0.1', () => {
     console.error(`[agent-hub] dashboard listening on http://127.0.0.1:${port}`)

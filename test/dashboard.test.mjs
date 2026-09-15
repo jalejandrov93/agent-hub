@@ -5,7 +5,7 @@ import path from 'node:path'
 import os from 'node:os'
 import http from 'node:http'
 import net from 'node:net'
-import { isLoopback, isAllowedHost, isJsonContentType, isAllowedOrigin, createServer, buildState } from '../src/dashboard.mjs'
+import { isLoopback, isAllowedHost, isJsonContentType, isAllowedOrigin, createServer, buildState, startDashboard } from '../src/dashboard.mjs'
 
 function tmpHome() {
   return fs.mkdtempSync(path.join(os.tmpdir(), 'agent-hub-dashboard-'))
@@ -308,7 +308,12 @@ test('GET /api/config returns delegationMap, discovery, timeouts, breaker, ttlMs
 })
 
 test('POST /api/agents/refresh with an empty body refreshes every default pair using the injected commandRunner', async () => {
-  const env = { AGENT_HUB_HOME: tmpHome() }
+  const home = tmpHome()
+  const binDir = path.join(home, 'bin')
+  fakeExecutable(binDir, 'agy')
+  fakeExecutable(binDir, 'opencode')
+  fakeExecutable(binDir, 'copilot')
+  const env = { AGENT_HUB_HOME: home, PATH: binDir }
   const runner = fakeRunner([
     ['--version', { stdout: 'v', stderr: '', code: 0 }],
     [/models|help config/, { stdout: 'gemini-3.8-flash-low\tlabel\n', stderr: '', code: 0 }],
@@ -320,6 +325,7 @@ test('POST /api/agents/refresh with an empty body refreshes every default pair u
     assert.equal(res.status, 200)
     assert.ok(Array.isArray(res.body.results))
     assert.ok(res.body.results.length > 0)
+    assert.ok(!res.body.results.some((r) => r.status === 'skipped'), 'every default agent is resolvable on this PATH')
     assert.ok(!runner.calls.some((c) => c.args.includes('Reply exactly: PONG')), 'a bulk refresh must never L3-ping')
   } finally {
     server.close()
@@ -327,7 +333,10 @@ test('POST /api/agents/refresh with an empty body refreshes every default pair u
 })
 
 test('POST /api/agents/refresh with {agent, model} refreshes only that pair', async () => {
-  const env = { AGENT_HUB_HOME: tmpHome() }
+  const home = tmpHome()
+  const binDir = path.join(home, 'bin')
+  fakeExecutable(binDir, 'copilot')
+  const env = { AGENT_HUB_HOME: home, PATH: binDir }
   const runner = fakeRunner([['--version', { stdout: 'GitHub Copilot CLI 1.0.83.', stderr: '', code: 0 }]])
   const server = createServer({ env, commandRunner: runner })
   const port = await listen(server)
@@ -343,7 +352,10 @@ test('POST /api/agents/refresh with {agent, model} refreshes only that pair', as
 })
 
 test('POST /api/agents/refresh with {agent, model, ping:true} runs an L3 ping, not a bulk refresh', async () => {
-  const env = { AGENT_HUB_HOME: tmpHome() }
+  const home = tmpHome()
+  const binDir = path.join(home, 'bin')
+  fakeExecutable(binDir, 'agy') // resolvable on this process's own PATH, so the ping is not skipped
+  const env = { AGENT_HUB_HOME: home, PATH: binDir }
   const runner = fakeRunner([[/-p Reply exactly: PONG/, { stdout: '{"status":"SUCCESS","response":"PONG","usage":{"total_tokens":1},"conversation_id":"c1"}', stderr: '', code: 0 }]])
   const server = createServer({ env, commandRunner: runner })
   const port = await listen(server)
@@ -359,7 +371,12 @@ test('POST /api/agents/refresh with {agent, model, ping:true} runs an L3 ping, n
 })
 
 test('POST /api/discovery/refresh runs runDiscovery(force:true) and returns the discovery.json content', async () => {
-  const env = { AGENT_HUB_HOME: tmpHome() }
+  const home = tmpHome()
+  const binDir = path.join(home, 'bin')
+  fakeExecutable(binDir, 'agy')
+  fakeExecutable(binDir, 'opencode')
+  fakeExecutable(binDir, 'copilot')
+  const env = { AGENT_HUB_HOME: home, PATH: binDir }
   const runner = fakeRunner([
     ['--version', { stdout: 'v', stderr: '', code: 0 }],
     [/models|help config/, { stdout: 'gemini-3.8-flash-low\tlabel\n', stderr: '', code: 0 }],
@@ -372,6 +389,7 @@ test('POST /api/discovery/refresh runs runDiscovery(force:true) and returns the 
     assert.ok(res.body.agy)
     assert.ok(res.body.opencode)
     assert.ok(res.body.copilot)
+    assert.ok(!res.body.agy.skipped, 'a resolvable agent must be really refreshed, not skipped')
   } finally {
     server.close()
   }
@@ -602,7 +620,12 @@ test('POST /api/overrides with malformed JSON is rejected 400 (not silently trea
 })
 
 test('a well-formed loopback JSON request still works end-to-end: refresh, overrides POST/DELETE and job cancel', async () => {
-  const env = { AGENT_HUB_HOME: tmpHome() }
+  const home = tmpHome()
+  const binDir = path.join(home, 'bin')
+  fakeExecutable(binDir, 'agy')
+  fakeExecutable(binDir, 'opencode')
+  fakeExecutable(binDir, 'copilot')
+  const env = { AGENT_HUB_HOME: home, PATH: binDir }
   const runner = fakeRunner([
     ['--version', { stdout: 'v', stderr: '', code: 0 }],
     [/models|help config/, { stdout: 'gemini-3.8-flash-low\tlabel\n', stderr: '', code: 0 }],
@@ -622,6 +645,177 @@ test('a well-formed loopback JSON request still works end-to-end: refresh, overr
     const cancelRes = await postJson(port, '/api/jobs/does-not-exist/cancel', undefined, { method: 'POST' })
     assert.notEqual(cancelRes.status, 403)
     assert.notEqual(cancelRes.status, 415)
+  } finally {
+    server.close()
+  }
+})
+
+// --- Dashboard-process-own-PATH guard: the dashboard (systemd --user, a
+// possibly minimal PATH) must never poison shared state for an agent that is
+// actually installed but simply not reachable from ITS OWN env.PATH. ---
+
+function fakeExecutable(binDir, name) {
+  fs.mkdirSync(binDir, { recursive: true })
+  fs.writeFileSync(path.join(binDir, name), '#!/bin/sh\necho fake\n', { mode: 0o755 })
+}
+
+test('POST /api/jobs/:id/cancel for an unknown job returns 404 with the job-not-found message', async () => {
+  const env = { AGENT_HUB_HOME: tmpHome() }
+  const server = createServer({ env })
+  const port = await listen(server)
+  try {
+    const res = await postJson(port, '/api/jobs/does-not-exist/cancel', undefined, { method: 'POST' })
+    assert.equal(res.status, 404)
+    assert.equal(res.body.error, 'job not found: does-not-exist')
+  } finally {
+    server.close()
+  }
+})
+
+test('POST /api/agents/refresh (bulk) skips an agent whose CLI is missing from the dashboard process own PATH, leaving its cached row untouched', async () => {
+  const home = tmpHome()
+  const binDir = path.join(home, 'bin')
+  fakeExecutable(binDir, 'copilot') // only copilot is on this PATH — agy and opencode are not
+  const env = { AGENT_HUB_HOME: home, PATH: binDir }
+
+  const { writeCacheEntry, readCache } = await import('../src/preflight.mjs?t=' + Date.now())
+  const staleGoodEntry = { agent: 'agy', model: 'gemini-3.8-flash-low', status: 'ready', ladderLevel: 'L2', reason: null, checkedAt: new Date(Date.now() - 60_000).toISOString() }
+  writeCacheEntry('agy:gemini-3.8-flash-low', staleGoodEntry, env)
+
+  const runner = fakeRunner([
+    ['--version', { stdout: 'GitHub Copilot CLI 1.0.83.', stderr: '', code: 0 }],
+    ['help config', { stdout: '  `model`: desc.\n    - "auto"\n', stderr: '', code: 0 }],
+  ])
+  const server = createServer({ env, commandRunner: runner })
+  const port = await listen(server)
+  try {
+    const res = await postJson(port, '/api/agents/refresh', {})
+    assert.equal(res.status, 200)
+
+    const agyResult = res.body.results.find((r) => r.agent === 'agy' && r.model === 'gemini-3.8-flash-low')
+    assert.equal(agyResult.status, 'skipped')
+    assert.match(agyResult.reason, /cli_not_found_in_dashboard_process: agy is not on this process PATH/)
+    assert.equal(agyResult.written, false)
+    assert.ok(!runner.calls.some((c) => c.cmd === 'agy'), 'agy must never be spawned when unresolvable on this PATH')
+    assert.ok(!runner.calls.some((c) => c.cmd === 'opencode'), 'opencode must never be spawned when unresolvable on this PATH')
+
+    const copilotResults = res.body.results.filter((r) => r.agent === 'copilot')
+    assert.ok(copilotResults.length > 0)
+    assert.ok(copilotResults.every((r) => r.status !== 'skipped'), 'a resolvable agent behaves as today')
+
+    const cacheAfter = readCache(env)
+    assert.deepEqual(cacheAfter['agy:gemini-3.8-flash-low'], staleGoodEntry, 'the good cached row for the unresolvable agent is byte-for-byte unchanged')
+  } finally {
+    server.close()
+  }
+})
+
+test('POST /api/agents/refresh with an explicit {agent, model} for an unresolvable agent returns skipped and never calls the commandRunner', async () => {
+  const env = { AGENT_HUB_HOME: tmpHome(), PATH: '/nonexistent/dir/only' }
+  const runner = fakeRunner([])
+  const server = createServer({ env, commandRunner: runner })
+  const port = await listen(server)
+  try {
+    const res = await postJson(port, '/api/agents/refresh', { agent: 'copilot', model: 'auto' })
+    assert.equal(res.status, 200)
+    assert.equal(res.body.results.length, 1)
+    assert.equal(res.body.results[0].status, 'skipped')
+    assert.match(res.body.results[0].reason, /cli_not_found_in_dashboard_process: copilot is not on this process PATH/)
+    assert.equal(res.body.results[0].written, false)
+    assert.equal(runner.calls.length, 0)
+  } finally {
+    server.close()
+  }
+})
+
+test('POST /api/agents/refresh with ping:true for an unresolvable agent returns skipped and never calls the commandRunner', async () => {
+  const env = { AGENT_HUB_HOME: tmpHome(), PATH: '/nonexistent/dir/only' }
+  const runner = fakeRunner([])
+  const server = createServer({ env, commandRunner: runner })
+  const port = await listen(server)
+  try {
+    const res = await postJson(port, '/api/agents/refresh', { agent: 'agy', model: 'gemini-3.8-flash-low', ping: true })
+    assert.equal(res.status, 200)
+    assert.equal(res.body.results.length, 1)
+    assert.equal(res.body.results[0].status, 'skipped')
+    assert.equal(res.body.results[0].written, false)
+    assert.equal(runner.calls.length, 0, 'an unresolvable agent must never be L3-pinged')
+  } finally {
+    server.close()
+  }
+})
+
+test('POST /api/discovery/refresh skips an agent missing from the dashboard PATH, preserving its existing discovery.json entry and refreshing the resolvable ones', async () => {
+  const home = tmpHome()
+  const binDir = path.join(home, 'bin')
+  fakeExecutable(binDir, 'copilot')
+  const env = { AGENT_HUB_HOME: home, PATH: binDir }
+
+  const { writeJsonAtomic } = await import('../src/fsutil.mjs?t=' + Date.now())
+  const { paths } = await import('../src/config.mjs?t=' + Date.now())
+  const staleAgyEntry = { agent: 'agy', cmd: 'agy', binPath: '/old/agy', version: '0.0.1', models: [], checkedAt: new Date().toISOString(), error: null }
+  writeJsonAtomic(paths(env).discoveryFile, { agy: staleAgyEntry })
+
+  const runner = fakeRunner([
+    ['--version', { stdout: 'GitHub Copilot CLI 1.0.83.', stderr: '', code: 0 }],
+    ['help config', { stdout: '  `model`: desc.\n    - "auto"\n', stderr: '', code: 0 }],
+  ])
+  const server = createServer({ env, commandRunner: runner })
+  const port = await listen(server)
+  try {
+    const res = await postJson(port, '/api/discovery/refresh', undefined)
+    assert.equal(res.status, 200)
+    assert.equal(res.body.copilot.error, null)
+    assert.ok(res.body.copilot.version)
+    assert.equal(res.body.agy.skipped, true)
+    assert.match(res.body.agy.reason, /cli_not_found_in_dashboard_process: agy is not on this process PATH/)
+    assert.ok(!runner.calls.some((c) => c.cmd === 'agy'), 'agy must never be spawned')
+
+    const { readDiscovery } = await import('../src/discovery.mjs?t=' + Date.now())
+    const onDisk = readDiscovery(env)
+    assert.deepEqual(onDisk.agy, staleAgyEntry, "the unresolvable agent's existing discovery.json row is untouched")
+  } finally {
+    server.close()
+  }
+})
+
+test('GET /api/config exposes process.{pid,nodeVersion,platform,pathEntries,resolvedBins} scoped to DELEGATION_MAP agents', async () => {
+  const home = tmpHome()
+  const binDir = path.join(home, 'bin')
+  fakeExecutable(binDir, 'copilot')
+  const env = { AGENT_HUB_HOME: home, PATH: binDir }
+  const server = createServer({ env })
+  const port = await listen(server)
+  try {
+    const res = await get(port, '/api/config')
+    const body = JSON.parse(res.body)
+    assert.equal(body.process.pid, process.pid)
+    assert.equal(body.process.nodeVersion, process.version)
+    assert.equal(body.process.platform, process.platform)
+    assert.deepEqual(body.process.pathEntries, [binDir])
+    assert.equal(body.process.resolvedBins.copilot, path.join(binDir, 'copilot'))
+    assert.equal(body.process.resolvedBins.agy, null)
+    assert.equal(body.process.resolvedBins.opencode, null)
+  } finally {
+    server.close()
+  }
+})
+
+test('startDashboard prunes stale preflight-cache rows at boot, keeps live ones, and never runs discovery', async () => {
+  const env = { AGENT_HUB_HOME: tmpHome() }
+  const { writeCacheEntry, readCache } = await import('../src/preflight.mjs?t=' + Date.now())
+  writeCacheEntry('copilot:gpt-5-mini', { agent: 'copilot', model: 'gpt-5-mini', status: 'unavailable', checkedAt: new Date().toISOString() }, env) // not in DELEGATION_MAP
+  writeCacheEntry('copilot:auto', { agent: 'copilot', model: 'auto', status: 'ready', checkedAt: new Date().toISOString() }, env) // in DELEGATION_MAP
+
+  const server = startDashboard({ port: 0, env })
+  try {
+    await new Promise((resolve) => server.on('listening', resolve))
+    const cache = readCache(env)
+    assert.equal('copilot:gpt-5-mini' in cache, false, 'stale pair pruned at boot')
+    assert.equal('copilot:auto' in cache, true, 'live pair kept')
+
+    const { readDiscovery } = await import('../src/discovery.mjs?t=' + Date.now())
+    assert.deepEqual(readDiscovery(env), {}, 'boot must never run discovery — only prune')
   } finally {
     server.close()
   }

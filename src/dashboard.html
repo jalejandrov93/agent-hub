@@ -350,6 +350,50 @@
     margin: 14px 0 6px;
   }
 
+  /* PATH entries list in the Config panel's "Dashboard process" section */
+  .path-entry-list {
+    list-style: none;
+    margin: 0 0 12px;
+    padding: 0;
+    display: flex;
+    flex-direction: column;
+    gap: 3px;
+    max-height: 180px;
+    overflow-y: auto;
+  }
+  .path-entry-list li {
+    font-family: var(--font-mono);
+    font-size: 11px;
+    padding: 3px 8px;
+    background: var(--panel-border-subtle);
+    border-radius: var(--radius-sm);
+    word-break: break-all;
+  }
+
+  /* Agents panel banner shown when the dashboard process cannot resolve one
+     or more agent CLIs on its own PATH (reuses the existing "degraded"
+     tokens — no new colors). */
+  .agent-path-warning {
+    display: flex;
+    align-items: flex-start;
+    gap: 8px;
+    padding: 10px 12px;
+    margin-bottom: 12px;
+    border-radius: var(--radius-sm);
+    background: var(--degraded-bg);
+    border: 1px solid var(--degraded-border);
+    color: var(--degraded);
+    font-size: 12px;
+    line-height: 1.5;
+  }
+  .agent-path-warning code {
+    font-family: var(--font-mono);
+    background: var(--panel-border-subtle);
+    padding: 1px 5px;
+    border-radius: 4px;
+    color: var(--text);
+  }
+
   /* KPI Summary Row */
   .kpi-row {
     display: grid;
@@ -933,6 +977,7 @@
         </div>
         <div class="panel-body">
           <div id="config-summary" class="config-summary"></div>
+          <div class="table-container" id="config-process"></div>
           <div class="table-container" id="config-delegation-map"></div>
           <div class="table-container" id="config-overrides"></div>
         </div>
@@ -1090,11 +1135,32 @@
     return overrides[agent + ':' + model] || null;
   }
 
+  // Agents the dashboard PROCESS itself cannot find on its own PATH (from
+  // GET /api/config's process.resolvedBins) — a systemd --user unit with a
+  // minimal PATH is the usual cause. Distinct from an agent's preflight
+  // status: an agent can be perfectly 'ready' (per the MCP server, which has
+  // a different PATH) while still being unresolved from here.
+  function unresolvedAgents() {
+    var bins = (state.config && state.config.process && state.config.process.resolvedBins) || {};
+    return Object.keys(bins).filter(function (a) { return bins[a] === null; });
+  }
+
   // Render Agents
   function renderAgents() {
     var el = document.getElementById('agents');
+    var missing = unresolvedAgents();
+    var warningHtml = missing.length
+      ? '<div class="agent-path-warning" role="alert">' +
+        '<span>' +
+        '<strong>The dashboard process cannot find: ' + missing.map(esc).join(', ') + '.</strong> ' +
+        'These CLIs are not on this process’s own PATH, so Revalidate/Ping here would only poison the cached status instead of refreshing it. ' +
+        'Put <code>PATH=...</code> in <code>~/.config/agent-hub/env</code> and restart the <code>agent-hub-dashboard</code> systemd unit, then check the Config panel below.' +
+        '</span>' +
+        '</div>'
+      : '';
+
     if (!state.agents.length) {
-      el.innerHTML = '<div class="empty-state">' +
+      el.innerHTML = warningHtml + '<div class="empty-state">' +
         '<div class="empty-icon" aria-hidden="true"><svg width="32" height="32" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.5"><rect x="2" y="2" width="20" height="8" rx="2"></rect><rect x="2" y="14" width="20" height="8" rx="2"></rect><line x1="6" y1="6" x2="6.01" y2="6"></line><line x1="6" y1="18" x2="6.01" y2="18"></line></svg></div>' +
         '<div class="empty-msg">No preflight agent data yet</div>' +
         '<div class="empty-hint">Run <code class="empty-code">agents_status</code> to populate configuration</div>' +
@@ -1124,9 +1190,20 @@
       var showPing = a.status === 'degraded' || a.status === 'unavailable';
       var showResetBreaker = !!(breaker && breaker.open);
 
+      // Revalidate/Ping both spawn the CLI on the dashboard process's own
+      // PATH — disable them (with an explanatory title) when that process
+      // cannot find this agent, per the banner above. Hold/Release/Reset
+      // breaker are plain JSON writes with no spawn, so they stay enabled.
+      var isUnresolved = missing.indexOf(a.agent) !== -1;
+      var unresolvedTitle = 'the dashboard process cannot find "' + esc(a.agent) + '" on its own PATH — see the warning above';
+      var revalidateAttrs = 'data-action="revalidate" data-agent="' + esc(a.agent) + '" data-model="' + esc(a.model) + '"' +
+        (isUnresolved ? ' disabled title="' + unresolvedTitle + '"' : '');
+      var pingAttrs = 'data-action="ping" data-agent="' + esc(a.agent) + '" data-model="' + esc(a.model) + '"' +
+        (isUnresolved ? ' disabled title="' + unresolvedTitle + '"' : ' title="L3: send a real PONG prompt"');
+
       var actions =
-        '<button type="button" class="btn-sm" data-action="revalidate" data-agent="' + esc(a.agent) + '" data-model="' + esc(a.model) + '">Revalidate</button>' +
-        (showPing ? '<button type="button" class="btn-sm" data-action="ping" data-agent="' + esc(a.agent) + '" data-model="' + esc(a.model) + '" title="L3: send a real PONG prompt">Ping (L3)</button>' : '') +
+        '<button type="button" class="btn-sm" ' + revalidateAttrs + '>Revalidate</button>' +
+        (showPing ? '<button type="button" class="btn-sm" ' + pingAttrs + '>Ping (L3)</button>' : '') +
         '<button type="button" class="btn-sm' + (held ? ' btn-warn' : '') + '" data-action="' + (held ? 'release' : 'hold') + '" data-agent="' + esc(a.agent) + '" data-model="' + esc(a.model) + '">' + (held ? 'Release' : 'Hold') + '</button>' +
         (showResetBreaker ? '<button type="button" class="btn-sm btn-warn" data-action="reset-breaker" data-agent="' + esc(a.agent) + '" data-model="' + esc(a.model) + '">Reset breaker</button>' : '');
 
@@ -1143,7 +1220,7 @@
       '</tr>';
     }).join('');
 
-    el.innerHTML = '<table>' +
+    el.innerHTML = warningHtml + '<table>' +
       '<thead><tr><th>Agent</th><th>Model</th><th>Status</th><th>Quota</th><th>Data Policy</th><th>CLI</th><th>Checked</th><th>Breaker</th><th>Actions</th></tr></thead>' +
       '<tbody>' + rows + '</tbody>' +
       '</table>';
@@ -1444,10 +1521,12 @@
   function renderConfig() {
     var cfg = state.config;
     var summaryEl = document.getElementById('config-summary');
+    var processEl = document.getElementById('config-process');
     var mapEl = document.getElementById('config-delegation-map');
     var overridesEl = document.getElementById('config-overrides');
     if (!cfg) {
       summaryEl.innerHTML = '';
+      processEl.innerHTML = '';
       mapEl.innerHTML = '';
       overridesEl.innerHTML = '';
       return;
@@ -1464,7 +1543,29 @@
       item('Breaker threshold', cfg.breaker.failureThreshold + ' failure(s)') +
       item('Breaker failure kinds', cfg.breaker.failureKinds.join(', ')) +
       item('Breaker immediate kinds', cfg.breaker.immediateKinds.join(', ')) +
-      item('Write allowlist', cfg.writeAllowlist.length ? cfg.writeAllowlist.join(', ') : '(empty — write mode requires a secondary git worktree)');
+      item('Write allowlist', cfg.writeAllowlist.length ? cfg.writeAllowlist.join(', ') : '(empty — write mode requires a secondary git worktree)') +
+      (cfg.process ? item('Dashboard PID', cfg.process.pid) + item('Node version', cfg.process.nodeVersion) + item('Platform', cfg.process.platform) : '');
+
+    // What THIS process (not the MCP server process) sees on its own PATH —
+    // the root cause behind a dashboard refresh silently marking an
+    // installed CLI 'unavailable'. See the Agents panel warning banner for
+    // the user-facing consequence of an entry showing "not found" here.
+    if (cfg.process) {
+      var pathListHtml = cfg.process.pathEntries.length
+        ? '<ul class="path-entry-list">' + cfg.process.pathEntries.map(function (p) { return '<li>' + esc(p) + '</li>'; }).join('') + '</ul>'
+        : '<div class="empty-hint">PATH is empty for this process</div>';
+      var binsRows = Object.keys(cfg.process.resolvedBins).map(function (agent) {
+        var p = cfg.process.resolvedBins[agent];
+        var cell = p ? '<span class="mono" title="' + esc(p) + '">' + esc(p) + '</span>' : '<span class="badge unavailable">not found</span>';
+        return '<tr><td><strong>' + esc(agent) + '</strong></td><td>' + cell + '</td></tr>';
+      }).join('');
+      processEl.innerHTML =
+        '<div class="config-section-title">Dashboard process PATH</div>' + pathListHtml +
+        '<div class="config-section-title">Resolved CLI binaries</div><table>' +
+        '<thead><tr><th>Agent</th><th>Resolved path</th></tr></thead><tbody>' + binsRows + '</tbody></table>';
+    } else {
+      processEl.innerHTML = '';
+    }
 
     var mapRows = Object.keys(cfg.delegationMap).map(function (taskType) {
       var entry = cfg.delegationMap[taskType];

@@ -39,6 +39,25 @@ function fakePathWithBinary(dir, name) {
   return dir
 }
 
+test('resolveAgentCli reports resolvable:false and a null binPath when the CLI is not on the given PATH', async () => {
+  const { resolveAgentCli } = await fresh(tmpHome())
+  const info = resolveAgentCli('copilot', { PATH: '/nonexistent/dir/only' })
+  assert.equal(info.agent, 'copilot')
+  assert.equal(info.cmd, 'copilot')
+  assert.equal(info.binPath, null)
+  assert.equal(info.resolvable, false)
+})
+
+test('resolveAgentCli reports resolvable:true and the resolved binPath when the CLI is on the given PATH', async () => {
+  const home = tmpHome()
+  const binDir = path.join(home, 'bin')
+  fakePathWithBinary(binDir, 'agy')
+  const { resolveAgentCli } = await fresh(home)
+  const info = resolveAgentCli('agy', { PATH: binDir })
+  assert.equal(info.resolvable, true)
+  assert.equal(info.binPath, path.join(binDir, 'agy'))
+})
+
 test('discoverCli reports error (not throw) when the binary is missing from PATH', async () => {
   const { discoverCli } = await fresh(tmpHome())
   const env = { PATH: '/nonexistent/dir/only' }
