@@ -15,7 +15,7 @@ const EXCLUDED_ERROR_KINDS = new Set(['locked', 'worktree_denied', 'orphaned', '
 
 /**
  * Cache entry holding file metadata and the parsed job record.
- * @typedef {{ mtimeMs: number, size: number, job: import('./schemas.mjs').JobRecord }} CacheEntry
+ * @typedef {{ mtimeMs: number, size: number, ino: number, job: import('./schemas.mjs').JobRecord }} CacheEntry
  */
 
 /**
@@ -66,14 +66,18 @@ function getOrUpdateIndex(runsDir) {
     }
 
     const cached = dirIndex.get(jobId)
-    if (cached && cached.mtimeMs === stat.mtimeMs && cached.size === stat.size) {
+    // writeJsonAtomic replaces result.json via rename, which yields a new
+    // inode; two writes can coincidentally match on mtimeMs and size (coarse
+    // mtime granularity, equal-length content), so stat.ino must also match
+    // before a cached record may be reused.
+    if (cached && cached.mtimeMs === stat.mtimeMs && cached.size === stat.size && cached.ino === stat.ino) {
       continue
     }
 
     try {
       const content = fs.readFileSync(resultPath, 'utf8')
       const parsed = JSON.parse(content)
-      dirIndex.set(jobId, { mtimeMs: stat.mtimeMs, size: stat.size, job: parsed })
+      dirIndex.set(jobId, { mtimeMs: stat.mtimeMs, size: stat.size, ino: stat.ino, job: parsed })
     } catch {
       // If result.json is temporarily malformed, keep the previous valid record
     }

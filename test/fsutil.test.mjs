@@ -135,6 +135,24 @@ test('updateJsonLocked reclaims a lock left by a dead pid', () => {
   assert.deepEqual(lockAndTmpLeftovers(dir), [])
 })
 
+test('updateJsonLocked does not remove a lock that a different holder replaced mid-update', () => {
+  const dir = tmpDir()
+  const file = path.join(dir, 'state.json')
+  const lockPath = `${file}.lock`
+  const bToken = 'bbbbbbbbbbbbbbbb'
+
+  const result = updateJsonLocked(file, (current) => {
+    // Simulate the reclaim race: while A's updater runs, its lock is judged
+    // stale and B acquires it, writing its own ownership token.
+    fs.writeFileSync(lockPath, JSON.stringify({ pid: process.pid, acquiredAt: new Date().toISOString(), token: bToken }))
+    return { ...current, done: true }
+  })
+
+  assert.deepEqual(result, { done: true })
+  assert.equal(fs.existsSync(lockPath), true, "A's release must not delete B's lock")
+  assert.equal(JSON.parse(fs.readFileSync(lockPath, 'utf8')).token, bToken)
+})
+
 test('updateJsonLocked throws "lock timeout" when a live-pid lock is held throughout', () => {
   const dir = tmpDir()
   const file = path.join(dir, 'state.json')

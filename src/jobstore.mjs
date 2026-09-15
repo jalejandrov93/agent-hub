@@ -8,7 +8,24 @@ function ensureDir(dir) {
   fs.mkdirSync(dir, { recursive: true })
 }
 
+/**
+ * A job id is used directly as a directory name under runs/, so it must be a
+ * single safe path segment. Without this a decoded id like `../../x` (reachable
+ * via GET /api/jobs/..%2F..%2Fx/result and the MCP job_* tools) would read or
+ * write files outside runs/. Every exported function that accepts a jobId
+ * funnels through jobDir(), so validating here rejects the whole class before
+ * any filesystem call, and reports it the same way a missing job does.
+ */
+const JOB_ID_PATTERN = /^[A-Za-z0-9][A-Za-z0-9._-]*$/
+
+function assertValidJobId(jobId) {
+  if (typeof jobId !== 'string' || !JOB_ID_PATTERN.test(jobId) || jobId.includes('..')) {
+    throw new Error(`job not found: ${jobId}`)
+  }
+}
+
 function jobDir(jobId, env = process.env) {
+  assertValidJobId(jobId)
   return path.join(paths(env).runsDir, jobId)
 }
 
@@ -107,7 +124,19 @@ export function readResult(jobId, env = process.env) {
 export function updateResult(jobId, patch, env = process.env) {
   readResult(jobId, env) // throws `job not found: ${jobId}` if result.json does not exist
   const updatedAt = new Date().toISOString()
-  return updateJsonLocked(resultPath(jobId, env), (current) => ({ ...current, ...patch, updatedAt }))
+  return updateJsonLocked(resultPath(jobId, env), (current) => {
+    const next = { ...current, ...patch, updatedAt }
+    // cancelJob (dashboard process) and finishJob (MCP process) race: a finish
+    // computed from a record read before the cancel must not resurrect the job
+    // as succeeded/failed. Cancellation wins on status; everything else may
+    // still merge (tokens, sessionId, costUsd, ...).
+    if (current.status === 'canceled' && patch.status && patch.status !== 'canceled') {
+      next.status = 'canceled'
+      next.errorKind = current.errorKind
+      next.error = current.error
+    }
+    return next
+  })
 }
 
 export function listJobs(env = process.env) {

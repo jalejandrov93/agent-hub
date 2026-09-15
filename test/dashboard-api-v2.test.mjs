@@ -350,6 +350,34 @@ test('GET /api/jobs/:id/result for an unknown job returns 404', async () => {
   }
 })
 
+test('GET /api/jobs/..%2F..%2Fetc/result cannot escape runs/ even when a file exists there', async () => {
+  const base = tmpHome()
+  const home = path.join(base, 'nested')
+  fs.mkdirSync(path.join(home, 'runs'), { recursive: true })
+  // Plant a valid job record two directories above runs/, which is exactly
+  // where the unvalidated id `../../etc` resolves. Without central validation
+  // in jobstore this is returned as a 200.
+  const escapedDir = path.join(base, 'etc')
+  fs.mkdirSync(escapedDir, { recursive: true })
+  fs.writeFileSync(path.join(escapedDir, 'result.json'), JSON.stringify({ jobId: 'etc', status: 'succeeded' }), 'utf8')
+
+  const previousHome = process.env.AGENT_HUB_HOME
+  process.env.AGENT_HUB_HOME = home
+  try {
+    const env = { AGENT_HUB_HOME: home }
+    const server = createServer({ env })
+    const port = await listen(server)
+    try {
+      const res = await request(port, '/api/jobs/..%2F..%2Fetc/result')
+      assert.equal(res.status, 404)
+    } finally {
+      server.close()
+    }
+  } finally {
+    process.env.AGENT_HUB_HOME = previousHome
+  }
+})
+
 // --- write-route guards reused from the existing dashboard hardening ---
 
 test('write routes under the new API (proposals refresh, learnings create) reject a missing JSON content type', async () => {

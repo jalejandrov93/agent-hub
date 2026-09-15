@@ -172,6 +172,24 @@ test('reconcileOrphans leaves running jobs with a live pid untouched', async () 
   assert.equal(readResult(job.jobId).status, 'running')
 })
 
+test('updateResult never overwrites a canceled job with a late succeeded/failed status', async () => {
+  const home = tmpHome()
+  const { createJob, updateResult, readResult } = await freshJobstore(home)
+  const job = createJob({ agent: 'opencode', model: 'x', task: 't', cwd: '/tmp', title: 't' })
+
+  updateResult(job.jobId, { status: 'canceled', errorKind: 'canceled_by_user', error: 'canceled by user' })
+  // A late finishJob (the MCP process) reports success from a record it read
+  // before the cancel landed; it may still contribute tokens/sessionId.
+  updateResult(job.jobId, { status: 'succeeded', tokens: 99, sessionId: 'ses_late' })
+
+  const result = readResult(job.jobId)
+  assert.equal(result.status, 'canceled')
+  assert.equal(result.errorKind, 'canceled_by_user')
+  assert.equal(result.error, 'canceled by user')
+  assert.equal(result.tokens, 99, 'non-status fields still merge')
+  assert.equal(result.sessionId, 'ses_late')
+})
+
 test('appendStdout writes to stdout.log and stdoutPath reports the file', async () => {
   const home = tmpHome()
   const { createJob, appendStdout, stdoutPath } = await freshJobstore(home)
@@ -188,6 +206,35 @@ test('updateResult throws "job not found" for an unknown jobId', async () => {
   const home = tmpHome()
   const { updateResult } = await freshJobstore(home)
   assert.throws(() => updateResult('does-not-exist', { status: 'running' }), /job not found: does-not-exist/)
+})
+
+test('every jobId-taking function rejects path-traversal and malformed ids with "job not found"', async () => {
+  const home = tmpHome()
+  const { createJob, readResult, updateResult, responsePath, stdoutPath, promptPath, appendStdout } = await freshJobstore(home)
+
+  const badIds = ['..', '../evil', '../../x', 'a/../b', 'a..b', 'x/y', '', '.hidden', 'a b']
+  for (const id of badIds) {
+    assert.throws(() => readResult(id), new RegExp(`job not found: ${id.replace(/[.*+?^${}()|[\]\\]/g, '\\$&')}`), `readResult(${JSON.stringify(id)})`)
+    assert.throws(() => updateResult(id, { status: 'running' }), /job not found:/, `updateResult(${JSON.stringify(id)})`)
+    assert.throws(() => responsePath(id), /job not found:/, `responsePath(${JSON.stringify(id)})`)
+    assert.throws(() => stdoutPath(id), /job not found:/, `stdoutPath(${JSON.stringify(id)})`)
+    assert.throws(() => promptPath(id), /job not found:/, `promptPath(${JSON.stringify(id)})`)
+    assert.throws(() => appendStdout(id, 'x'), /job not found:/, `appendStdout(${JSON.stringify(id)})`)
+  }
+})
+
+test('generated job ids stay valid across every jobId-taking function', async () => {
+  const home = tmpHome()
+  const { createJob, readResult, updateResult, responsePath, stdoutPath, promptPath, appendStdout } = await freshJobstore(home)
+  const job = createJob({ agent: 'agy', model: 'x', task: 't', cwd: '/tmp', title: 't' })
+
+  assert.equal(readResult(job.jobId).jobId, job.jobId)
+  assert.ok(responsePath(job.jobId).endsWith(path.join(job.jobId, 'response.txt')))
+  assert.ok(stdoutPath(job.jobId).endsWith(path.join(job.jobId, 'stdout.log')))
+  assert.ok(promptPath(job.jobId).endsWith(path.join(job.jobId, 'prompt.txt')))
+  appendStdout(job.jobId, 'ok\n')
+  updateResult(job.jobId, { status: 'running' })
+  assert.equal(readResult(job.jobId).status, 'running')
 })
 
 test('updateResult leaves no .lock file behind after a successful update', async () => {

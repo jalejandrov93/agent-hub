@@ -4,6 +4,7 @@ import fs from 'node:fs'
 import path from 'node:path'
 import os from 'node:os'
 import { MetricsRow } from '../src/schemas.mjs'
+import { writeJsonAtomic } from '../src/fsutil.mjs'
 
 function tmpHome() {
   return fs.mkdtempSync(path.join(os.tmpdir(), 'agent-hub-metrics-test-'))
@@ -353,6 +354,41 @@ test('incremental in-memory index: re-reads only when mtimeMs/size changed', asy
   // Force a newer mtime
   const newTime = new Date(Date.now() + 5000)
   fs.utimesSync(jPath, newTime, newTime)
+
+  const res2 = computeMetrics({ env })
+  assert.equal(res2.rows[0].tokensTotal, 999)
+})
+
+test('incremental index: re-reads when the inode changes even if mtimeMs and size match', async () => {
+  const home = tmpHome()
+  const env = { AGENT_HUB_HOME: home }
+  const { computeMetrics } = await freshMetrics()
+
+  const resultPath = path.join(home, 'runs', 'job-ino', 'result.json')
+  const base = {
+    jobId: 'job-ino',
+    agent: 'agy',
+    model: 'm1',
+    mode: 'read',
+    status: 'succeeded',
+    tokens: 100,
+    createdAt: '2026-09-15T00:00:00.000Z',
+    updatedAt: '2026-09-15T00:00:10.000Z',
+  }
+  fs.mkdirSync(path.dirname(resultPath), { recursive: true })
+
+  // writeJsonAtomic replaces the file via rename(), so the second write lands
+  // a new inode. Forcing an identical mtime and equal-sized content makes
+  // mtimeMs+size identical though, so only an inode check can notice.
+  const frozen = new Date('2026-09-15T00:00:20.000Z')
+  writeJsonAtomic(resultPath, base)
+  fs.utimesSync(resultPath, frozen, frozen)
+
+  const res1 = computeMetrics({ env })
+  assert.equal(res1.rows[0].tokensTotal, 100)
+
+  writeJsonAtomic(resultPath, { ...base, tokens: 999 })
+  fs.utimesSync(resultPath, frozen, frozen)
 
   const res2 = computeMetrics({ env })
   assert.equal(res2.rows[0].tokensTotal, 999)

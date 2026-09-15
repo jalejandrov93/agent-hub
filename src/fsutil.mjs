@@ -54,12 +54,18 @@ function sleepSync(ms) {
  * attempts. Throws when the budget is exhausted.
  */
 function acquireLock(file, lockPath, { retries, retryDelayMs, staleMs }) {
+  // Ownership token: a holder paused longer than staleMs can have its lock
+  // reclaimed by another process, then wake up and run its `finally`. Without
+  // a token that release would delete the NEW holder's lock, letting a third
+  // process in while the second still believes it holds it. The token is
+  // written into the lock JSON so release/reclaim can tell instances apart.
+  const token = crypto.randomBytes(8).toString('hex')
   for (let attempt = 0; attempt < retries; attempt++) {
     try {
       const fd = fs.openSync(lockPath, 'wx')
-      fs.writeSync(fd, JSON.stringify({ pid: process.pid, acquiredAt: new Date().toISOString() }))
+      fs.writeSync(fd, JSON.stringify({ pid: process.pid, acquiredAt: new Date().toISOString(), token }))
       fs.closeSync(fd)
-      return
+      return token
     } catch (error) {
       if (error.code !== 'EEXIST') throw error
     }
@@ -80,9 +86,10 @@ function acquireLock(file, lockPath, { retries, retryDelayMs, staleMs }) {
       continue
     }
 
+    let holder = null
     let stale
     try {
-      const holder = JSON.parse(raw)
+      holder = JSON.parse(raw)
       stale = !isPidAlive(holder.pid) || Date.now() - new Date(holder.acquiredAt).getTime() > staleMs
     } catch {
       // Unreadable/garbled lock file: only counts as stale once it is older
@@ -106,7 +113,18 @@ function acquireLock(file, lockPath, { retries, retryDelayMs, staleMs }) {
       } catch {
         continue // already gone — nothing to reclaim, retry
       }
-      if (current === raw) fs.rmSync(lockPath, { force: true })
+      // Only delete the exact lock instance we diagnosed as stale. When both
+      // sides carry a token, require a token match; a legacy lock without one
+      // falls back to byte-for-byte equality (strictly stronger than a token).
+      let sameInstance = current === raw
+      if (holder && holder.token) {
+        try {
+          sameInstance = JSON.parse(current).token === holder.token
+        } catch {
+          sameInstance = current === raw
+        }
+      }
+      if (sameInstance) fs.rmSync(lockPath, { force: true })
       continue // retry immediately, does not consume a sleep
     }
 
@@ -133,7 +151,7 @@ export function updateJsonLocked(file, updater, { defaultValue = {}, retries = 2
   fs.mkdirSync(dir, { recursive: true })
   const lockPath = `${file}.lock`
 
-  acquireLock(file, lockPath, { retries, retryDelayMs, staleMs })
+  const token = acquireLock(file, lockPath, { retries, retryDelayMs, staleMs })
   try {
     const current = readJsonSafe(file, defaultValue)
     const updated = updater(current)
@@ -141,6 +159,20 @@ export function updateJsonLocked(file, updater, { defaultValue = {}, retries = 2
     writeJsonAtomic(file, next)
     return next
   } finally {
-    fs.rmSync(lockPath, { force: true })
+    releaseLock(lockPath, token)
+  }
+}
+
+/**
+ * Release a lock only if it is still the instance this caller acquired. A
+ * holder whose lock was reclaimed as stale must not delete the replacement
+ * lock a newer holder owns; the ownership token makes that check exact.
+ */
+function releaseLock(lockPath, token) {
+  try {
+    const holder = JSON.parse(fs.readFileSync(lockPath, 'utf8'))
+    if (holder.token === token) fs.rmSync(lockPath, { force: true })
+  } catch {
+    // Already gone, or garbled by another writer: leave whatever is there.
   }
 }
