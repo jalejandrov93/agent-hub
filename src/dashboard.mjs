@@ -259,7 +259,7 @@ function sendError(res, error) {
 export function createServer({ env = process.env, commandRunner = runCommand, assetDir = DEFAULT_ASSET_DIR } = {}) {
   const sseClients = new Set()
 
-  const server = http.createServer((req, res) => {
+  const handleRequest = (req, res) => {
     const remoteAddress = req.socket.remoteAddress
     const url = new URL(req.url, 'http://localhost')
 
@@ -476,14 +476,32 @@ export function createServer({ env = process.env, commandRunner = runCommand, as
     // so the model segment must be URL-encoded by the caller and decoded here.
     const overrideMatch = url.pathname.match(/^\/api\/overrides\/([^/]+)\/(.+)$/)
     if (overrideMatch && req.method === 'DELETE') {
-      const agent = decodeURIComponent(overrideMatch[1])
-      const model = decodeURIComponent(overrideMatch[2])
+      let agent
+      let model
+      try {
+        agent = decodeURIComponent(overrideMatch[1])
+        model = decodeURIComponent(overrideMatch[2])
+      } catch {
+        return sendJson(res, 400, { error: 'invalid URL encoding' })
+      }
       sendJson(res, 200, clearOverride(overrideKey(agent, model), env))
       return
     }
 
     res.writeHead(404, { 'Content-Type': 'application/json' })
     res.end(JSON.stringify({ error: 'not found' }))
+  }
+
+  // Safety net: a synchronous throw inside a route must become a 500 for that
+  // request, not an uncaught exception that exits the dashboard process.
+  const server = http.createServer((req, res) => {
+    try {
+      handleRequest(req, res)
+    } catch (error) {
+      console.error('[agent-hub] dashboard request failed:', error?.message ?? error)
+      if (!res.headersSent) sendJson(res, 500, { error: 'internal error' })
+      else res.destroy()
+    }
   })
 
   // Tail events.jsonl (fs.watch on its directory, offset-tracked) and push
