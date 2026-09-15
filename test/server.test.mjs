@@ -9,7 +9,7 @@ import { StdioClientTransport } from '@modelcontextprotocol/sdk/client/stdio.js'
 
 const ENTRY = path.join(path.dirname(fileURLToPath(import.meta.url)), '..', 'src', 'index.mjs')
 
-async function connect() {
+export async function connect(env = {}) {
   const home = fs.mkdtempSync(path.join(os.tmpdir(), 'agent-hub-server-'))
   const transport = new StdioClientTransport({
     command: process.execPath,
@@ -17,12 +17,12 @@ async function connect() {
     // Startup discovery (src/startup.mjs) spawns real agy/opencode/copilot
     // processes in the background once the server boots for real; this
     // suite must never do that, so every spawned server disables it.
-    env: { ...process.env, AGENT_HUB_HOME: home, AGENT_HUB_DISABLE_STARTUP_DISCOVERY: '1' },
+    env: { ...process.env, AGENT_HUB_HOME: home, AGENT_HUB_DISABLE_STARTUP_DISCOVERY: '1', ...env },
     stderr: 'ignore',
   })
   const client = new Client({ name: 'test', version: '1.0.0' })
   await client.connect(transport)
-  return { client, close: () => client.close() }
+  return { client, home, close: () => client.close() }
 }
 
 test('the server boots over stdio and exposes the full tool set', async () => {
@@ -31,7 +31,18 @@ test('the server boots over stdio and exposes the full tool set', async () => {
     const { tools } = await client.listTools()
     assert.deepEqual(
       tools.map((t) => t.name).sort(),
-      ['agents_status', 'delegate', 'job_cancel', 'job_reply', 'job_result', 'job_status', 'job_wait', 'route']
+      [
+        'agents_metrics',
+        'agents_status',
+        'delegate',
+        'job_cancel',
+        'job_reply',
+        'job_result',
+        'job_status',
+        'job_wait',
+        'learning_propose',
+        'route',
+      ]
     )
   } finally {
     await close()
