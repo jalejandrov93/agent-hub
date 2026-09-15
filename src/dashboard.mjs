@@ -14,7 +14,63 @@ import { defaultPairs } from './tools/agents.mjs'
 import { runCommand } from './process.mjs'
 
 const HERE = path.dirname(fileURLToPath(import.meta.url))
-const HTML_PATH = path.join(HERE, 'dashboard.html')
+const DEFAULT_ASSET_DIR = path.join(HERE, 'dashboard')
+
+// Exact-string allowlist of the dashboard's static bundle. Every value here
+// is a fixed, known-safe relative path baked into this file — never derived
+// from the request URL — so joining it onto assetDir can never escape
+// assetDir, regardless of what a client sends as the request path. A
+// request path not present as a KEY here is 404, full stop; there is no
+// filesystem path join from the URL itself.
+const ASSET_MAP = Object.freeze({
+  '/': 'index.html',
+  '/styles.css': 'styles.css',
+  '/app.js': 'app.js',
+  '/router.js': 'router.js',
+  '/store.js': 'store.js',
+  '/api.js': 'api.js',
+  '/contracts.js': 'contracts.js',
+  '/ui/dom.js': 'ui/dom.js',
+  '/ui/format.js': 'ui/format.js',
+  '/ui/badges.js': 'ui/badges.js',
+  '/ui/dialog.js': 'ui/dialog.js',
+  '/ui/menu.js': 'ui/menu.js',
+  '/ui/icons.js': 'ui/icons.js',
+  '/views/overview.js': 'views/overview.js',
+  '/views/agents.js': 'views/agents.js',
+  '/views/jobs.js': 'views/jobs.js',
+  '/views/history.js': 'views/history.js',
+  '/views/subagents.js': 'views/subagents.js',
+  '/views/timeline.js': 'views/timeline.js',
+  '/views/config.js': 'views/config.js',
+})
+
+const DASHBOARD_CSP =
+  "default-src 'self'; script-src 'self'; style-src 'self'; connect-src 'self'; img-src 'self' data:; base-uri 'none'; frame-ancestors 'none'"
+
+/** Content-Type for a served dashboard asset, by its (fixed, allowlisted) file extension. */
+function assetContentType(relPath) {
+  if (relPath.endsWith('.html')) return 'text/html; charset=utf-8'
+  if (relPath.endsWith('.css')) return 'text/css; charset=utf-8'
+  return 'text/javascript; charset=utf-8'
+}
+
+/** Serve one allowlisted dashboard asset. relPath is always a fixed ASSET_MAP value, never request-derived. */
+function sendAsset(res, assetDir, relPath) {
+  let body
+  try {
+    body = fs.readFileSync(path.join(assetDir, relPath))
+  } catch {
+    return sendJson(res, 404, { error: 'not found' })
+  }
+  res.writeHead(200, {
+    'Content-Type': assetContentType(relPath),
+    'Cache-Control': 'no-cache',
+    'Content-Security-Policy': DASHBOARD_CSP,
+    'X-Content-Type-Options': 'nosniff',
+  })
+  res.end(body)
+}
 
 export function isLoopback(remoteAddress) {
   return remoteAddress === '127.0.0.1' || remoteAddress === '::1' || remoteAddress === '::ffff:127.0.0.1'
@@ -200,7 +256,7 @@ function sendError(res, error) {
   sendJson(res, status, { error: message })
 }
 
-export function createServer({ env = process.env, commandRunner = runCommand } = {}) {
+export function createServer({ env = process.env, commandRunner = runCommand, assetDir = DEFAULT_ASSET_DIR } = {}) {
   const sseClients = new Set()
 
   const server = http.createServer((req, res) => {
@@ -232,10 +288,8 @@ export function createServer({ env = process.env, commandRunner = runCommand } =
       }
     }
 
-    if (url.pathname === '/' && req.method === 'GET') {
-      res.writeHead(200, { 'Content-Type': 'text/html; charset=utf-8' })
-      res.end(fs.readFileSync(HTML_PATH, 'utf8'))
-      return
+    if (req.method === 'GET' && Object.prototype.hasOwnProperty.call(ASSET_MAP, url.pathname)) {
+      return sendAsset(res, assetDir, ASSET_MAP[url.pathname])
     }
 
     if (url.pathname === '/api/state' && req.method === 'GET') {

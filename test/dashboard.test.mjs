@@ -11,6 +11,47 @@ function tmpHome() {
   return fs.mkdtempSync(path.join(os.tmpdir(), 'agent-hub-dashboard-'))
 }
 
+// The full allowlisted dashboard bundle: [urlPath, relative file under
+// assetDir, expected Content-Type regex]. Mirrors the ASSET_MAP contract in
+// src/dashboard.mjs one-to-one.
+const ASSET_ROUTES = [
+  ['/', 'index.html', /^text\/html; charset=utf-8$/],
+  ['/styles.css', 'styles.css', /^text\/css; charset=utf-8$/],
+  ['/app.js', 'app.js', /^text\/javascript; charset=utf-8$/],
+  ['/router.js', 'router.js', /^text\/javascript; charset=utf-8$/],
+  ['/store.js', 'store.js', /^text\/javascript; charset=utf-8$/],
+  ['/api.js', 'api.js', /^text\/javascript; charset=utf-8$/],
+  ['/contracts.js', 'contracts.js', /^text\/javascript; charset=utf-8$/],
+  ['/ui/dom.js', 'ui/dom.js', /^text\/javascript; charset=utf-8$/],
+  ['/ui/format.js', 'ui/format.js', /^text\/javascript; charset=utf-8$/],
+  ['/ui/badges.js', 'ui/badges.js', /^text\/javascript; charset=utf-8$/],
+  ['/ui/dialog.js', 'ui/dialog.js', /^text\/javascript; charset=utf-8$/],
+  ['/ui/menu.js', 'ui/menu.js', /^text\/javascript; charset=utf-8$/],
+  ['/ui/icons.js', 'ui/icons.js', /^text\/javascript; charset=utf-8$/],
+  ['/views/overview.js', 'views/overview.js', /^text\/javascript; charset=utf-8$/],
+  ['/views/agents.js', 'views/agents.js', /^text\/javascript; charset=utf-8$/],
+  ['/views/jobs.js', 'views/jobs.js', /^text\/javascript; charset=utf-8$/],
+  ['/views/history.js', 'views/history.js', /^text\/javascript; charset=utf-8$/],
+  ['/views/subagents.js', 'views/subagents.js', /^text\/javascript; charset=utf-8$/],
+  ['/views/timeline.js', 'views/timeline.js', /^text\/javascript; charset=utf-8$/],
+  ['/views/config.js', 'views/config.js', /^text\/javascript; charset=utf-8$/],
+]
+
+const DASHBOARD_CSP =
+  "default-src 'self'; script-src 'self'; style-src 'self'; connect-src 'self'; img-src 'self' data:; base-uri 'none'; frame-ancestors 'none'"
+
+/** A temp asset directory populated with a dummy file for every ASSET_ROUTES entry. */
+function assetFixture() {
+  const dir = fs.mkdtempSync(path.join(os.tmpdir(), 'agent-hub-dashboard-assets-'))
+  for (const [, relPath] of ASSET_ROUTES) {
+    const full = path.join(dir, relPath)
+    fs.mkdirSync(path.dirname(full), { recursive: true })
+    const content = relPath.endsWith('.html') ? '<!doctype html><html><head><title>agent-hub dashboard</title></head><body></body></html>' : `export const marker = ${JSON.stringify(relPath)}\n`
+    fs.writeFileSync(full, content)
+  }
+  return dir
+}
+
 function listen(server) {
   return new Promise((resolve) => {
     server.listen(0, '127.0.0.1', () => resolve(server.address().port))
@@ -179,7 +220,7 @@ test('buildState jobs carry variant, sessionId, parentJobId and errorKind throug
   assert.equal(jobsById[reply.jobId].parentJobId, parent.jobId)
 })
 
-test('GET / serves the dashboard HTML page', async () => {
+test('GET / serves the dashboard shell from the default asset directory', async () => {
   const env = { AGENT_HUB_HOME: tmpHome() }
   const server = createServer({ env })
   const port = await listen(server)
@@ -193,20 +234,63 @@ test('GET / serves the dashboard HTML page', async () => {
   }
 })
 
-test('the dashboard HTML wires up the Agents panel revalidate/rediscover actions and a Config panel', async () => {
+test('every allowlisted dashboard asset is served 200 with the correct Content-Type, no-cache, CSP and nosniff', async () => {
+  const assetDir = assetFixture()
   const env = { AGENT_HUB_HOME: tmpHome() }
-  const server = createServer({ env })
+  const server = createServer({ env, assetDir })
   const port = await listen(server)
   try {
-    const res = await get(port, '/')
-    const html = res.body
-    assert.match(html, /id="btn-revalidate-all"/, 'header "Revalidate all" button')
-    assert.match(html, /id="btn-rediscover"/, 'header "Rediscover CLIs" button')
-    assert.match(html, /id="config-panel"/, 'a Config panel exists')
-    assert.match(html, /\/api\/agents\/refresh/, 'JS calls the agents refresh endpoint')
-    assert.match(html, /\/api\/discovery\/refresh/, 'JS calls the discovery refresh endpoint')
-    assert.match(html, /\/api\/overrides/, 'JS calls the overrides endpoint')
-    assert.match(html, /aria-busy/, 'in-flight actions set aria-busy')
+    for (const [urlPath, , typeRe] of ASSET_ROUTES) {
+      const res = await get(port, urlPath)
+      assert.equal(res.status, 200, urlPath)
+      assert.match(res.headers['content-type'], typeRe, urlPath)
+      assert.equal(res.headers['cache-control'], 'no-cache', urlPath)
+      assert.equal(res.headers['content-security-policy'], DASHBOARD_CSP, urlPath)
+      assert.equal(res.headers['x-content-type-options'], 'nosniff', urlPath)
+    }
+  } finally {
+    server.close()
+  }
+})
+
+test('unknown paths and dot-segment traversal attempts against the dashboard asset map return 404 JSON', async () => {
+  const assetDir = assetFixture()
+  const env = { AGENT_HUB_HOME: tmpHome() }
+  const server = createServer({ env, assetDir })
+  const port = await listen(server)
+  try {
+    for (const urlPath of ['/does-not-exist.js', '/../dashboard.mjs', '/%2e%2e/dashboard.mjs', '/views/../dashboard.mjs', '/ui/evil.js']) {
+      const res = await get(port, urlPath)
+      assert.equal(res.status, 404, urlPath)
+      assert.match(res.headers['content-type'], /application\/json/, urlPath)
+    }
+  } finally {
+    server.close()
+  }
+})
+
+test('a bad Host header on a dashboard asset request is rejected 403 (blocks DNS rebinding for the static bundle too)', async () => {
+  const assetDir = assetFixture()
+  const env = { AGENT_HUB_HOME: tmpHome() }
+  const server = createServer({ env, assetDir })
+  const port = await listen(server)
+  try {
+    const res = await rawRequest(port, '/app.js', { headers: { Host: 'evil.example' } })
+    assert.equal(res.status, 403)
+  } finally {
+    server.close()
+  }
+})
+
+test('an allowlisted-but-missing asset file returns 404 JSON instead of throwing', async () => {
+  const assetDir = fs.mkdtempSync(path.join(os.tmpdir(), 'agent-hub-dashboard-assets-empty-'))
+  const env = { AGENT_HUB_HOME: tmpHome() }
+  const server = createServer({ env, assetDir })
+  const port = await listen(server)
+  try {
+    const res = await get(port, '/app.js')
+    assert.equal(res.status, 404)
+    assert.match(res.headers['content-type'], /application\/json/)
   } finally {
     server.close()
   }
