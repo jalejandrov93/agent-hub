@@ -1,10 +1,12 @@
 import { cleanup, fireEvent, render, screen } from "@testing-library/react"
 import { beforeEach, describe, expect, it, vi } from "vitest"
+import type { MetricsRowT } from "@/lib/types"
 import { MetricsView } from "./index"
+import { chartHeightClass, mapMetricsChartRows } from "./chart-data"
 
 const navigate = vi.fn()
 const search = { taskType: "" }
-const rows = [
+const rows: MetricsRowT[] = [
   {
     agent: "agy",
     model: "gemini-3.8-flash-high",
@@ -87,5 +89,17 @@ describe("MetricsView", () => {
     expect(container.querySelector("style")).toBeNull()
     expect(document.head.querySelectorAll("style").length).toBe(stylesBefore)
     expect(container.querySelector('[data-slot="chart"]')).toBeTruthy()
+  })
+
+  it("maps one chart category per row and flags low-sample pairs", () => {
+    const chartRows = mapMetricsChartRows(rows)
+
+    expect(chartRows).toHaveLength(rows.length)
+    expect(chartRows.map((row) => row.name)).toEqual([
+      "agy:gemini-3.8-flash-high",
+      "opencode:opencode/muse-spark-1.3-contributor-free",
+    ])
+    expect(chartRows.map((row) => row.fillOpacity)).toEqual([1, 0.45])
+    expect(chartHeightClass(16)).toBe("h-[28rem]")
   })
 })
