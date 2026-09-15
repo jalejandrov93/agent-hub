@@ -6,6 +6,51 @@ and this project adheres to [Semantic Versioning](https://semver.org/).
 
 ## [Unreleased]
 
+## [1.2.0] - 2026-09-14
+
+### Added
+
+- Dashboard app shell with a grouped sidebar (Monitor, Activity, System) and
+  hash routes for Overview, Agents, Running jobs, Job history, Claude
+  subagents, Timeline and Config. Routes are deep-linkable, the back button
+  works, and focus moves to the view heading on navigation.
+- Sidebar badges that surface state: unhealthy agents, running jobs, failed
+  jobs in the last 24 hours, unseen timeline events and unresolved CLIs.
+- Overview view that leads with what needs attention, with KPI cards linking
+  to filtered views.
+- Agents grouped by CLI with filters (unhealthy, held, breaker open), search,
+  a row action menu and a detail panel. Job history filters by status and
+  agent, with a detail panel for errors, session and cost.
+- Confirmation dialogs before an L3 ping, a breaker reset or a job cancel.
+- System, light and dark theme choice, remembered per browser.
+- Navigation drawer on screens narrower than 960px.
+
+### Changed
+
+- The single 1749-line dashboard page is split into static ES modules under
+  `src/dashboard/` with no build step, served from an exact-match allowlist.
+- Live events are appended incrementally; only job and preflight events
+  trigger a debounced state refetch instead of a full reload per event.
+
+### Fixed
+
+- A DELETE override request with malformed percent-encoding no longer
+  crashes the dashboard process; it returns 400, and any other synchronous
+  error inside a route becomes a 500 for that request.
+- Events delivered over SSE while a state refresh is in flight are kept
+  instead of being replaced by the older snapshot.
+- Navigating quickly no longer lets a slower view import replace the view
+  the user navigated to.
+- HEAD requests to the dashboard shell and assets return 200 instead of
+  415.
+- The browser no longer requests a missing favicon on every load.
+
+### Security
+
+- Dashboard responses send `Content-Security-Policy: default-src 'self'`
+  without inline script or style allowances, plus `X-Content-Type-Options:
+  nosniff`.
+
 ## [1.1.0] - 2026-09-14
 
 ### Added
@@ -85,6 +130,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/).
 - Local dashboard on `127.0.0.1:7777` with SSE timeline and job cancel.
 - `SubagentStart`/`SubagentStop` hook recorder for Claude Code subagents.
 
-[Unreleased]: https://github.com/jalejandrov93/agent-hub/compare/v1.1.0...HEAD
+[Unreleased]: https://github.com/jalejandrov93/agent-hub/compare/v1.2.0...HEAD
+[1.2.0]: https://github.com/jalejandrov93/agent-hub/compare/v1.1.0...v1.2.0
 [1.1.0]: https://github.com/jalejandrov93/agent-hub/compare/v1.0.0...v1.1.0
 [1.0.0]: https://github.com/jalejandrov93/agent-hub/releases/tag/v1.0.0

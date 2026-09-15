@@ -10,7 +10,7 @@ import { agentsStatusTool, routeTool, knownTaskTypes } from './tools/agents.mjs'
 import { delegateTool, jobWaitTool, jobStatusTool, jobResultTool, jobCancelTool, jobReplyTool } from './tools/jobs.mjs'
 import { scheduleStartupDiscovery } from './startup.mjs'
 
-const VERSION = '1.1.0'
+const VERSION = '1.2.0'
 const TESTED_VERSIONS = { agy: '1.2.1', opencode: '1.18.30', copilot: '1.0.31' }
 
 const log = (...args) => console.error('[agent-hub]', ...args)
