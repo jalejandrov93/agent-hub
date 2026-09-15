@@ -792,3 +792,17 @@ dialog.confirm p { color: var(--text-muted); margin-bottom: 1rem; }
   .kpi-grid { grid-template-columns: 1fr; }
   .search-input { min-width: 0; width: 100%; }
 }
+
+/* ---------------------------------------------------------------------------
+   Integration: hooks used by the views that the component layer did not size.
+   icon() emits width/height="24", which is too large inside compact controls.
+   --------------------------------------------------------------------------- */
+.badge-icon { display: inline-flex; align-items: center; flex: none; }
+.banner-slot:empty { display: none; }
+.btn svg, .chip svg, .menu-item svg, .kpi-card svg, .topbar svg, .attention-item svg, .empty-state svg {
+  width: 16px;
+  height: 16px;
+  flex: none;
+}
+.btn-icon svg { width: 18px; height: 18px; }
+.empty-state svg { width: 28px; height: 28px; }
