@@ -1,7 +1,7 @@
 import fs from 'node:fs'
 import path from 'node:path'
 import { paths, PREFLIGHT_TTL_MS } from './config.mjs'
-import { writeJsonAtomic } from './fsutil.mjs'
+import { writeJsonAtomic, updateJsonLocked } from './fsutil.mjs'
 import { adapterFor, modelsArgv } from './adapters/index.mjs'
 import { runCommand } from './process.mjs'
 import { appendEvent } from './eventlog.mjs'
@@ -172,29 +172,36 @@ export async function runDiscovery({ agents = KNOWN_AGENTS, env = process.env, c
     })
   )
 
-  const merged = { ...existing }
-  agents.forEach((agent, i) => {
-    const outcome = settled[i]
-    if (outcome.status === 'fulfilled') {
-      merged[agent] = outcome.value.entry
-    } else {
-      // Promise.allSettled means discoverCli itself never rejects in
-      // practice (it catches every failure mode), but guard anyway so one
-      // agent's unexpected throw never loses the others' results.
-      merged[agent] = {
-        agent,
-        cmd: agent,
-        binPath: null,
-        version: null,
-        models: [],
-        checkedAt: new Date().toISOString(),
-        error: outcome.reason?.message ?? String(outcome.reason),
+  // The merge happens inside the updater (under the lock) rather than against
+  // the `existing` snapshot read above: probing agents is async and can take
+  // a while, so by the time we're ready to write, another process (the MCP
+  // server and the dashboard both call runDiscovery) may have already
+  // written newer rows for agents outside this call's `agents` list — this
+  // way the read-modify-write for the merge itself is atomic, and we never
+  // clobber those newer rows with our stale pre-probe snapshot.
+  return updateJsonLocked(paths(env).discoveryFile, (current) => {
+    const merged = { ...current }
+    agents.forEach((agent, i) => {
+      const outcome = settled[i]
+      if (outcome.status === 'fulfilled') {
+        merged[agent] = outcome.value.entry
+      } else {
+        // Promise.allSettled means discoverCli itself never rejects in
+        // practice (it catches every failure mode), but guard anyway so one
+        // agent's unexpected throw never loses the others' results.
+        merged[agent] = {
+          agent,
+          cmd: agent,
+          binPath: null,
+          version: null,
+          models: [],
+          checkedAt: new Date().toISOString(),
+          error: outcome.reason?.message ?? String(outcome.reason),
+        }
       }
-    }
+    })
+    return merged
   })
-
-  writeJsonAtomic(paths(env).discoveryFile, merged)
-  return merged
 }
 
 /** Every agent:model pair still reachable from DELEGATION_MAP's chains. */

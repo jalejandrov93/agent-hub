@@ -2,6 +2,7 @@ import fs from 'node:fs'
 import path from 'node:path'
 import crypto from 'node:crypto'
 import { paths } from './config.mjs'
+import { updateJsonLocked } from './fsutil.mjs'
 
 function ensureDir(dir) {
   fs.mkdirSync(dir, { recursive: true })
@@ -74,12 +75,16 @@ export function readResult(jobId, env = process.env) {
   }
 }
 
-/** Merge fields into result.json — read/modify/write, single writer per job at a time. */
+/**
+ * Merge fields into result.json. Both the job runner and the dashboard's
+ * cancel endpoint call this for the same job, so the read-modify-write goes
+ * through updateJsonLocked (not a plain writeFileSync) to make the whole
+ * sequence atomic across processes, never just the final write.
+ */
 export function updateResult(jobId, patch, env = process.env) {
-  const current = readResult(jobId, env)
-  const next = { ...current, ...patch, updatedAt: new Date().toISOString() }
-  fs.writeFileSync(resultPath(jobId, env), JSON.stringify(next, null, 2), 'utf8')
-  return next
+  readResult(jobId, env) // throws `job not found: ${jobId}` if result.json does not exist
+  const updatedAt = new Date().toISOString()
+  return updateJsonLocked(resultPath(jobId, env), (current) => ({ ...current, ...patch, updatedAt }))
 }
 
 export function listJobs(env = process.env) {

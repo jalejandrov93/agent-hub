@@ -147,3 +147,21 @@ test('appendStdout writes to stdout.log and stdoutPath reports the file', async 
   const content = fs.readFileSync(stdoutPath(job.jobId), 'utf8')
   assert.equal(content, 'line one\nline two\n')
 })
+
+test('updateResult throws "job not found" for an unknown jobId', async () => {
+  const home = tmpHome()
+  const { updateResult } = await freshJobstore(home)
+  assert.throws(() => updateResult('does-not-exist', { status: 'running' }), /job not found: does-not-exist/)
+})
+
+test('updateResult leaves no .lock file behind after a successful update', async () => {
+  const home = tmpHome()
+  const { createJob, updateResult } = await freshJobstore(home)
+  const job = createJob({ agent: 'agy', model: 'x', task: 't', cwd: '/tmp', title: 't' })
+
+  updateResult(job.jobId, { status: 'running', pid: 1234 })
+
+  const dir = path.join(home, 'runs', job.jobId)
+  const leftovers = fs.readdirSync(dir).filter((f) => f.includes('.lock'))
+  assert.deepEqual(leftovers, [])
+})

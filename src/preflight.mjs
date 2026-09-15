@@ -3,7 +3,7 @@ import { paths, PREFLIGHT_TTL_MS, CIRCUIT_BREAKER, resolveTimeoutS } from './con
 import { readTail, appendEvent } from './eventlog.mjs'
 import { adapterFor, modelsArgv } from './adapters/index.mjs'
 import { runCommand } from './process.mjs'
-import { writeJsonAtomic } from './fsutil.mjs'
+import { updateJsonLocked } from './fsutil.mjs'
 import { readDiscovery } from './discovery.mjs'
 import { readOverrides, overrideKey } from './overrides.mjs'
 
@@ -31,14 +31,14 @@ export function readCache(env = process.env) {
 export function writeCacheEntry(key, entry, env = process.env) {
   const { home, preflightCacheFile } = paths(env)
   ensureDir(home)
-  const cache = readCache(env)
-  cache[key] = entry
-  // Atomic write: the MCP process and the separately running dashboard
-  // process both write this file, so a plain writeFileSync risks a reader
-  // (or the other writer's read-modify-write) observing a partial/corrupted
-  // file. A lost update between the two processes is an accepted residual
-  // risk — it self-heals within one PREFLIGHT_TTL_MS cycle.
-  writeJsonAtomic(preflightCacheFile, cache)
+  // The MCP process and the separately running dashboard process both do
+  // read-modify-write on this file, so this goes through updateJsonLocked
+  // (not a plain readCache + writeJsonAtomic): the lock serializes the whole
+  // read-modify-write sequence, so a concurrent writer's update is never
+  // silently lost.
+  updateJsonLocked(preflightCacheFile, (cache) => {
+    cache[key] = entry
+  })
   return entry
 }
 
