@@ -23,6 +23,12 @@ auto-loaded, `--add-dir` requirement for hosted Claude models) live in
 `~/.claude/skills/multi-agent-orchestrator/references/agents/agy.md` — that file is now
 canonical; this skill only points to it.
 
+**Read mode is not enforced by agy.** Verified: `agy --mode plan` writes files with or without
+`--dangerously-skip-permissions`, so a plan turn can still edit its `cwd`. agent-hub enforces
+read mode after the fact — it diffs the git-visible worktree before and after the turn and fails
+the job with `errorKind:'read_mode_violation'` — so run agy read/plan turns in a disposable git
+worktree. (opencode's plan agent did respect read mode in testing.)
+
 ## No-MCP fallback
 
 If `agent-hub` is not registered in this session, use the wrapper script directly:

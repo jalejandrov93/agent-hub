@@ -6,12 +6,78 @@ and this project adheres to [Semantic Versioning](https://semver.org/).
 
 ## [Unreleased]
 
+### Added
+
+- Dashboard rewritten as a React 19 + TypeScript + Vite + Tailwind v4 app
+  (`dashboard/` npm workspace) using shadcn/ui on Base UI, TanStack Router
+  (hash history) and TanStack Query, served read-only from `dashboard/dist/`
+  under a strict CSP. New views: Metrics (`#/metrics?taskType=`) and Approvals
+  (`#/approvals?tab=proposals|learnings`), plus filters/deep links across
+  Agents (`filter`, `q`), History (`status`, `agent`, `q`) and Timeline
+  (`source`, `q`).
+- `agents_metrics` MCP tool and `GET /api/metrics`: success rate, p50/p95
+  latency, error kinds and token totals per agent/model/mode/taskType from job
+  history.
+- Adaptive timeouts: a job's timeout is raised (never lowered) from observed
+  succeeded-run p95 x1.5, capped at 3600s, once a pair has 10 samples. An
+  explicit `timeoutS` always wins; the job record keeps `timeoutSource`.
+- Routing proposals (`proposals.json`, `src/proposals.mjs`): propose promoting
+  a chain candidate whose 95% Wilson lower bound beats the current primary's
+  upper bound (both with 10+ samples). A human accepts or rejects at
+  `#/approvals?tab=proposals`; accepting supersedes the previous accepted
+  proposal for that task type, a chain change marks a stored proposal
+  `superseded`, and a rejection starts a 7-day cooldown. `route()` returns the
+  applied proposal as `appliedProposal`.
+- Learnings (`learnings.json`, `src/learnings.mjs`) and the `learning_propose`
+  tool: stored pending, sanitized on write and on read, and approved ones
+  (max 3, 300 chars each) prepended to matching root turns.
+- Read-mode guard (`src/readguard.mjs`): a git before/after snapshot of `cwd`
+  fails a `read` job with `errorKind:'read_mode_violation'` when the tree
+  changed. Verified: `agy --mode plan` writes files regardless of
+  `--dangerously-skip-permissions`; a non-git `cwd` is reported unverifiable.
+- `taskType` on `delegate`/`job_reply` (reply defaults to the parent's) and
+  `tailLines` on `job_result`; `job_reply` returns `turnDepth` and warns from
+  5 turns deep.
+- Job resources (`agent-hub://jobs/{jobId}`, `…/response`) and prompts
+  (`recon`, `adversarial-review`, `guided-write`). Every tool declares a zod
+  `outputSchema` and returns `structuredContent`.
+- Dashboard HTTP API: `GET /api/metrics`; proposals (`GET`,
+  `POST /api/proposals/refresh`, `POST /api/proposals/:id/accept|reject`);
+  learnings (`GET`, `POST`, `POST /api/learnings/:id/approve|reject`,
+  `DELETE /api/learnings/:id`); `GET /api/jobs/:id/result`.
+
 ### Changed
 
+- **Breaking:** Node.js >= 20.19 is now required. `npm install` builds the
+  dashboard through the `prepare` script (`scripts/build-dashboard.mjs`, which
+  prints a hint but never fails the install); `npm run build` rebuilds it, and
+  the server picks up a rebuild without restarting. A missing `dashboard/dist/`
+  serves a 503 page with the build command.
 - `route` returns a compact per-CLI discovery summary (`binPath`, `version`,
   `modelCount`, `checkedAt`, `error`) instead of the full model catalog, which
   added several KB to every routing call. Pass `includeCatalog: true` to get
   the catalog.
+- Cross-process JSON state writes are serialized with a lock file.
+
+### Fixed
+
+- Cross-process JSON updates (overrides, proposals, learnings) no longer lose
+  each other's writes now that the store takes a lock file.
+- Jobs record the task type, turn depth, effective timeout and injected
+  learnings, so history and metrics reflect what actually ran.
+- The dashboard uses a colored chart palette and no longer requests a missing
+  favicon on every load.
+
+### Security
+
+- Dashboard CSP still enforces `style-src 'self'`: Base UI runs with
+  `CSPProvider disableStyleElements` and chart colors come from CSS variables,
+  so the app injects no inline styles.
+
+### Removed
+
+- **Breaking:** the vanilla ES-module dashboard under `src/dashboard/`
+  (HTML/CSS/JS, no build step) — replaced by the `dashboard/` workspace.
 
 ## [1.2.0] - 2026-09-14
 

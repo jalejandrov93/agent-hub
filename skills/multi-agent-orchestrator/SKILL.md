@@ -43,37 +43,45 @@ agents_status → route → delegate → job_wait / job_status → job_result �
    bypasses the 15-min cache.
 2. `route({taskType, mode?, includeCatalog?})` — `taskType` is one of the keys in the Delegation map below;
    `mode` is `'read'|'write'`. Returns `{primary:{agent,model,mode}, fallbacks[], skipped[],
-   discovery, reason}`, where `discovery` is a per-CLI `{binPath, version, modelCount, checkedAt,
-   error}` summary. Pass `includeCatalog:true` only when you need the model ids a CLI actually
+   discovery, reason, appliedProposal}`, where `discovery` is a per-CLI `{binPath, version, modelCount, checkedAt,
+   error}` summary and `appliedProposal` is the accepted proposal whose reorder was applied (or
+   `null`) — a human accepted it from the dashboard, so treat that order as intended. Pass
+   `includeCatalog:true` only when you need the model ids a CLI actually
    offers (the full catalog costs several KB of context) — route stays advisory, it never blocks you, only orders/filters
    candidates. `skipped` lists every filtered-out chain candidate as `{agent, model, reason}`:
    `held` (a human put this pair on hold from the dashboard — don't silently route around it,
    tell the user), `cli_not_found` (the CLI isn't installed or isn't on PATH — this needs a
    human, not a retry), `cached_unavailable`, or `breaker_open`. `{agent:'claude', model:
    'haiku'|'sonnet'|'opus'}` in the result means run it yourself via the Agent tool — never
-   pass it to `delegate`.
-3. `delegate({agent, model, task, cwd, mode?, timeoutS?, title?, variant?})` — `agent` is
+   pass it to `delegate`. When the choice matters and the pair has history, call
+   `agents_metrics` first (`groupBy` optional) — success rate, p50/p95 latency and error kinds
+   per agent/model/mode/taskType beat a guess.
+3. `delegate({agent, model, task, cwd, mode?, timeoutS?, title?, variant?, taskType?})` — `agent` is
    `'agy'|'opencode'|'copilot'`. Returns `{jobId, status:'queued'}` immediately. `task` must
    name the output shape and a line budget (see Prompt-shaping below). `mode:'write'` requires
    `cwd` to be a secondary `git worktree add` checkout or an allowlisted path. `variant` is
    opencode's reasoning effort (minimal/low/medium/high/max); ignored by agy/copilot. Muse Spark
-   1.3 defaults to `high` from the model registry when `variant` is omitted.
+   1.3 defaults to `high` from the model registry when `variant` is omitted. Pass the same
+   `taskType` you gave `route` — it feeds metrics, adaptive timeouts and learnings.
 4. `job_wait({jobId, timeoutS<=60})` to block until terminal, or `job_status({jobId})` to poll
    without blocking. Both return `{status, errorKind, error, ...}`.
 5. `job_result({jobId, maxLines?})` — head of the response (default 20 lines) plus
    `{truncated, fullPath, tokens, costUsd, sessionId}`. Read `fullPath` only if the head is
    insufficient — do not default to pulling the whole file into context.
-6. `job_reply({jobId, message, mode?, timeoutS?, title?})` — optional: start a new turn in a
-   **terminal** agy/opencode job's conversation, resuming its recorded `sessionId`. `mode`
-   defaults to the parent job's mode; switching to `write` goes through the same worktree gate +
+6. `job_reply({jobId, message, mode?, timeoutS?, title?, taskType?})` — optional: start a new turn in a
+   **terminal** agy/opencode job's conversation, resuming its recorded `sessionId`. `mode` and
+   `taskType` default to the parent job's (so metrics and adaptive timeouts keep grouping the
+   conversation's turns together); switching to `write` goes through the same worktree gate +
    lock as `delegate`. copilot has no session resume (`errorKind:'unsupported'`, nothing
    spawned); a non-terminal parent gets `errorKind:'not_terminal'`; a parent with no `sessionId`
-   gets `errorKind:'no_session'`. See "Guided delegation workflow" below for the read → read →
-   write → read pattern this exists for.
+   gets `errorKind:'no_session'`. The reply returns `turnDepth` and, once the conversation is 5
+   turns deep, a `warning` suggesting a fresh `delegate` with a short summary. See "Guided
+   delegation workflow" below for the read → read → write → read pattern this exists for.
 7. Synthesize: report what each delegate found, flag disagreements, do not restate raw output.
 
 `job_cancel({jobId})` kills the whole process group (needed for opencode, which ignores
-SIGTERM — the hub SIGKILLs it).
+SIGTERM — the hub SIGKILLs it). MCP prompts `recon`, `adversarial-review` and `guided-write`
+(args `{goal, cwd, files?}`) package this loop for clients that surface prompts.
 
 ## Guided delegation workflow (plan → review → execute → delivery review)
 
@@ -86,12 +94,18 @@ Claude) checks the plan against the real tree before any write happens, and the 
 gets one more correction pass before it's considered done — never trust either self-report.
 
 1. **Plan.** `delegate({agent, model, task:'<propose a plan for X, do not edit anything>', cwd:
-   <worktree>, mode:'read'})` — plan mode, no edits possible even if the model tries.
+   <worktree>, mode:'read'})` — read mode. **Do not assume the CLI honors it.** Verified:
+   `agy --mode plan` writes files with or without `--dangerously-skip-permissions`
+   (`opencode`'s plan agent did respect read mode in testing). The hub enforces read mode after
+   the fact with its read-mode guard: it diffs the git-visible state of `cwd` before and after
+   the turn and fails the job with `errorKind:'read_mode_violation'` if anything changed. Run
+   agy read/plan turns in a disposable git worktree you can reset, and treat that failure as
+   "the plan turn tried to edit," not as a bad plan.
 2. **Plan review.** `job_wait`/`job_result` the plan, and check it against the actual code (not
    just internal consistency) — the real corrections seen in practice were things like "this
    validation schema already exists, reuse it," "that field starts at 0 in the legacy code, keep
    it," "don't touch this other file, a different task owns it." If it needs changes:
-   `job_reply({jobId, message:'<specific, numbered feedback>', mode:'read'})` — still plan mode,
+   `job_reply({jobId, message:'<specific, numbered feedback>', mode:'read'})` — still read mode,
    same conversation, so the model has the earlier turn's context. Repeat until the plan is right.
 3. **Execute.** Once approved: `job_reply({jobId: <the last reply's jobId>, message:'execute the
    approved plan', mode:'write'})` — the one call that can touch the filesystem, through the
@@ -253,6 +267,7 @@ before you ever called `delegate` shows up in `skipped` instead (see loop step 2
 | `timeout` | agy's own `--print-timeout` fired (turn abandoned, not just slow) or the hub's hard kill hit (opencode SIGKILLed after ignoring SIGTERM) | the turn is genuinely abandoned — verified live, resuming and asking for the answer returned `UNFINISHED`, not the real answer. `job_result` still returns whatever partial text streamed before the cutoff. Retry via `job_reply({jobId, message:'<retry or narrower ask>'})` on the same `sessionId` rather than re-`delegate`ing cold; latency is highly variable (4s-300s+ measured) |
 | `empty` | opencode's JSON stream dropped `text`/`step_finish` (documented, nondeterministic), or agy returned `status:SUCCESS` with an empty response and no streamed text at all | retriable once, same job_reply-on-sessionId pattern as `timeout` |
 | `crash` | no valid result envelope / unexpected exit | not retriable without changing the task |
+| `read_mode_violation` | a `read`-mode job's git-visible worktree changed during the turn (verified: agy `--mode plan` writes) | the turn edited files despite read mode; inspect/reset the disposable worktree, then re-run the read turn somewhere it cannot touch anything you care about |
 | `orphaned` | job's process was gone when the hub restarted | dead; re-delegate |
 | `auth` | CLI not authenticated | not retriable; needs a human to log in |
 | `not_terminal` | `job_reply` called on a job that has not finished yet | wait for the parent job to reach a terminal status first |
@@ -273,6 +288,22 @@ work merges. This is what kept dozens of delegated tasks in one migration from e
 tangents or quietly losing real findings. See the `issue-creation` skill for turning a ledger row
 into an actual issue.
 
+## Self-improvement loop
+
+The hub learns from its own runs, but every mutation is human-gated:
+
+- **Record a gotcha.** When you hit something non-obvious about an agent/model/taskType (a model
+  hangs, a mode writes anyway, a flag is unreliable), call
+  `learning_propose({text, agent?, model?, taskType?, sourceJobId?})`. It is stored `pending`; a
+  human approves it at `#/approvals?tab=learnings`, after which it is prepended (max 3, 300
+  chars each, sanitized) to matching root turns.
+- **Review routing evidence.** `#/approvals?tab=proposals` lists chain-reorder proposals the hub
+  computed from job metrics — an alternative whose 95% Wilson lower bound beats the current
+  primary's upper bound, once both have 10+ samples. Accepting one is the only way it applies;
+  `route` then reports it as `appliedProposal`. Check `#/metrics` (or `agents_metrics`) first.
+- **Timeouts tune themselves.** Adaptive timeouts raise from observed p95 (x1.5, capped at
+  3600s) once a pair has 10 samples; `#/metrics` is where to see why a timeout moved.
+
 ## No-MCP fallback
 
 If `agent-hub` is not registered in this session (no `agents_status`/`route`/`delegate` tools
@@ -287,13 +318,19 @@ available):
 
 `agent-hub-dashboard` (systemd `--user` unit) serves `http://127.0.0.1:7777` as a sidebar app
 with deep links — hand the user the exact view instead of describing it: `#/overview` (what
-needs attention), `#/agents?filter=unhealthy|held|breaker` (grouped by CLI; row menu
+needs attention), `#/agents?filter=all|unhealthy|held|breaker&q=` (grouped by CLI; row menu
 **Revalidate**, **Ping (L3)**, **Hold**/**Release**, **Reset breaker**; header **Revalidate all** /
-**Rediscover CLIs**), `#/jobs` (running, with Cancel), `#/history?status=failed` (errorKind,
-reply chains, error detail), `#/subagents`, `#/timeline` and `#/config?section=delegation|process|
-breaker|overrides|paths` (read-only). Ping, Reset breaker and Cancel ask for confirmation. HTTP
-surface: `GET /api/config`, `POST /api/agents/refresh {agent?,model?,ping?}`, `POST
-/api/discovery/refresh`, `POST /api/overrides`, `DELETE /api/overrides/:agent/:model`.
+**Rediscover CLIs**), `#/jobs` (running, with Cancel), `#/history?status=&agent=&q=` (status
+`failed|succeeded|canceled`, errorKind, reply chains, error detail), `#/metrics?taskType=`
+(success-rate chart, per-pair table), `#/subagents`, `#/timeline?source=&q=`,
+`#/approvals?tab=proposals|learnings` (accept/reject proposals and learnings) and
+`#/config?section=delegation|process|breaker|overrides|paths`. Ping, Reset breaker, Cancel and
+proposal/learning decisions ask for confirmation. HTTP surface: `GET /api/config`, `GET
+/api/metrics`, `GET /api/proposals`, `POST /api/proposals/refresh`, `POST
+/api/proposals/:id/accept|reject`, `GET|POST /api/learnings`, `POST
+/api/learnings/:id/approve|reject`, `DELETE /api/learnings/:id`, `GET /api/jobs/:id/result`,
+`POST /api/agents/refresh {agent?,model?,ping?}`, `POST /api/discovery/refresh`, `POST
+/api/overrides`, `DELETE /api/overrides/:agent/:model`.
 
 `overrides.json` (`{ "agent:model": {hold?, breakerReset?, reason?, setAt} }`, under
 `AGENT_HUB_HOME`) is how a human holds a pair or resets its breaker via the dashboard's
