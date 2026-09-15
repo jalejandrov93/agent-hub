@@ -1,0 +1,29 @@
+{
+  "version": 1,
+  "learnings": [
+    {
+      "id": "learn-1",
+      "agent": "opencode",
+      "model": "opencode/nemotron-3.5-lightning-free",
+      "taskType": null,
+      "text": "Hangs indefinitely on long prompts; prefer muse-spark for triage.",
+      "status": "approved",
+      "source": "mcp",
+      "sourceJobId": "2026-09-11T10-00-00-000Z-abcd1234",
+      "createdAt": "2026-09-11T10:05:00.000Z",
+      "decidedAt": "2026-09-11T11:00:00.000Z"
+    },
+    {
+      "id": "learn-2",
+      "agent": "agy",
+      "model": null,
+      "taskType": "recon",
+      "text": "Name the output shape and a line budget, or agy returns file:// noise.",
+      "status": "pending",
+      "source": "dashboard",
+      "sourceJobId": null,
+      "createdAt": "2026-09-15T04:00:00.000Z",
+      "decidedAt": null
+    }
+  ]
+}

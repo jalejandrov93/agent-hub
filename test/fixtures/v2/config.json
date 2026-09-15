@@ -1,0 +1,423 @@
+{
+  "delegationMap": {
+    "recon": {
+      "why": "proven context compression, cheap refreshable quota",
+      "chain": [
+        {
+          "agent": "agy",
+          "model": "gemini-3.8-flash-low",
+          "mode": "read"
+        },
+        {
+          "agent": "opencode",
+          "model": "opencode/muse-spark-1.3-contributor-free",
+          "mode": "read"
+        },
+        {
+          "agent": "claude",
+          "model": "haiku"
+        }
+      ]
+    },
+    "call-chain-trace": {
+      "why": "needs multi-hop reasoning, 1M ctx",
+      "chain": [
+        {
+          "agent": "agy",
+          "model": "gemini-3.8-flash-high",
+          "mode": "read"
+        },
+        {
+          "agent": "opencode",
+          "model": "opencode/nemotron-3-ultra-free",
+          "mode": "read"
+        },
+        {
+          "agent": "claude",
+          "model": "sonnet"
+        }
+      ]
+    },
+    "research": {
+      "why": "zero cost, 1M ctx",
+      "chain": [
+        {
+          "agent": "opencode",
+          "model": "opencode/muse-spark-1.3-contributor-free",
+          "mode": "read"
+        },
+        {
+          "agent": "opencode",
+          "model": "opencode/mimo-v2.5-free",
+          "mode": "read"
+        },
+        {
+          "agent": "agy",
+          "model": "gemini-3.8-flash-medium",
+          "mode": "read"
+        }
+      ]
+    },
+    "triage": {
+      "why": "lowest latency",
+      "chain": [
+        {
+          "agent": "opencode",
+          "model": "opencode/muse-spark-1.3-contributor-free",
+          "mode": "read"
+        },
+        {
+          "agent": "copilot",
+          "model": "auto",
+          "mode": "read"
+        }
+      ]
+    },
+    "second-opinion": {
+      "why": "different model lineage than Claude Code",
+      "chain": [
+        {
+          "agent": "agy",
+          "model": "gemini-3.1-pro-high",
+          "mode": "read"
+        },
+        {
+          "agent": "copilot",
+          "model": "auto",
+          "mode": "read"
+        }
+      ]
+    },
+    "adversarial-review": {
+      "why": "dual blind review off the Claude Code quota",
+      "chain": [
+        {
+          "agent": "agy",
+          "model": "claude-sonnet-4-6",
+          "mode": "read",
+          "parallelWith": {
+            "agent": "copilot",
+            "model": "auto",
+            "mode": "read"
+          }
+        },
+        {
+          "agent": "agy",
+          "model": "claude-opus-4-6-thinking",
+          "mode": "read"
+        }
+      ]
+    },
+    "github-context": {
+      "why": "built-in GitHub MCP; cheap models keep premium quota",
+      "chain": [
+        {
+          "agent": "copilot",
+          "model": "auto",
+          "mode": "read"
+        }
+      ]
+    },
+    "mechanical-edit": {
+      "why": "cheap write-capable; single writer",
+      "chain": [
+        {
+          "agent": "opencode",
+          "model": "deepseek/deepseek-v4-flash",
+          "mode": "write"
+        },
+        {
+          "agent": "copilot",
+          "model": "auto",
+          "mode": "write"
+        }
+      ]
+    },
+    "implementation-with-repo-rules": {
+      "why": "only Claude Code loads CLAUDE.md + skills + hooks",
+      "chain": [
+        {
+          "agent": "claude",
+          "model": "sonnet"
+        }
+      ]
+    },
+    "architecture": {
+      "why": "highest reasoning",
+      "chain": [
+        {
+          "agent": "claude",
+          "model": "opus"
+        },
+        {
+          "agent": "agy",
+          "model": "claude-opus-4-6-thinking",
+          "mode": "read"
+        }
+      ]
+    },
+    "structured-mechanical": {
+      "why": "cheapest Claude tier",
+      "chain": [
+        {
+          "agent": "claude",
+          "model": "haiku"
+        }
+      ]
+    }
+  },
+  "discovery": {
+    "agy": {
+      "agent": "agy",
+      "cmd": "agy",
+      "binPath": "/home/user/.local/bin/agy",
+      "version": "1.2.3",
+      "models": [
+        {
+          "id": "gemini-3.8-flash-high",
+          "label": "Gemini 3.8 Flash (High)"
+        },
+        {
+          "id": "gemini-3.8-flash-medium",
+          "label": "Gemini 3.8 Flash (Medium)"
+        },
+        {
+          "id": "gemini-3.8-flash-low",
+          "label": "Gemini 3.8 Flash (Low)"
+        },
+        {
+          "id": "gemini-3.7-flash-high",
+          "label": "Gemini 3.7 Flash (High)"
+        }
+      ],
+      "checkedAt": "2026-09-15T02:54:08.573Z",
+      "error": null
+    },
+    "opencode": {
+      "agent": "opencode",
+      "cmd": "opencode",
+      "binPath": "/home/user/.opencode/bin/opencode",
+      "version": "1.18.30",
+      "models": [
+        {
+          "id": "opencode/big-pickle",
+          "label": "Big Pickle",
+          "cost": {
+            "input": 0,
+            "output": 0,
+            "cache": {
+              "read": 0,
+              "write": 0
+            }
+          },
+          "limit": {
+            "context": 200000,
+            "input": 160000,
+            "output": 32000
+          }
+        },
+        {
+          "id": "opencode/ling-3.0-flash-fin-free",
+          "label": "Ling 3.0 Flash Fin Free",
+          "cost": {
+            "input": 0,
+            "output": 0,
+            "cache": {
+              "read": 0,
+              "write": 0
+            }
+          },
+          "limit": {
+            "context": 262144,
+            "output": 32768
+          }
+        },
+        {
+          "id": "opencode/mimo-v2.5-free",
+          "label": "MiMo V2.5 Free",
+          "cost": {
+            "input": 0,
+            "output": 0,
+            "cache": {
+              "read": 0,
+              "write": 0
+            }
+          },
+          "limit": {
+            "context": 200000,
+            "output": 32000
+          }
+        },
+        {
+          "id": "opencode/muse-spark-1.2-contributor-free",
+          "label": "Muse Spark 1.2 Free",
+          "cost": {
+            "input": 0,
+            "output": 0,
+            "cache": {
+              "read": 0,
+              "write": 0
+            }
+          },
+          "limit": {
+            "context": 1048576,
+            "output": 131072
+          }
+        }
+      ],
+      "checkedAt": "2026-09-15T02:54:08.593Z",
+      "error": null
+    },
+    "copilot": {
+      "agent": "copilot",
+      "cmd": "copilot",
+      "binPath": "/home/user/.local/bin/copilot",
+      "version": "GitHub Copilot CLI 1.0.83.",
+      "models": [
+        {
+          "id": "claude-sonnet-5",
+          "label": "claude-sonnet-5"
+        },
+        {
+          "id": "claude-fable-5.1",
+          "label": "claude-fable-5.1"
+        },
+        {
+          "id": "claude-fable-5",
+          "label": "claude-fable-5"
+        },
+        {
+          "id": "claude-opus-5",
+          "label": "claude-opus-5"
+        }
+      ],
+      "checkedAt": "2026-09-15T02:54:08.604Z",
+      "error": null,
+      "note": "catalog not authoritative"
+    }
+  },
+  "timeouts": {
+    "agy": {
+      "gemini-3.8-flash-low": 300,
+      "gemini-3.8-flash-medium": 600,
+      "gemini-3.8-flash-high": 900,
+      "default": 900
+    },
+    "opencode": {
+      "default": 600
+    },
+    "copilot": {
+      "default": 300
+    }
+  },
+  "breaker": {
+    "windowMs": 1800000,
+    "failureThreshold": 2,
+    "failureKinds": [
+      "quota",
+      "canceled",
+      "billing"
+    ],
+    "immediateKinds": [
+      "billing"
+    ]
+  },
+  "ttlMs": 900000,
+  "agentHubHome": "/home/user/.local/share/agent-hub",
+  "writeAllowlist": [],
+  "breakerState": [
+    {
+      "agent": "agy",
+      "model": "gemini-3.8-flash-low",
+      "open": false,
+      "failureCount": 0,
+      "lastFailureAt": null
+    },
+    {
+      "agent": "opencode",
+      "model": "opencode/muse-spark-1.3-contributor-free",
+      "open": false,
+      "failureCount": 0,
+      "lastFailureAt": null
+    },
+    {
+      "agent": "agy",
+      "model": "gemini-3.8-flash-high",
+      "open": false,
+      "failureCount": 0,
+      "lastFailureAt": null
+    },
+    {
+      "agent": "opencode",
+      "model": "opencode/nemotron-3-ultra-free",
+      "open": false,
+      "failureCount": 0,
+      "lastFailureAt": null
+    },
+    {
+      "agent": "opencode",
+      "model": "opencode/mimo-v2.5-free",
+      "open": false,
+      "failureCount": 0,
+      "lastFailureAt": null
+    },
+    {
+      "agent": "agy",
+      "model": "gemini-3.8-flash-medium",
+      "open": false,
+      "failureCount": 0,
+      "lastFailureAt": null
+    },
+    {
+      "agent": "copilot",
+      "model": "auto",
+      "open": false,
+      "failureCount": 0,
+      "lastFailureAt": null
+    },
+    {
+      "agent": "agy",
+      "model": "gemini-3.1-pro-high",
+      "open": false,
+      "failureCount": 0,
+      "lastFailureAt": null
+    },
+    {
+      "agent": "agy",
+      "model": "claude-sonnet-4-6",
+      "open": false,
+      "failureCount": 0,
+      "lastFailureAt": null
+    },
+    {
+      "agent": "agy",
+      "model": "claude-opus-4-6-thinking",
+      "open": false,
+      "failureCount": 0,
+      "lastFailureAt": null
+    },
+    {
+      "agent": "opencode",
+      "model": "deepseek/deepseek-v4-flash",
+      "open": false,
+      "failureCount": 0,
+      "lastFailureAt": null
+    }
+  ],
+  "overrides": {},
+  "process": {
+    "pid": 4242,
+    "nodeVersion": "v22.23.1",
+    "platform": "linux",
+    "pathEntries": [
+      "/home/user/.local/bin",
+      "/usr/local/bin",
+      "/usr/bin"
+    ],
+    "resolvedBins": {
+      "agy": "/home/user/.local/bin/agy",
+      "opencode": "/home/user/.opencode/bin/opencode",
+      "copilot": "/home/user/.local/bin/copilot"
+    }
+  }
+}

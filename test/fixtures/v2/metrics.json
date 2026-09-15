@@ -1,0 +1,38 @@
+{
+  "generatedAt": "2026-09-15T04:00:00.000Z",
+  "groupBy": ["agent", "model", "mode", "taskType"],
+  "rows": [
+    {
+      "agent": "agy",
+      "model": "gemini-3.8-flash-high",
+      "mode": "read",
+      "taskType": "call-chain-trace",
+      "samples": 12,
+      "succeeded": 11,
+      "failed": 1,
+      "canceled": 0,
+      "successRate": 0.9167,
+      "p50Ms": 71000,
+      "p95Ms": 314000,
+      "errorKinds": { "timeout": 1 },
+      "tokensTotal": 1320000,
+      "tokensAvg": 120000
+    },
+    {
+      "agent": "opencode",
+      "model": "opencode/muse-spark-1.3-contributor-free",
+      "mode": "read",
+      "taskType": null,
+      "samples": 3,
+      "succeeded": 2,
+      "failed": 1,
+      "canceled": 0,
+      "successRate": 0.6667,
+      "p50Ms": 95000,
+      "p95Ms": null,
+      "errorKinds": { "empty": 1 },
+      "tokensTotal": 180000,
+      "tokensAvg": 90000
+    }
+  ]
+}

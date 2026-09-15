@@ -17,12 +17,34 @@ export function paths(env = process.env) {
     preflightCacheFile: path.join(home, 'preflight-cache.json'),
     discoveryFile: path.join(home, 'discovery.json'),
     overridesFile: path.join(home, 'overrides.json'),
+    proposalsFile: path.join(home, 'proposals.json'),
+    learningsFile: path.join(home, 'learnings.json'),
     runsDir: path.join(home, 'runs'),
     locksDir: path.join(home, 'runs', '.locks'),
   }
 }
 
 export const PREFLIGHT_TTL_MS = 15 * 60 * 1000
+
+/** A metrics row needs this many real outcomes before timeouts or proposals trust it. */
+export const METRICS_MIN_SAMPLES = 10
+
+/** job_reply warns (never blocks) once a conversation is this many turns deep. */
+export const TURN_DEPTH_WARNING = 5
+
+/** Approved learnings injected into one prompt, and the max length of each (mirrored in schemas.mjs). */
+export const LEARNINGS_MAX = 3
+export const LEARNING_TEXT_MAX = 300
+
+/**
+ * Adaptive timeouts only ever raise the static default: p95 of succeeded
+ * runs times `multiplier`, capped at `capS`. Timed-out runs are censored
+ * samples, so shrinking a timeout would feed back into more timeouts.
+ */
+export const ADAPTIVE_TIMEOUT = { multiplier: 1.5, capS: 3600 }
+
+/** After a human rejects a proposal, no new proposal for that task type for this long. */
+export const PROPOSAL_REJECT_COOLDOWN_MS = 7 * 24 * 60 * 60 * 1000
 
 export const CIRCUIT_BREAKER = {
   windowMs: 30 * 60 * 1000,

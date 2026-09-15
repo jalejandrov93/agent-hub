@@ -15,6 +15,12 @@ const VALID_KINDS = new Set([
   'job.canceled',
   'subagent.start',
   'subagent.stop',
+  // Emitted on writes to proposals.json / learnings.json so the dashboard's
+  // SSE stream refetches; those stores are not job events.
+  'proposal.created',
+  'proposal.decided',
+  'learning.proposed',
+  'learning.decided',
 ])
 
 function ensureDir(dir) {
