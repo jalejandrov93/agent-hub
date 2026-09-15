@@ -302,4 +302,20 @@ describe("TimelineView component", () => {
 
     expect(mockNavigate).toHaveBeenCalled()
   })
+
+  it("carries min-w-0 on list root and row content containers to prevent overflow", () => {
+    const { container } = render(<TimelineView />)
+
+    const listRoot = container.querySelector('[data-slot="timeline-list"]')
+    expect(listRoot).toBeTruthy()
+    expect(listRoot?.className).toContain("min-w-0")
+
+    const rowRoot = container.querySelector('[data-slot="timeline-row"]')
+    expect(rowRoot).toBeTruthy()
+    expect(rowRoot?.className).toContain("min-w-0")
+
+    const rowContent = container.querySelector('[data-slot="timeline-content"]')
+    expect(rowContent).toBeTruthy()
+    expect(rowContent?.className).toContain("min-w-0")
+  })
 })
