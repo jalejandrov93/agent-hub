@@ -246,20 +246,35 @@ node bin/agent-hub dashboard --port 7777
 # open http://127.0.0.1:7777
 ```
 
-Binds to `127.0.0.1` only. Panels: agent/model health table (status, latency,
-quota signal, data-policy badge, CLI version, path), a job timeline fed over
-SSE (`/events`), Claude Code subagent activity from the hook recorder, and a
-Config panel (delegation map, discovery, timeouts, breaker settings,
-overrides).
+Binds to `127.0.0.1` only. The page is a sidebar app with deep-linkable hash
+routes, so a link can open the exact filtered view:
 
-Per row: Revalidate, Ping (runs an L3 round-trip for that one agent+model),
-Hold / Release (manual override), Reset breaker. Header actions: Revalidate
-all, Rediscover CLIs. `preflight` events (`phase: discovery|agent|ping`) are
-streamed over the same SSE feed as job events.
+| Group | Route | Shows |
+|---|---|---|
+| Monitor | `#/overview` | What needs attention: unhealthy agents, open breakers, failures in the last 24h, unresolved CLIs, recent activity |
+| Monitor | `#/agents` | Agents grouped by CLI; `?filter=unhealthy\|held\|breaker`, search, row menu, detail panel |
+| Monitor | `#/jobs` | Running and queued jobs with live elapsed time and Cancel |
+| Monitor | `#/history` | Terminal jobs; `?status=failed\|canceled\|succeeded`, agent filter, error detail, reply chains |
+| Activity | `#/subagents` | Claude Code subagent runs recorded by the hooks |
+| Activity | `#/timeline` | Last 200 events over SSE, filtered by source and kind |
+| System | `#/config` | Delegation map, process PATH and CLIs, breaker and TTL, overrides, paths; `?section=` selects a tab |
+
+Sidebar badges show unhealthy agents, running jobs, failures in the last 24h,
+unseen timeline events and unresolved CLIs. Agent row actions are Revalidate,
+Ping (an L3 round-trip for that one agent+model), Hold / Release and Reset
+breaker; the Agents header adds Revalidate all and Rediscover CLIs. Ping,
+Reset breaker and Cancel job ask for confirmation first. The theme follows the
+system by default and can be set to light or dark. `preflight` events
+(`phase: discovery|agent|ping`) stream over the same SSE feed as job events.
+
+The UI is plain ES modules under `src/dashboard/` (no build step):
+`index.html`, `styles.css`, `app.js`, `router.js`, `store.js`, `api.js`,
+`contracts.js` (the shared typedefs and module signatures), `ui/*.js` and one
+module per view in `views/`.
 
 | Route | Method | Body | Notes |
 |---|---|---|---|
-| `/` | GET | — | Dashboard HTML |
+| `/` and dashboard assets | GET | — | App shell and its CSS/JS modules, served from an exact-match allowlist with `Content-Security-Policy: default-src 'self'` |
 | `/api/state` | GET | — | `{agents, jobs, subagents, events}` |
 | `/api/config` | GET | — | `{delegationMap, discovery, timeouts, breaker, ttlMs, agentHubHome, writeAllowlist, breakerState, overrides}` |
 | `/events` | GET | — | SSE stream of `events.jsonl` |
@@ -280,6 +295,9 @@ browser, because that browser connects from loopback too:
   CORS preflight the server never grants (415 otherwise). When an `Origin`
   header is present it must be the dashboard's own loopback origin (403).
 - Request bodies are capped at 64 KiB (413) and must be valid JSON (400).
+- Pages and assets send a Content-Security-Policy that allows only same-origin
+  scripts, styles and connections, with no inline script or style, plus
+  `X-Content-Type-Options: nosniff`.
 
 There is no authentication: any local process can call the API. Do not
 expose the port beyond loopback (no reverse proxy, no port-forward to a

@@ -283,17 +283,15 @@ available):
 
 ## Dashboard
 
-`agent-hub-dashboard` (systemd `--user` unit) serves `http://127.0.0.1:7777`: Agents (health,
-quota, dataPolicy, binPath/cliVersion, and the `reason` behind a degraded/unavailable status —
-per-row **Revalidate**, **Ping (L3)** (shown only when degraded/unavailable), **Hold**/
-**Release**, **Reset breaker**; header **Revalidate all** / **Rediscover CLIs**), Running jobs
-(cancel button), Job history (terminal jobs — status, `errorKind` badge, `variant`, and a "reply
-of ..." hint for `job_reply` chains), Claude subagents, Timeline (last 200 events, with an
-`errorKind` badge on `job.failed`/`job.canceled` rows), and a read-only **Config** panel
-(delegation map, timeouts, breaker settings, TTL, write allowlist, current overrides — changed
-only through the Agents panel's buttons, never edited directly there). HTTP surface: `GET
-/api/config`, `POST /api/agents/refresh {agent?,model?,ping?}`, `POST /api/discovery/refresh`,
-`POST /api/overrides`, `DELETE /api/overrides/:agent/:model`.
+`agent-hub-dashboard` (systemd `--user` unit) serves `http://127.0.0.1:7777` as a sidebar app
+with deep links — hand the user the exact view instead of describing it: `#/overview` (what
+needs attention), `#/agents?filter=unhealthy|held|breaker` (grouped by CLI; row menu
+**Revalidate**, **Ping (L3)**, **Hold**/**Release**, **Reset breaker**; header **Revalidate all** /
+**Rediscover CLIs**), `#/jobs` (running, with Cancel), `#/history?status=failed` (errorKind,
+reply chains, error detail), `#/subagents`, `#/timeline` and `#/config?section=delegation|process|
+breaker|overrides|paths` (read-only). Ping, Reset breaker and Cancel ask for confirmation. HTTP
+surface: `GET /api/config`, `POST /api/agents/refresh {agent?,model?,ping?}`, `POST
+/api/discovery/refresh`, `POST /api/overrides`, `DELETE /api/overrides/:agent/:model`.
 
 `overrides.json` (`{ "agent:model": {hold?, breakerReset?, reason?, setAt} }`, under
 `AGENT_HUB_HOME`) is how a human holds a pair or resets its breaker via the dashboard's
