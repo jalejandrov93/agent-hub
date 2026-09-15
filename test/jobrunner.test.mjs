@@ -273,6 +273,209 @@ test('a failed job with partialText/sessionId on its error persists both — res
   assert.equal(fs.readFileSync(jobstore.responsePath(job.jobId), 'utf8'), 'partial answer so far')
 })
 
+test('taskType is stored on result.json and carried on every job.* event', async () => {
+  const home = tmpHome()
+  const { startJob, jobstore, eventlog } = await freshModules(home)
+  const adapters = { fake: fakeAdapter(SUCCESS_SCRIPT) }
+
+  const { job, done } = startJob({
+    agent: 'fake',
+    model: 'x',
+    task: 't',
+    cwd: '/tmp',
+    mode: 'read',
+    taskType: 'recon',
+    adapterFor: (a) => adapters[a],
+  })
+  await done
+
+  assert.equal(jobstore.readResult(job.jobId).taskType, 'recon')
+  const events = eventlog.readTail({ n: 20 }).filter((e) => e.jobId === job.jobId)
+  assert.ok(events.length >= 3)
+  assert.ok(events.every((e) => e.taskType === 'recon'), 'every event must carry the job taskType')
+})
+
+test('turnDepth is stored on the record (root job defaults to 0)', async () => {
+  const home = tmpHome()
+  const { startJob, jobstore } = await freshModules(home)
+  const adapters = { fake: fakeAdapter(SUCCESS_SCRIPT) }
+
+  const { job, done } = startJob({ agent: 'fake', model: 'x', task: 't', cwd: '/tmp', mode: 'read', adapterFor: (a) => adapters[a] })
+  await done
+  assert.equal(jobstore.readResult(job.jobId).turnDepth, 0)
+})
+
+test('the effective timeout and its source are resolved BEFORE createJob and drive both argv and the kill timer', async () => {
+  const home = tmpHome()
+  const { startJob, jobstore } = await freshModules(home)
+  const calls = []
+  const resolveEffectiveTimeoutSFn = (params) => {
+    calls.push(params)
+    return { timeoutS: 777, source: 'adaptive', p95Ms: 500000, samples: 12 }
+  }
+  let argvTimeoutS = null
+  let killTimeoutMs = null
+  const adapter = {
+    id: 'fake',
+    cmd: process.execPath,
+    buildArgv: (opts) => {
+      argvTimeoutS = opts.timeoutS
+      return ['-e', SUCCESS_SCRIPT]
+    },
+    parseResult: (stdout) => ({ ok: true, text: 'PONG', tokens: 5, sessionId: null }),
+    classifyError: () => null,
+    listModels: () => [],
+  }
+  const adapters = { fake: adapter }
+  const child = fakeChild()
+  const spawn = () => child
+  const runWithTimeout = (c, opts) => {
+    killTimeoutMs = opts.timeoutMs
+    return { exitPromise: new Promise((resolve) => c.on('close', () => resolve({ timedOut: false }))) }
+  }
+
+  const { job, done } = startJob({
+    agent: 'fake',
+    model: 'x',
+    task: 't',
+    cwd: '/tmp',
+    mode: 'read',
+    taskType: 'recon',
+    timeoutS: undefined,
+    adapterFor: (a) => adapters[a],
+    spawn,
+    runWithTimeout,
+    resolveEffectiveTimeoutSFn,
+  })
+  await done
+
+  assert.equal(calls.length, 1)
+  assert.equal(calls[0].taskType, 'recon')
+  assert.equal(calls[0].explicit, undefined)
+  const result = jobstore.readResult(job.jobId)
+  assert.equal(result.timeoutS, 777)
+  assert.equal(result.timeoutSource, 'adaptive')
+  assert.equal(argvTimeoutS, 777)
+  assert.equal(killTimeoutMs, (777 + 30) * 1000)
+})
+
+test('learnings augment the prompt and are recorded on a root job, but are skipped for a reply turn', async () => {
+  const home = tmpHome()
+  const { startJob, jobstore } = await freshModules(home)
+  const adapters = { fake: fakeAdapter(SUCCESS_SCRIPT) }
+  let selectCalls = 0
+  const selectLearningsFn = () => {
+    selectCalls++
+    return [{ id: 'l-1', text: 'watch out' }]
+  }
+  const augmentTaskFn = (task) => ({ task: `NOTE: watch out\n\n${task}`, learningIds: ['l-1'] })
+
+  const root = startJob({
+    agent: 'fake',
+    model: 'x',
+    task: 'do it',
+    cwd: '/tmp',
+    mode: 'read',
+    adapterFor: (a) => adapters[a],
+    selectLearningsFn,
+    augmentTaskFn,
+  })
+  await root.done
+  const rootResult = jobstore.readResult(root.job.jobId)
+  assert.equal(selectCalls, 1)
+  assert.equal(fs.readFileSync(path.join(home, 'runs', root.job.jobId, 'prompt.txt'), 'utf8'), 'NOTE: watch out\n\ndo it')
+  assert.deepEqual(rootResult.learningIds, ['l-1'])
+
+  const reply = startJob({
+    agent: 'fake',
+    model: 'x',
+    task: 'follow up',
+    cwd: '/tmp',
+    mode: 'read',
+    sessionId: 'sess-1',
+    turnDepth: 1,
+    adapterFor: (a) => adapters[a],
+    selectLearningsFn,
+    augmentTaskFn,
+  })
+  await reply.done
+  assert.equal(selectCalls, 1, 'learnings must not be selected for a reply turn')
+  assert.deepEqual(jobstore.readResult(reply.job.jobId).learningIds, [])
+})
+
+test('a read job that modifies the worktree is failed with errorKind read_mode_violation, keeping tokens and response text', async () => {
+  const home = tmpHome()
+  const { primary } = makeRepoWithSecondaryWorktree()
+  const { startJob, jobstore, eventlog } = await freshModules(home)
+  // A real child that both touches the worktree and prints a SUCCESS line, so
+  // the CLI genuinely "succeeded" while violating read mode.
+  const script = `require('fs').writeFileSync(${JSON.stringify(path.join(primary, 'changed.txt'))}, 'y'); console.log(JSON.stringify({status:"SUCCESS",response:"PONG",usage:{total_tokens:5}}))`
+  const adapters = {
+    fake: {
+      id: 'fake',
+      cmd: process.execPath,
+      buildArgv: () => ['-e', script],
+      parseResult: (stdout) => {
+        const json = extractLastJsonLine(stdout)
+        return { ok: true, text: json.response, tokens: json.usage?.total_tokens ?? null, sessionId: null }
+      },
+      classifyError: (stdout, exitInfo = {}) => {
+        if (exitInfo.timedOut) return { kind: 'timeout', message: 'timeout' }
+        const json = extractLastJsonLine(stdout)
+        if (!json) return { kind: 'crash', message: 'no JSON' }
+        if (json.status !== 'SUCCESS') return { kind: 'crash', message: `status=${json.status}` }
+        return null
+      },
+      listModels: () => [],
+    },
+  }
+
+  const { job, done } = startJob({ agent: 'fake', model: 'x', task: 't', cwd: primary, mode: 'read', adapterFor: (a) => adapters[a] })
+  await done
+
+  const result = jobstore.readResult(job.jobId)
+  assert.equal(result.status, 'failed')
+  assert.equal(result.errorKind, 'read_mode_violation')
+  assert.match(result.error, /read-mode job modified/)
+  assert.equal(result.tokens, 5, 'tokens are still kept on a read-mode violation')
+  assert.equal(fs.readFileSync(jobstore.responsePath(job.jobId), 'utf8'), 'PONG', 'response.txt is still kept')
+  const events = eventlog.readTail({ n: 20 }).filter((e) => e.jobId === job.jobId)
+  assert.ok(events.some((e) => e.kind === 'job.failed' && e.errorKind === 'read_mode_violation'))
+})
+
+test('an already-failed read job keeps its errorKind and only gains readModeViolation when the worktree changed', async () => {
+  const home = tmpHome()
+  const { primary } = makeRepoWithSecondaryWorktree()
+  const { startJob, jobstore, eventlog } = await freshModules(home)
+  const script = `require('fs').writeFileSync(${JSON.stringify(path.join(primary, 'changed.txt'))}, 'y'); console.log(JSON.stringify({status:"CANCELED",response:""}))`
+  const adapters = {
+    fake: {
+      id: 'fake',
+      cmd: process.execPath,
+      buildArgv: () => ['-e', script],
+      parseResult: () => ({ ok: false }),
+      classifyError: (stdout) => {
+        const json = extractLastJsonLine(stdout)
+        if (!json) return { kind: 'crash', message: 'no JSON' }
+        if (json.status !== 'SUCCESS') return { kind: 'crash', message: `status=${json.status}` }
+        return null
+      },
+      listModels: () => [],
+    },
+  }
+
+  const { job, done } = startJob({ agent: 'fake', model: 'x', task: 't', cwd: primary, mode: 'read', adapterFor: (a) => adapters[a] })
+  await done
+
+  const result = jobstore.readResult(job.jobId)
+  assert.equal(result.status, 'failed')
+  assert.equal(result.errorKind, 'crash')
+  assert.match(result.readModeViolation, /read-mode job modified/)
+  const failed = eventlog.readTail({ n: 20 }).filter((e) => e.jobId === job.jobId && e.kind === 'job.failed')
+  assert.equal(failed.length, 1)
+  assert.equal(failed[0].errorKind, 'crash')
+})
+
 test('cancelJob never leaves a spurious job.failed event alongside job.canceled (finishJob races the kill)', async () => {
   const home = tmpHome()
   const { startJob, cancelJob, eventlog } = await freshModules(home)

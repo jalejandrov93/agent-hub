@@ -38,7 +38,23 @@ function newJobId() {
  * Create a new job: allocates a jobId, writes prompt.txt and an initial
  * result.json in 'queued' state. Does not spawn anything — process.mjs owns that.
  */
-export function createJob({ agent, model, task, cwd, title, mode = 'read', timeoutS, env = process.env, variant, sessionId, parentJobId }) {
+export function createJob({
+  agent,
+  model,
+  task,
+  cwd,
+  title,
+  mode = 'read',
+  timeoutS,
+  timeoutSource = 'default',
+  taskType = null,
+  turnDepth = 0,
+  learningIds = [],
+  env = process.env,
+  variant,
+  sessionId,
+  parentJobId,
+}) {
   const jobId = newJobId()
   const dir = jobDir(jobId, env)
   ensureDir(dir)
@@ -52,7 +68,14 @@ export function createJob({ agent, model, task, cwd, title, mode = 'read', timeo
     title: title ?? '',
     cwd,
     mode,
+    // timeoutS is the EFFECTIVE timeout (already resolved against metrics by
+    // startJob); timeoutSource records which rule produced it. taskType and
+    // turnDepth drive metrics grouping and the deep-conversation warning.
     timeoutS: timeoutS ?? null,
+    timeoutSource: timeoutSource ?? 'default',
+    taskType: taskType ?? null,
+    turnDepth: turnDepth ?? 0,
+    learningIds: Array.isArray(learningIds) ? learningIds : [],
     variant: variant ?? null,
     // sessionId is the CLI's own conversation/session id, used to resume via
     // job_reply. parentJobId links a reply back to the job it continues.
