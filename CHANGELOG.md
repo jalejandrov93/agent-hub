@@ -22,6 +22,18 @@ and this project adheres to [Semantic Versioning](https://semver.org/).
   pull-request link. `jules_check` answers the same question at any time with a
   single live read and no poller, and `jules_sessions` lists sessions even when
   this machine has no record of them.
+- Several Jules accounts. Keys live in `accounts.json` (mode `0600`, never
+  returned raw), a selection policy picks the account for each new session, a
+  `429` fails over to the next eligible account, and a job keeps the account
+  that started it. `jules_sessions` merges every enabled account and tags each
+  session with its `accountId`. New read-only tools `jules_accounts` and
+  `jules_schedules`.
+- Recurring Jules tasks, run by the dashboard service: interval or daily
+  schedules, at most one run in flight per schedule.
+- Dashboard HTTP API for Jules accounts, sources, schedules and cloud sessions.
+- The Codex CLI as a delegation agent: a last fallback for `triage` and
+  `mechanical-edit`, built from the real CLI's JSONL output and supporting
+  `job_reply` through `codex exec resume`.
 
 ### Changed
 
@@ -31,6 +43,22 @@ and this project adheres to [Semantic Versioning](https://semver.org/).
 - `job_reply` accepts a missing `message` only for a Jules `approve_plan`; every
   other agent now fails fast with `errorKind:'invalid'` instead of starting a
   turn with an empty prompt.
+
+### Fixed
+
+- A remote job becomes terminal only from its remote session's own state. A
+  local deadline, a rejected key, transient API errors or a poller crash stop
+  the polling and leave the job running; before this, three healthy Jules
+  sessions were marked failed on one day while each kept running.
+- `job_reply` and `jules_sessions` used only `JULES_API_KEY` and sent unkeyed
+  requests once keys moved into accounts; all key resolution now goes through
+  one module.
+- The dashboard's job views no longer go blank when a job has no local `cwd`,
+  as a Jules job never does.
+- A learning's text wraps inside its table cell instead of overlapping the
+  Approve and Reject buttons.
+- The live Jules activity log no longer prints an empty line for each progress
+  step and a near-identical change-set line for every intermediate diff.
 
 ## [2.1.0] - 2026-09-16
 

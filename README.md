@@ -12,12 +12,14 @@ own subagents.
 **Requirements**
 
 - Node.js >= 20.19.0
-- At least one of `agy`, `opencode`, or `copilot` on `PATH`, already
+- At least one of `agy`, `opencode`, `copilot`, or `codex` on `PATH`, already
   authenticated with that CLI's own login flow. agent-hub does not manage
   credentials — it only spawns the CLI you already use.
-- Optional, for the Jules cloud agent: `JULES_API_KEY` in the environment
-  (generate it at jules.google.com/settings). There is no binary to install —
-  Jules is a REST API. See [Cloud delegation (Jules)](#cloud-delegation-jules).
+- Optional, for the Jules cloud agent: one or more Jules API keys (generate them
+  at jules.google.com/settings), added as accounts in the dashboard or given as
+  `JULES_API_KEY`. There is no binary to install — Jules is a REST API. See
+  [Cloud delegation (Jules)](#cloud-delegation-jules).
+- Optional, to see agent activity in a Windows notch: [Quota Arc](#quota-arc-and-codexbar).
 
 ## Layout
 
@@ -246,14 +248,19 @@ passes availability filtering, plus the rest as fallbacks:
 | `recon` | agy gemini-3.8-flash-low | opencode muse-spark-1.3 → claude haiku | proven context compression, cheap refreshable quota |
 | `call-chain-trace` | agy gemini-3.8-flash-high | opencode nemotron-3-ultra → claude sonnet | needs multi-hop reasoning, 1M ctx |
 | `research` | opencode muse-spark-1.3 | opencode mimo-v2.5 → agy gemini-3.8-flash-medium | zero cost, 1M ctx |
-| `triage` | opencode muse-spark-1.3 | copilot auto | lowest latency |
+| `triage` | opencode muse-spark-1.3 | copilot auto → codex default | lowest latency |
 | `second-opinion` | agy gemini-3.1-pro-high | copilot auto | different model lineage than Claude Code |
 | `adversarial-review` | agy claude-sonnet-4-6 (parallel with copilot auto) | agy claude-opus-4-6-thinking | dual blind review off the Claude Code quota |
 | `github-context` | copilot auto | — | built-in GitHub MCP; cheap models keep premium quota |
-| `mechanical-edit` | opencode deepseek-v4-flash (write) | copilot auto (write) | cheap write-capable; single writer |
+| `mechanical-edit` | opencode deepseek-v4-flash (write) | copilot auto (write) → codex default (write) | cheap write-capable; single writer |
 | `implementation-with-repo-rules` | claude sonnet | — | only Claude Code loads CLAUDE.md + skills + hooks |
 | `architecture` | claude opus | agy claude-opus-4-6-thinking | highest reasoning |
 | `structured-mechanical` | claude haiku | — | cheapest Claude tier |
+
+Codex is only ever a last fallback, for small bounded tasks: its plan quota is
+limited, and every call carries a baseline of about 17,000 input tokens (its own
+system prompt), even for a one-word reply. Batch questions into one task. Model
+`default` means the CLI's own default model, so no model name is guessed.
 
 A `{agent: 'claude', model: 'haiku'|'sonnet'|'opus'}` candidate is a Claude
 Code subagent tier, run by the caller through its own Agent tool — it is
@@ -301,6 +308,21 @@ only way to learn the outcome:
 **Cancel is local only.** The Jules API exposes no cancel endpoint. `job_cancel`
 marks the job canceled and stops this server's polling; the session keeps
 running on Google's side. The tool says so.
+
+**Several accounts.** Quotas are per Jules account, so agent-hub can hold more
+than one. Add them in the dashboard; they live in `accounts.json` under
+`AGENT_HUB_HOME`, written with mode `0600`, and no API response ever returns a
+raw key. A policy (`round_robin`, `least_used` or `priority`) picks the account
+for each new session, a `429` fails over to the next eligible account, and a job
+keeps the account that started it for its whole life. Account health is judged
+by `GET /sessions`, never `GET /sources`: a valid key can be refused `/sources`
+with a 401 while working normally. With no accounts configured, `JULES_API_KEY`
+is used as before. All key resolution lives in `src/cloud/credentials.mjs`.
+
+**Recurring tasks.** The Jules API has no scheduling, so agent-hub owns it.
+Schedules run inside the dashboard service, the only long-lived process here,
+and fire at most one run at a time per schedule. With the machine off, no
+schedule fires; sessions already started keep running on Google's side.
 
 **The key never leaves this process.** `JULES_API_KEY` travels only in the
 `X-Goog-Api-Key` header. It is never written to a job record, an event, a log
@@ -400,10 +422,12 @@ read jobs from a disposable worktree when that matters.
 | `job_cancel` | `{jobId}` | Kills the whole process group; marks `canceled`. |
 | `job_reply` | `{jobId, message?, mode?, timeoutS?, title?, taskType?, action?}` | Starts a new turn in a **terminal** agy/opencode job's conversation, using its recorded `sessionId`. `mode` and `taskType` default to the parent job's; switching to `write` goes through the same worktree gate + lock as `delegate`. copilot has no session resume and returns `{status:'failed', errorKind:'unsupported'}` without spawning anything. A non-terminal parent gets `errorKind:'not_terminal'`; a parent with no `sessionId` gets `errorKind:'no_session'`. Returns `turnDepth` and, from 5 turns deep, a `warning` to start a fresh `delegate` with a short summary. |
 | `agents_metrics` | `{groupBy?: ('agent'\|'model'\|'mode'\|'taskType')[]}` | Success rate, p50/p95 latency, error kinds and tokens per group (default: all four dimensions) from job history. |
-| `jules_delegate` | `{task, cwd?, source?, startingBranch?, title?, requirePlanApproval?, automationMode?, timeoutS?, taskType?}` | Starts a Jules cloud session. Needs `JULES_API_KEY` and either `cwd` (infers the source and branch from the `origin` remote) or an explicit `source`. Returns `{jobId, status:'queued'}`; the job behaves like any other for `job_status`/`job_wait`/`job_result`. The result is a GitHub pull request. |
-| `jules_sources` | `{}` | The GitHub repos connected to the Jules account. Connect new ones in the Jules web UI — the API cannot add them. |
+| `jules_delegate` | `{task, cwd?, source?, startingBranch?, title?, requirePlanApproval?, automationMode?, account?, timeoutS?, taskType?}` | Starts a Jules cloud session. Needs `JULES_API_KEY` and either `cwd` (infers the source and branch from the `origin` remote) or an explicit `source`. Returns `{jobId, status:'queued'}`; the job behaves like any other for `job_status`/`job_wait`/`job_result`. The result is a GitHub pull request. |
+| `jules_sources` | `{account?}` | The GitHub repos connected to the Jules account. Connect new ones in the Jules web UI — the API cannot add them. |
 | `jules_check` | `{jobId?, sessionId?}` | One live read of a session: `state`, `prUrl`, `branch`, `sessionUrl`, last message. Needs no poller, so it works after a reboot, and it finalizes a local job whose session ended while the machine was off. |
-| `jules_sessions` | `{limit?, state?}` | Lists sessions straight from the Jules API, newest first, each with the local `jobId` when this machine has one and `null` when it does not. The recovery path when the local record is gone. |
+| `jules_sessions` | `{limit?, state?, account?}` | Lists sessions straight from the Jules API, newest first, each with the local `jobId` when this machine has one and `null` when it does not. Without `account` it merges every enabled account, tags each session with its `accountId`, and reports an account that fails in `accountErrors` without failing the call. The recovery path when the local record is gone. |
+| `jules_accounts` | `{}` | The configured Jules accounts, read-only: masked keys (`keyLast4` only), rolling 24-hour and concurrent usage, and each account's source-cache status. Accounts are created and edited in the dashboard. |
+| `jules_schedules` | `{}` | The recurring Jules tasks, read-only, with their next run and last result. Schedules are created and edited in the dashboard. |
 | `learning_propose` | `{text, agent?, model?, taskType?, sourceJobId?}` | Records a gotcha as **pending**; a human must approve it in the dashboard before it is injected into a prompt. Returns `{learning, note}`. |
 
 Every tool also declares a zod `outputSchema` and returns the same payload as
@@ -504,6 +528,38 @@ browser, because that browser connects from loopback too:
 There is no authentication: any local process can call the API. Do not
 expose the port beyond loopback (no reverse proxy, no port-forward to a
 shared network).
+
+## Quota Arc and CodexBar
+
+[Quota Arc](https://github.com/jalejandrov93/Quota-Arc) is a small notch pinned
+to a screen edge that shows how much of each coding assistant's quota is used.
+On Windows it can also show an **Agent Hub** cell, read from this dashboard:
+jobs running and queued, open circuit breakers and human holds. When the
+assistants live inside WSL, Quota Arc reads their quotas from
+[CodexBar](https://github.com/steipete/CodexBar) running there.
+
+Nothing needs configuring on the agent-hub side beyond running the dashboard
+service ([Optional: run the dashboard as a systemd --user unit](#optional-run-the-dashboard-as-a-systemd---user-unit)).
+Setup on the other two sides lives in Quota Arc's
+[WSL remote mode guide](https://github.com/jalejandrov93/Quota-Arc/blob/main/docs/wsl-remote-mode.md),
+which starts with a quick start. In short:
+
+```sh
+# inside WSL, from a Quota-Arc checkout
+./wsl/install.sh                    # CodexBar: prints the sudo commands for its systemd unit
+systemctl --user enable --now agent-hub-dashboard
+```
+
+```powershell
+# on Windows
+curl.exe http://127.0.0.1:8787/health          # CodexBar
+curl.exe http://127.0.0.1:7777/api/state       # agent-hub dashboard
+setx QUOTAARC_CODEXBAR_URL http://127.0.0.1:8787
+```
+
+**Always use `127.0.0.1`, never `localhost`, from Windows.** Windows resolves
+`localhost` to `::1` first, and both this dashboard and CodexBar listen on IPv4
+only, so a `localhost` request hangs until it times out rather than falling back.
 
 ## Configuration
 
