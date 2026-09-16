@@ -1,7 +1,7 @@
 import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query"
 import * as api from "./api"
 import { qk } from "./query-keys"
-import type { LearningInputT } from "./types"
+import type { LearningInputT, CloudAccount, CloudSchedule } from "./types"
 
 const STATE_REFETCH_INTERVAL_MS = 15000
 
@@ -92,6 +92,119 @@ export function useDecideLearningMutation() {
     mutationFn: ({ id, decision }: { id: string; decision: "approve" | "reject" }) =>
       api.decideLearning(id, decision),
     onSuccess: () => queryClient.invalidateQueries({ queryKey: qk.learnings }),
+  })
+}
+
+export function useAccountsQuery() {
+  return useQuery({ queryKey: qk.accounts, queryFn: api.getAccounts })
+}
+
+export function useCreateAccountMutation() {
+  const queryClient = useQueryClient()
+  return useMutation({
+    mutationFn: (data: Parameters<typeof api.createAccount>[0]) => api.createAccount(data),
+    onSuccess: () => {
+      queryClient.invalidateQueries({ queryKey: qk.accounts })
+      queryClient.invalidateQueries({ queryKey: qk.sources })
+    },
+  })
+}
+
+export function useUpdateAccountMutation() {
+  const queryClient = useQueryClient()
+  return useMutation({
+    mutationFn: ({ id, data }: { id: string; data: Partial<CloudAccount> }) => api.updateAccount(id, data),
+    onSuccess: () => queryClient.invalidateQueries({ queryKey: qk.accounts }),
+  })
+}
+
+export function useDeleteAccountMutation() {
+  const queryClient = useQueryClient()
+  return useMutation({
+    mutationFn: (id: string) => api.deleteAccount(id),
+    onSuccess: () => {
+      queryClient.invalidateQueries({ queryKey: qk.accounts })
+      queryClient.invalidateQueries({ queryKey: qk.sources })
+    },
+  })
+}
+
+export function useSetAccountPolicyMutation() {
+  const queryClient = useQueryClient()
+  return useMutation({
+    mutationFn: (policy: Parameters<typeof api.setAccountPolicy>[0]) => api.setAccountPolicy(policy),
+    onSuccess: () => queryClient.invalidateQueries({ queryKey: qk.accounts }),
+  })
+}
+
+export function useRefreshAccountSourcesMutation() {
+  const queryClient = useQueryClient()
+  return useMutation({
+    mutationFn: (id: string) => api.refreshAccountSources(id),
+    onSuccess: () => {
+      queryClient.invalidateQueries({ queryKey: qk.accounts })
+      queryClient.invalidateQueries({ queryKey: qk.sources })
+    },
+  })
+}
+
+export function useSourcesQuery() {
+  return useQuery({ queryKey: qk.sources, queryFn: api.getSources })
+}
+
+export function useSchedulesQuery() {
+  return useQuery({ queryKey: qk.schedules, queryFn: api.getSchedules })
+}
+
+export function useCreateScheduleMutation() {
+  const queryClient = useQueryClient()
+  return useMutation({
+    mutationFn: (data: Parameters<typeof api.createSchedule>[0]) => api.createSchedule(data),
+    onSuccess: () => queryClient.invalidateQueries({ queryKey: qk.schedules }),
+  })
+}
+
+export function useUpdateScheduleMutation() {
+  const queryClient = useQueryClient()
+  return useMutation({
+    mutationFn: ({ id, data }: { id: string; data: Partial<CloudSchedule> }) => api.updateSchedule(id, data),
+    onSuccess: () => queryClient.invalidateQueries({ queryKey: qk.schedules }),
+  })
+}
+
+export function useDeleteScheduleMutation() {
+  const queryClient = useQueryClient()
+  return useMutation({
+    mutationFn: (id: string) => api.deleteSchedule(id),
+    onSuccess: () => queryClient.invalidateQueries({ queryKey: qk.schedules }),
+  })
+}
+
+export function useRunScheduleNowMutation() {
+  const queryClient = useQueryClient()
+  return useMutation({
+    mutationFn: (id: string) => api.runScheduleNow(id),
+    onSuccess: () => queryClient.invalidateQueries({ queryKey: qk.schedules }),
+  })
+}
+
+export function useCloudSessionsQuery() {
+  return useQuery({ queryKey: qk.sessions, queryFn: api.getCloudSessions })
+}
+
+export function useCheckCloudJobMutation() {
+  const queryClient = useQueryClient()
+  return useMutation({
+    mutationFn: (id: string) => api.checkCloudJob(id),
+    onSuccess: () => queryClient.invalidateQueries({ queryKey: qk.sessions }),
+  })
+}
+
+export function useCloudJobActivitiesQuery(id: string | null) {
+  return useQuery({
+    queryKey: id ? qk.activities(id) : [],
+    queryFn: () => (id ? api.getCloudJobActivities(id) : Promise.reject(new Error("No id"))),
+    enabled: !!id,
   })
 }
 
