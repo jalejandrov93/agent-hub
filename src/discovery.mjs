@@ -7,7 +7,7 @@ import { runCommand } from './process.mjs'
 import { appendEvent } from './eventlog.mjs'
 import { DELEGATION_MAP } from './router.mjs'
 
-export const KNOWN_AGENTS = ['agy', 'opencode', 'copilot']
+export const KNOWN_AGENTS = ['agy', 'opencode', 'copilot', 'codex']
 
 /** Every distinct opencode provider ("<provider>/<id>") referenced anywhere in DELEGATION_MAP. */
 function opencodeProviders() {

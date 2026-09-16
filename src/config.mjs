@@ -92,6 +92,9 @@ export const DEFAULT_TIMEOUTS_S = {
   },
   opencode: { default: 600 },
   copilot: { default: 300 },
+  // Codex is a fallback for SMALL bounded tasks with a limited plan quota;
+  // 600s mirrors opencode's local-CLI default.
+  codex: { default: 600 },
   // A Jules session runs asynchronously on Google's own infrastructure through
   // a full plan -> code -> test -> PR cycle, not a single local CLI turn, so
   // it routinely takes far longer than any local agent. Without this entry
@@ -177,5 +180,11 @@ export const MODEL_REGISTRY = {
     'claude-opus-4.6-fast': { tier: 'expensive', dataPolicy: 'unknown', strengths: 'architecture, hard judgment, faster' },
     'claude-opus-4.5': { tier: 'expensive', dataPolicy: 'unknown', strengths: 'architecture, hard judgment' },
     'claude-sonnet-4': { tier: 'mid', dataPolicy: 'unknown', strengths: 'legacy' },
+  },
+  codex: {
+    // Limited-quota tier: codex's plan quota is small, so the router only ever
+    // appends it as the LAST fallback of a chain (see router.mjs) — never a
+    // primary. 'default' means the CLI's own configured model.
+    default: { tier: 'limited', dataPolicy: 'unknown', strengths: 'small bounded tasks; limited plan quota — fallback only' },
   },
 }

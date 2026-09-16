@@ -9,6 +9,7 @@ import { runCommand } from '../../src/process.mjs'
 import * as agy from '../../src/adapters/agy.mjs'
 import * as opencode from '../../src/adapters/opencode.mjs'
 import * as copilot from '../../src/adapters/copilot.mjs'
+import * as codex from '../../src/adapters/codex.mjs'
 
 const LIVE = process.env.AGENT_HUB_LIVE === '1'
 const CWD = path.join(path.dirname(new URL(import.meta.url).pathname), '..', '..')
@@ -41,6 +42,16 @@ test('opencode: a real PONG round-trip with opencode/muse-spark-1.3-contributor-
 // --model auto worked. Ping auto here — see test/fixtures/README.md.
 test('copilot: a real PONG round-trip with --model auto', { skip: !LIVE }, async () => {
   const { parsed, error } = await ping(copilot, 'auto')
+  assert.equal(error, null, error && JSON.stringify(error))
+  assert.equal(parsed.ok, true)
+  assert.match(parsed.text.trim(), /PONG/)
+})
+
+// The real `codex exec` waits forever on an open stdin; spawnDetached's
+// 'ignore' stdin (pinned in test/adapters/codex.test.mjs) is what lets this
+// live ping terminate instead of hanging.
+test('codex: a real PONG round-trip with the CLI default model', { skip: !LIVE }, async () => {
+  const { parsed, error } = await ping(codex, 'default')
   assert.equal(error, null, error && JSON.stringify(error))
   assert.equal(parsed.ok, true)
   assert.match(parsed.text.trim(), /PONG/)
