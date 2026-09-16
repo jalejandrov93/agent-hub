@@ -69,11 +69,22 @@ export async function routeTool({ taskType, mode, includeCatalog = false, env = 
 
 export { knownTaskTypes }
 
-export async function agentsQuotaTool({ refresh = false, env = process.env } = {}) {
-  const pairs = defaultPairs()
-  // Add codex if present
-  const discovery = readDiscovery(env)
-  if (discovery['codex']) {
+export async function agentsQuotaTool({
+  refresh = false,
+  env = process.env,
+  pairsFn = defaultPairs,
+  readDiscoveryFn = readDiscovery,
+  fetchUsageFn = fetchUsage,
+} = {}) {
+  const pairs = pairsFn()
+  // codex is added when it is installed even if no chain names it, so its
+  // quota is visible before anyone delegates to it. It now also appears in the
+  // delegation map, so add it only when that did not already contribute it —
+  // otherwise the pair is listed twice (observed right after the quota work
+  // merged).
+  const discovery = readDiscoveryFn(env)
+  const hasCodex = pairs.some((pair) => pair.agent === 'codex' && pair.model === 'default')
+  if (discovery?.codex && !hasCodex) {
     pairs.push({ agent: 'codex', model: 'default' })
   }
 
@@ -83,7 +94,7 @@ export async function agentsQuotaTool({ refresh = false, env = process.env } = {
     if (p) providers.add(p)
   }
 
-  const usageByProvider = await fetchUsage({ providers: [...providers], refresh, env })
+  const usageByProvider = await fetchUsageFn({ providers: [...providers], refresh, env })
 
   return pairs.map((p) => ({
     agent: p.agent,

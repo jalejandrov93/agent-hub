@@ -85,7 +85,11 @@ export function buildServer() {
     'agents_quota',
     {
       title: 'Agent quota usage',
-      description: 'Read-only view of the current quota usage for agents, reflecting CodexBar status.',
+      description:
+        'Quota state of each delegation pair, read from a local CodexBar server: every window that limits it, with used percent ' +
+        'and reset time, and exhausted:true when one is used up. INFORMATION ONLY: quota never chooses, skips or reorders an ' +
+        'agent, and route() is unaffected by it. Check it before delegating and tell the user when a chosen agent is exhausted, ' +
+        'with its reset time; the human decides whether to use it anyway. A null quota carries a reason (CodexBar unreachable, not metered).',
       inputSchema: { refresh: z.boolean().optional().describe('Bypass the 5-minute cache and fetch live.') },
       outputSchema: AgentsQuotaResponseWrapper,
       annotations: { readOnlyHint: true, openWorldHint: true, idempotentHint: true },
