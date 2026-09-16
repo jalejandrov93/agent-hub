@@ -9,6 +9,7 @@ import {
   readPolicy as defaultReadPolicy,
 } from '../accounts.mjs'
 import { readSourcesCache as defaultReadSourcesCache } from '../cloud/sources.mjs'
+import { keyForAccount } from '../cloud/credentials.mjs'
 import * as defaultClient from '../cloud/jules/client.mjs'
 import * as defaultAdapter from '../cloud/jules/adapter.mjs'
 import { TASK_TYPES } from '../schemas.mjs'
@@ -88,19 +89,24 @@ function sessionIdOf(session) {
  * List the account's Jules sessions straight from the API, newest first, and
  * annotate each with the local jobId whose remote.sessionId matches (null when
  * this machine has no record — a reinstall, or a session started elsewhere).
+ *
+ * Sessions belong to ONE account, so a single key only shows part of the
+ * picture once several are configured: with no explicit `account`, every
+ * enabled account that has a key is queried in parallel and the rows are
+ * merged. One account failing must not hide the others, so its error is
+ * reported in `accountErrors` beside the sessions that did come back.
  */
-export async function julesSessionsTool({ limit = 20, state, env = process.env, client = defaultClient, listJobsFn = defaultListJobs, adapter = defaultAdapter } = {}) {
-  const apiKey = env.JULES_API_KEY
-  if (!apiKey) throw new Error('JULES_API_KEY is missing or rejected')
-
-  let page
-  try {
-    page = await client.listSessions({ apiKey, pageSize: limit })
-  } catch (error) {
-    if (error?.status === 401 || error?.status === 403) throw new Error('JULES_API_KEY is missing or rejected')
-    throw error
-  }
-
+export async function julesSessionsTool({
+  limit = 20,
+  state,
+  account,
+  env = process.env,
+  client = defaultClient,
+  listJobsFn = defaultListJobs,
+  adapter = defaultAdapter,
+  listAccountsFn = defaultListAccounts,
+  getAccountSecretFn = defaultGetAccountSecret,
+} = {}) {
   const jobIdBySession = new Map()
   try {
     for (const job of listJobsFn(env)) {
@@ -112,13 +118,13 @@ export async function julesSessionsTool({ limit = 20, state, env = process.env, 
     // still comes back, just with jobId:null.
   }
 
-  const sessions = Array.isArray(page?.sessions) ? page.sessions : []
-  return {
-    sessions: sessions
+  const toRows = (page, accountId) => {
+    const sessions = Array.isArray(page?.sessions) ? page.sessions : []
+    return sessions
       .filter((session) => (state ? adapter.sessionState(session) === state : true))
       .map((session) => {
         const sessionId = sessionIdOf(session)
-        return {
+        const row = {
           sessionId,
           title: typeof session?.title === 'string' && session.title.length > 0 ? session.title : null,
           state: adapter.sessionState(session),
@@ -128,9 +134,64 @@ export async function julesSessionsTool({ limit = 20, state, env = process.env, 
           createTime: typeof session?.createTime === 'string' && session.createTime.length > 0 ? session.createTime : null,
           jobId: sessionId ? jobIdBySession.get(sessionId) ?? null : null,
         }
+        if (accountId) row.accountId = accountId
+        return row
       })
+  }
+
+  const merge = (rows) =>
+    rows
       .sort((a, b) => (b.createTime ?? '').localeCompare(a.createTime ?? ''))
-      .slice(0, limit),
+      .slice(0, limit)
+
+  const queryOne = async (apiKey) => {
+    try {
+      return await client.listSessions({ apiKey, pageSize: limit })
+    } catch (error) {
+      if (error?.status === 401 || error?.status === 403) throw new Error('JULES_API_KEY is missing or rejected')
+      throw error
+    }
+  }
+
+  // An explicit account is an answer to "whose sessions?" — query only it, and
+  // let a failure surface instead of silently returning nothing.
+  if (account) {
+    const apiKey = getAccountSecretFn(account, env)
+    if (!apiKey) throw new Error(`account not found: ${account}`)
+    const page = await queryOne(apiKey)
+    return { sessions: merge(toRows(page, account)), accountErrors: [] }
+  }
+
+  const entries = listAccountsFn(env)
+    .filter((candidate) => candidate.enabled !== false)
+    .sort((a, b) => (a.priority ?? 0) - (b.priority ?? 0))
+    .map((candidate) => ({ accountId: candidate.id, apiKey: getAccountSecretFn(candidate.id, env) }))
+    .filter((entry) => entry.apiKey)
+
+  // No configured account has a key: behave exactly as before, env-only, with
+  // errors propagating the way they always did.
+  if (entries.length === 0) {
+    const fallback = keyForAccount({ env, listAccountsFn, getAccountSecretFn })
+    if (!fallback.apiKey) throw new Error('JULES_API_KEY is missing or rejected')
+    const page = await queryOne(fallback.apiKey)
+    return { sessions: merge(toRows(page, null)) }
+  }
+
+  const results = await Promise.all(
+    entries.map(async (entry) => {
+      try {
+        return { rows: toRows(await client.listSessions({ apiKey: entry.apiKey, pageSize: limit }), entry.accountId) }
+      } catch (error) {
+        // Keep the raw message (it names the status) — this is one account's
+        // failure, not a statement about the whole call.
+        return { error: { accountId: entry.accountId, error: String(error?.message ?? error) } }
+      }
+    })
+  )
+
+  return {
+    sessions: merge(results.flatMap((result) => result.rows ?? [])),
+    accountErrors: results.map((result) => result.error).filter(Boolean),
   }
 }
 
@@ -148,7 +209,7 @@ function ownerRepoFromName(name) {
  * the Jules web UI — there is no API to add one.
  *
  * With no `account` and no accounts configured this behaves exactly as before
- * (env.JULES_API_KEY). With accounts configured it defaults to the
+ * (the JULES_API_KEY environment variable). With accounts configured it defaults to the
  * highest-priority enabled account. A 401/403 from /sources is reported as
  * "this account has no source access", never as a rejected key: a valid,
  * usable key was observed being refused by /sources while /sessions worked.
@@ -161,42 +222,27 @@ export async function julesSourcesTool({
   listAccountsFn = defaultListAccounts,
   getAccountSecretFn = defaultGetAccountSecret,
 } = {}) {
-  const accounts = listAccountsFn(env)
-  let accountId = null
-  let apiKey = null
-
-  if (account) {
-    apiKey = getAccountSecretFn(account, env)
-    if (!apiKey) throw new Error(`account not found: ${account}`)
-    accountId = account
-  } else if (accounts.length > 0) {
-    const enabled = accounts
-      .filter((candidate) => candidate.enabled !== false)
-      .sort((a, b) => (a.priority ?? 0) - (b.priority ?? 0))
-    const first = enabled[0]
-    if (first) {
-      accountId = first.id
-      apiKey = getAccountSecretFn(first.id, env)
-    }
-  }
-
-  if (!apiKey) apiKey = env.JULES_API_KEY
+  const { apiKey, accountId } = keyForAccount({ account, env, listAccountsFn, getAccountSecretFn })
+  if (account && !apiKey) throw new Error(`account not found: ${account}`)
   if (!apiKey) {
     throw new Error('JULES_API_KEY is missing or rejected')
   }
+  // 'env' is the implicit account, not a configured one — never report it as an
+  // accountId (this keeps the pre-accounts output byte-for-byte unchanged).
+  const scopedAccountId = accountId && accountId !== 'env' ? accountId : null
 
   let page
   try {
     page = await client.listSources({ apiKey, fetchImpl })
   } catch (error) {
     if (error?.status === 401 || error?.status === 403) {
-      if (accountId) {
+      if (scopedAccountId) {
         return {
           sources: [],
-          accountId,
+          accountId: scopedAccountId,
           noSourceAccess: true,
           note:
-            `Account ${accountId} has no source access: the Jules API refused /sources with ${error.status}. ` +
+            `Account ${scopedAccountId} has no source access: the Jules API refused /sources with ${error.status}. ` +
             'This is not a credential failure — repositories are connected in the Jules web UI (jules.google.com).',
         }
       }
@@ -223,7 +269,7 @@ export async function julesSourcesTool({
       }
     }),
   }
-  if (accountId) result.accountId = accountId
+  if (scopedAccountId) result.accountId = scopedAccountId
   return result
 }
 

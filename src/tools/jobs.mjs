@@ -3,6 +3,7 @@ import { startJob as defaultStartJob, cancelJob } from '../jobrunner.mjs'
 import { readResult, responsePath } from '../jobstore.mjs'
 import { WRITE_ALLOWLIST, TURN_DEPTH_WARNING } from '../config.mjs'
 import { TASK_TYPES } from '../schemas.mjs'
+import { keyForJob, NO_KEY_MESSAGE } from '../cloud/credentials.mjs'
 import * as defaultJulesClient from '../cloud/jules/client.mjs'
 
 /** Reject a caller-supplied taskType that is not one of schemas.mjs TASK_TYPES. */
@@ -57,7 +58,6 @@ async function julesReply({ jobId, parent, message, action, client, env, turnDep
   // waiting on one and the caller did not also send free text (a message
   // always means "say this", regardless of the session's current state).
   const resolvedAction = action ?? (parent.remote?.state === 'AWAITING_PLAN_APPROVAL' && !message ? 'approve_plan' : 'message')
-  const apiKey = env.JULES_API_KEY
 
   if (resolvedAction === 'message' && (!message || String(message).trim().length === 0)) {
     return {
@@ -69,6 +69,15 @@ async function julesReply({ jobId, parent, message, action, client, env, turnDep
       turnDepth,
       warning,
     }
+  }
+
+  // The session belongs to the account that STARTED the job, so reply with
+  // that account's key (credentials.mjs), not whatever env holds. Sending
+  // unkeyed produced a real 401 on /sessions/<id>:sendMessage once keys moved
+  // into accounts.json and JULES_API_KEY was gone.
+  const apiKey = keyForJob(parent, { env })
+  if (!apiKey) {
+    return { jobId: null, status: 'failed', parentJobId: jobId, errorKind: 'auth', error: NO_KEY_MESSAGE, turnDepth, warning }
   }
 
   try {

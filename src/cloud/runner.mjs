@@ -13,6 +13,7 @@ import {
 } from '../accounts.mjs'
 import { selectAccount as defaultSelectAccount } from './selectAccount.mjs'
 import { readSourcesCache as defaultReadSourcesCache } from './sources.mjs'
+import { keyForJob, keyForAccount } from './credentials.mjs'
 import * as defaultClient from './jules/client.mjs'
 import * as defaultAdapter from './jules/adapter.mjs'
 
@@ -147,9 +148,10 @@ export function finishRemoteJob({
 
 /**
  * Resolve one account+key for a delegation. When accounts.json has no accounts
- * at all, fall back to env.JULES_API_KEY as an implicit account id 'env' so an
- * existing single-key setup keeps working untouched. `exclude` holds the ids
- * already tried by the 429 failover, so the next call picks a fresh account.
+ * at all, fall back to the environment JULES_API_KEY as an implicit account id
+ * 'env' so an existing single-key setup keeps working untouched. `exclude`
+ * holds the ids already tried by the 429 failover, so the next call picks a
+ * fresh account.
  */
 function selectCredential({
   explicitAccount,
@@ -163,7 +165,9 @@ function selectCredential({
   readSourcesCacheFn,
 }) {
   if (listAccountsFn(env).length === 0) {
-    const apiKey = env.JULES_API_KEY
+    // No configured accounts: keyForAccount's implicit 'env' fallback is the
+    // environment key (or null), exactly as before.
+    const { apiKey } = keyForAccount({ env, listAccountsFn, getAccountSecretFn })
     return apiKey ? { accountId: 'env', apiKey } : { accountId: null, apiKey: null, reason: 'no_accounts' }
   }
 
@@ -184,18 +188,9 @@ function selectCredential({
 }
 
 /**
- * The key a resumed/polled job must use: its own account when it has one,
- * otherwise the env key. A job started from the implicit 'env' account has
- * accountId 'env', which is not stored in accounts.json, so it also falls back.
+ * The key a resumed/polled job must use comes from credentials.mjs (the single
+ * source of truth): its own account when it has one, otherwise the env key.
  */
-function keyForJob(job, env, getAccountSecretFn) {
-  const accountId = job?.remote?.accountId
-  if (accountId && accountId !== 'env') {
-    const secret = getAccountSecretFn(accountId, env)
-    if (secret) return secret
-  }
-  return env.JULES_API_KEY ?? null
-}
 
 /**
  * Start a job on the Jules remote agent. Unlike startJob (jobrunner.mjs) this
@@ -293,8 +288,7 @@ export function startRemoteJob({
   }
 
   const configuredAccounts = listAccountsFn(env)
-  const hasEnvKey = typeof env.JULES_API_KEY === 'string' && env.JULES_API_KEY.length > 0
-  if (configuredAccounts.length === 0 && !hasEnvKey) {
+  if (configuredAccounts.length === 0 && !keyForAccount({ env, listAccountsFn, getAccountSecretFn }).apiKey) {
     fail('auth', 'JULES_API_KEY is not set — export it in the environment to delegate to Jules.')
     return { job: readResultFn(job.jobId, env), done: Promise.resolve() }
   }
@@ -501,9 +495,9 @@ export function resumeRemoteJobs({
     }
 
     // A resumed job keeps polling with the account that started it, so two
-    // accounts' sessions never get crossed; the env key is only the fallback
-    // for jobs that predate accounts (or were started from env.JULES_API_KEY).
-    const apiKey = keyForJob(job, env, getAccountSecretFn)
+    // accounts' sessions never get crossed; the environment key is only the
+    // fallback for jobs that predate accounts (or were started from it).
+    const apiKey = keyForJob(job, { env, getAccountSecretFn })
 
     if (!apiKey || apiKey.length === 0) {
       // No key in THIS process says nothing about the session, which keeps
