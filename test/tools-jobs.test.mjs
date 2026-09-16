@@ -155,6 +155,248 @@ test('job_reply reports turnDepth = parent + 1 and warns once the conversation i
   assert.equal(fifth.warning, 'conversation is 5 turns deep; consider a fresh delegate with a short summary')
 })
 
+test('job_reply for a jules parent calls client.sendMessage (default action) and spawns nothing, keeping the same jobId', async () => {
+  const home = tmpHome()
+  const env = { AGENT_HUB_HOME: home }
+  const { updateResult } = await import('../src/jobstore.mjs?t=' + Date.now())
+  const { jobReplyTool } = await fresh(home)
+
+  const parent = createJob({ agent: 'jules', model: 'jules', task: 't', cwd: '/repo', title: 'jules task', mode: 'write', env })
+  updateResult(parent.jobId, { status: 'running', remote: { provider: 'jules', sessionId: 'sess-1', state: 'IN_PROGRESS' } }, env)
+
+  let startJobCalls = 0
+  const startJobFn = () => {
+    startJobCalls++
+    return { job: { jobId: 'should-not-happen', status: 'running', errorKind: null } }
+  }
+  let sendMessageArgs = null
+  const client = {
+    sendMessage: async (args) => {
+      sendMessageArgs = args
+      return {}
+    },
+    approvePlan: async () => {
+      throw new Error('must not be called')
+    },
+  }
+
+  const result = await jobReplyTool({ jobId: parent.jobId, message: 'please also add a changelog entry', startJobFn, client, env })
+
+  assert.equal(startJobCalls, 0, 'a jules reply must never spawn a new local job')
+  assert.equal(sendMessageArgs.sessionId, 'sess-1')
+  assert.equal(sendMessageArgs.prompt, 'please also add a changelog entry')
+  assert.equal(sendMessageArgs.apiKey, undefined)
+  assert.equal(result.jobId, parent.jobId)
+  assert.equal(result.status, 'running')
+  assert.equal(result.errorKind, null)
+})
+
+test('job_reply for a jules parent defaults to approve_plan when remote.state is AWAITING_PLAN_APPROVAL and no message is given', async () => {
+  const home = tmpHome()
+  const env = { AGENT_HUB_HOME: home }
+  const { updateResult } = await import('../src/jobstore.mjs?t=' + Date.now())
+  const { jobReplyTool } = await fresh(home)
+
+  const parent = createJob({ agent: 'jules', model: 'jules', task: 't', cwd: '/repo', title: 'p', mode: 'write', env })
+  updateResult(parent.jobId, { status: 'running', remote: { provider: 'jules', sessionId: 'sess-2', state: 'AWAITING_PLAN_APPROVAL' } }, env)
+
+  let approveCalled = false
+  const client = {
+    sendMessage: async () => {
+      throw new Error('must not be called')
+    },
+    approvePlan: async (args) => {
+      approveCalled = true
+      assert.equal(args.sessionId, 'sess-2')
+    },
+  }
+
+  const result = await jobReplyTool({ jobId: parent.jobId, client, env })
+  assert.equal(approveCalled, true)
+  assert.equal(result.errorKind, null)
+})
+
+test('job_reply for a jules parent honors an explicit action override', async () => {
+  const home = tmpHome()
+  const env = { AGENT_HUB_HOME: home }
+  const { updateResult } = await import('../src/jobstore.mjs?t=' + Date.now())
+  const { jobReplyTool } = await fresh(home)
+
+  const parent = createJob({ agent: 'jules', model: 'jules', task: 't', cwd: '/repo', title: 'p', mode: 'write', env })
+  updateResult(parent.jobId, { status: 'running', remote: { provider: 'jules', sessionId: 'sess-3', state: 'AWAITING_PLAN_APPROVAL' } }, env)
+
+  let approveCalled = false
+  let sendCalled = false
+  const client = {
+    sendMessage: async () => {
+      sendCalled = true
+    },
+    approvePlan: async () => {
+      approveCalled = true
+    },
+  }
+
+  // Even though remote.state is AWAITING_PLAN_APPROVAL, an explicit action wins.
+  await jobReplyTool({ jobId: parent.jobId, message: 'hold on, one more thing', action: 'message', client, env })
+  assert.equal(sendCalled, true)
+  assert.equal(approveCalled, false)
+})
+
+test('job_reply accepts a RUNNING jules parent (not just a terminal one) — that is exactly when a reply is useful', async () => {
+  const home = tmpHome()
+  const env = { AGENT_HUB_HOME: home }
+  const { updateResult } = await import('../src/jobstore.mjs?t=' + Date.now())
+  const { jobReplyTool } = await fresh(home)
+
+  const parent = createJob({ agent: 'jules', model: 'jules', task: 't', cwd: '/repo', title: 'p', mode: 'write', env })
+  updateResult(parent.jobId, { status: 'running', remote: { provider: 'jules', sessionId: 'sess-4' } }, env)
+
+  const client = { sendMessage: async () => ({}), approvePlan: async () => ({}) }
+  const result = await jobReplyTool({ jobId: parent.jobId, message: 'go', client, env })
+  assert.notEqual(result.errorKind, 'not_terminal')
+})
+
+test('job_reply rejects a jules parent that is neither running nor terminal (e.g. still queued)', async () => {
+  const home = tmpHome()
+  const env = { AGENT_HUB_HOME: home }
+  const { jobReplyTool } = await fresh(home)
+
+  const parent = createJob({ agent: 'jules', model: 'jules', task: 't', cwd: '/repo', title: 'p', mode: 'write', env })
+  // status stays 'queued'
+
+  const result = await jobReplyTool({ jobId: parent.jobId, message: 'go', env })
+  assert.equal(result.status, 'failed')
+  assert.equal(result.errorKind, 'not_terminal')
+})
+
+test('job_reply rejects a jules parent with no remote.sessionId', async () => {
+  const home = tmpHome()
+  const env = { AGENT_HUB_HOME: home }
+  const { updateResult } = await import('../src/jobstore.mjs?t=' + Date.now())
+  const { jobReplyTool } = await fresh(home)
+
+  const parent = createJob({ agent: 'jules', model: 'jules', task: 't', cwd: '/repo', title: 'p', mode: 'write', env })
+  updateResult(parent.jobId, { status: 'running' }, env) // no remote block at all
+
+  const result = await jobReplyTool({ jobId: parent.jobId, message: 'go', env })
+  assert.equal(result.status, 'failed')
+  assert.equal(result.errorKind, 'no_session')
+})
+
+test('job_reply reports a jules client failure as errorKind crash (any other status), carrying the error message through', async () => {
+  const home = tmpHome()
+  const env = { AGENT_HUB_HOME: home }
+  const { updateResult } = await import('../src/jobstore.mjs?t=' + Date.now())
+  const { jobReplyTool } = await fresh(home)
+
+  const parent = createJob({ agent: 'jules', model: 'jules', task: 't', cwd: '/repo', title: 'p', mode: 'write', env })
+  updateResult(parent.jobId, { status: 'running', remote: { provider: 'jules', sessionId: 'sess-5' } }, env)
+
+  const client = {
+    sendMessage: async () => {
+      throw Object.assign(new Error('Jules API responded 500'), { status: 500 })
+    },
+  }
+  const result = await jobReplyTool({ jobId: parent.jobId, message: 'go', client, env })
+  assert.equal(result.status, 'failed')
+  assert.equal(result.errorKind, 'crash')
+  assert.match(result.error, /500/)
+})
+
+test('job_reply maps a 429 jules client failure to errorKind quota, carrying the error message through', async () => {
+  const home = tmpHome()
+  const env = { AGENT_HUB_HOME: home }
+  const { updateResult } = await import('../src/jobstore.mjs?t=' + Date.now())
+  const { jobReplyTool } = await fresh(home)
+
+  const parent = createJob({ agent: 'jules', model: 'jules', task: 't', cwd: '/repo', title: 'p', mode: 'write', env })
+  updateResult(parent.jobId, { status: 'running', remote: { provider: 'jules', sessionId: 'sess-6' } }, env)
+
+  const client = {
+    sendMessage: async () => {
+      throw Object.assign(new Error('Jules API responded 429'), { status: 429 })
+    },
+  }
+  const result = await jobReplyTool({ jobId: parent.jobId, message: 'go', client, env })
+  assert.equal(result.status, 'failed')
+  assert.equal(result.errorKind, 'quota')
+  assert.match(result.error, /429/)
+})
+
+test('job_reply maps a 401/403 jules client failure to errorKind auth, carrying the error message through', async () => {
+  const home = tmpHome()
+  const env = { AGENT_HUB_HOME: home }
+  const { updateResult } = await import('../src/jobstore.mjs?t=' + Date.now())
+  const { jobReplyTool } = await fresh(home)
+
+  const parent401 = createJob({ agent: 'jules', model: 'jules', task: 't', cwd: '/repo', title: 'p', mode: 'write', env })
+  updateResult(parent401.jobId, { status: 'running', remote: { provider: 'jules', sessionId: 'sess-7' } }, env)
+  const client401 = {
+    sendMessage: async () => {
+      throw Object.assign(new Error('Jules API responded 401'), { status: 401 })
+    },
+  }
+  const result401 = await jobReplyTool({ jobId: parent401.jobId, message: 'go', client: client401, env })
+  assert.equal(result401.errorKind, 'auth')
+  assert.match(result401.error, /401/)
+
+  const parent403 = createJob({ agent: 'jules', model: 'jules', task: 't', cwd: '/repo', title: 'p', mode: 'write', env })
+  updateResult(parent403.jobId, { status: 'running', remote: { provider: 'jules', sessionId: 'sess-8' } }, env)
+  const client403 = {
+    sendMessage: async () => {
+      throw Object.assign(new Error('Jules API responded 403'), { status: 403 })
+    },
+  }
+  const result403 = await jobReplyTool({ jobId: parent403.jobId, message: 'go', client: client403, env })
+  assert.equal(result403.errorKind, 'auth')
+  assert.match(result403.error, /403/)
+})
+
+test('job_reply rejects a jules "message" action with no message text, without ever calling client.sendMessage', async () => {
+  const home = tmpHome()
+  const env = { AGENT_HUB_HOME: home }
+  const { updateResult } = await import('../src/jobstore.mjs?t=' + Date.now())
+  const { jobReplyTool } = await fresh(home)
+
+  const parent = createJob({ agent: 'jules', model: 'jules', task: 't', cwd: '/repo', title: 'p', mode: 'write', env })
+  updateResult(parent.jobId, { status: 'running', remote: { provider: 'jules', sessionId: 'sess-9' } }, env)
+
+  let sendCalled = false
+  const client = {
+    sendMessage: async () => {
+      sendCalled = true
+    },
+  }
+
+  const missing = await jobReplyTool({ jobId: parent.jobId, client, env })
+  assert.equal(missing.status, 'failed')
+  assert.equal(missing.errorKind, 'invalid')
+  assert.match(missing.error, /message text or action:"approve_plan"/)
+
+  const blank = await jobReplyTool({ jobId: parent.jobId, message: '   ', client, env })
+  assert.equal(blank.status, 'failed')
+  assert.equal(blank.errorKind, 'invalid')
+
+  assert.equal(sendCalled, false)
+})
+
+test('job_reply still allows action:"approve_plan" with no message text at all', async () => {
+  const home = tmpHome()
+  const env = { AGENT_HUB_HOME: home }
+  const { updateResult } = await import('../src/jobstore.mjs?t=' + Date.now())
+  const { jobReplyTool } = await fresh(home)
+
+  const parent = createJob({ agent: 'jules', model: 'jules', task: 't', cwd: '/repo', title: 'p', mode: 'write', env })
+  updateResult(parent.jobId, { status: 'running', remote: { provider: 'jules', sessionId: 'sess-10' } }, env)
+
+  let approveCalled = false
+  const client = { approvePlan: async () => { approveCalled = true } }
+
+  const result = await jobReplyTool({ jobId: parent.jobId, action: 'approve_plan', client, env })
+  assert.equal(approveCalled, true)
+  assert.equal(result.errorKind, null)
+})
+
 test('job_result adds tail, totalLines and tailTruncated without changing the head fields', async () => {
   const home = tmpHome()
   const env = { AGENT_HUB_HOME: home }

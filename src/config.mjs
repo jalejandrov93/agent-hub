@@ -85,6 +85,12 @@ export const DEFAULT_TIMEOUTS_S = {
   },
   opencode: { default: 600 },
   copilot: { default: 300 },
+  // A Jules session runs asynchronously on Google's own infrastructure through
+  // a full plan -> code -> test -> PR cycle, not a single local CLI turn, so
+  // it routinely takes far longer than any local agent. Without this entry
+  // resolveTimeoutS() would fall back to 240s (no table for 'jules'), which
+  // would abandon a normal session via the poller's own timeoutMs deadline.
+  jules: { default: 3600 },
 }
 
 export function resolveTimeoutS(agent, model) {

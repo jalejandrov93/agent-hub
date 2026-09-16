@@ -40,6 +40,8 @@ test('the server boots over stdio and exposes the full tool set', async () => {
         'job_result',
         'job_status',
         'job_wait',
+        'jules_delegate',
+        'jules_sources',
         'learning_propose',
         'route',
       ]
@@ -86,15 +88,55 @@ test('route only accepts known task types', async () => {
   }
 })
 
-test('job_reply requires jobId and message', async () => {
+test('job_reply requires jobId; message is optional at the schema level (a jules approve_plan reply sends no message)', async () => {
   const { client, close } = await connect()
   try {
     const { tools } = await client.listTools()
     const jobReply = tools.find((t) => t.name === 'job_reply')
     const required = jobReply.inputSchema.required ?? []
-    for (const field of ['jobId', 'message']) {
-      assert.ok(required.includes(field), `job_reply.inputSchema should require "${field}"`)
+    assert.ok(required.includes('jobId'), 'job_reply.inputSchema should require "jobId"')
+    assert.ok(!required.includes('message'), 'message must be optional — a jules action:"approve_plan" reply sends no message text')
+  } finally {
+    await close()
+  }
+})
+
+test('jules_delegate requires only task, and its description flags the remote/PR/alpha/no-cancel caveats', async () => {
+  const { client, close } = await connect()
+  try {
+    const { tools } = await client.listTools()
+    const julesDelegate = tools.find((t) => t.name === 'jules_delegate')
+    assert.ok(julesDelegate, 'jules_delegate must be registered')
+    assert.deepEqual(julesDelegate.inputSchema.required ?? [], ['task'])
+    for (const phrase of [/google/i, /pull request/i, /alpha/i, /cancel/i]) {
+      assert.match(julesDelegate.description, phrase, `jules_delegate.description should mention ${phrase}`)
     }
+  } finally {
+    await close()
+  }
+})
+
+test('jules_sources has no required input and explains sources are connected in the Jules web UI', async () => {
+  const { client, close } = await connect()
+  try {
+    const { tools } = await client.listTools()
+    const julesSources = tools.find((t) => t.name === 'jules_sources')
+    assert.ok(julesSources, 'jules_sources must be registered')
+    assert.deepEqual(julesSources.inputSchema.required ?? [], [])
+    assert.match(julesSources.description, /web UI/i)
+    assert.match(julesSources.description, /cannot be added/i)
+  } finally {
+    await close()
+  }
+})
+
+test('job_reply accepts an optional action input', async () => {
+  const { client, close } = await connect()
+  try {
+    const { tools } = await client.listTools()
+    const jobReply = tools.find((t) => t.name === 'job_reply')
+    assert.ok(jobReply.inputSchema.properties.action, 'job_reply should accept an "action" input')
+    assert.ok(!(jobReply.inputSchema.required ?? []).includes('action'), 'action must be optional')
   } finally {
     await close()
   }

@@ -52,6 +52,29 @@ export const JobStatus = z.enum(['queued', 'running', 'succeeded', 'failed', 'ca
 export const AgentStatus = z.enum(['ready', 'degraded', 'unavailable', 'skipped'])
 export const TimeoutSource = z.enum(['explicit', 'adaptive', 'default'])
 
+/**
+ * A remote agent's session tracking block (currently only Jules). Attached to
+ * JobRecord as an optional field so a local job's record is byte-for-byte
+ * unchanged. Only provider and sessionId are required — everything else is
+ * either not known yet (state, prUrl before the first poll) or genuinely
+ * optional (accountId — accounts are a later phase).
+ */
+export const RemoteInfo = z
+  .object({
+    provider: z.string(),
+    accountId: nullableString,
+    sessionId: z.string(),
+    sessionUrl: nullableString,
+    source: nullableString,
+    startingBranch: nullableString,
+    state: nullableString,
+    prUrl: nullableString,
+    activityCursor: nullableString,
+    seenActivityIds: z.array(z.string()).optional(),
+    lastPolledAt: nullableString,
+  })
+  .passthrough()
+
 export const JobRecord = z
   .object({
     jobId: z.string(),
@@ -77,6 +100,7 @@ export const JobRecord = z
     turnDepth: z.number().int().nonnegative().optional(),
     timeoutSource: TimeoutSource.optional(),
     learningIds: z.array(z.string()).optional(),
+    remote: RemoteInfo.optional(),
   })
   .passthrough()
 

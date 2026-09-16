@@ -183,6 +183,11 @@ export function reconcileOrphans(env = process.env) {
   const changed = []
   for (const job of listJobs(env)) {
     if (job.status !== 'running') continue
+    // A remote job (Jules) has no local pid — it runs on the provider's own
+    // infrastructure and is tracked by the poller, not by a child of this
+    // process. Judging it by a missing/foreign pid would wrongly mark a
+    // still-progressing remote session as orphaned on every MCP restart.
+    if (job.remote) continue
     if (job.pid && isPidAlive(job.pid)) continue
     updateResult(job.jobId, { status: 'failed', errorKind: 'orphaned', error: 'process not found on startup reconcile' }, env)
     changed.push(job.jobId)

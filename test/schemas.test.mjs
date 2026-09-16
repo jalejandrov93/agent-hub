@@ -20,6 +20,7 @@ import {
   RouteResult,
   JobResultResponse,
   DelegateResponse,
+  RemoteInfo,
 } from '../src/schemas.mjs'
 import { DELEGATION_MAP } from '../src/router.mjs'
 import { VALID_KINDS } from '../src/eventlog.mjs'
@@ -87,6 +88,39 @@ test('LearningInput rejects empty and over-long text', () => {
   assert.throws(() => LearningInput.parse({ text: '' }))
   assert.throws(() => LearningInput.parse({ text: 'x'.repeat(LEARNING_TEXT_MAX + 1) }))
   assert.equal(LearningInput.parse({ text: 'agy hangs on X', agent: 'agy' }).agent, 'agy')
+})
+
+test('RemoteInfo requires only provider and sessionId, everything else nullable/optional', () => {
+  const remote = RemoteInfo.parse({ provider: 'jules', sessionId: 'sess-1' })
+  assert.equal(remote.provider, 'jules')
+  assert.equal(remote.sessionId, 'sess-1')
+
+  const full = RemoteInfo.parse({
+    provider: 'jules',
+    accountId: null,
+    sessionId: 'sess-1',
+    sessionUrl: 'https://jules.google.com/session/sess-1',
+    source: 'sources/github/acme/widgets',
+    startingBranch: 'main',
+    state: 'IN_PROGRESS',
+    prUrl: null,
+    activityCursor: 'tok-2',
+    seenActivityIds: ['a1', 'a2'],
+    lastPolledAt: '2026-09-15T00:00:00.000Z',
+  })
+  assert.equal(full.state, 'IN_PROGRESS')
+
+  assert.throws(() => RemoteInfo.parse({ sessionId: 'sess-1' }), /provider/)
+  assert.throws(() => RemoteInfo.parse({ provider: 'jules' }), /sessionId/)
+})
+
+test('JobRecord accepts an optional remote block for a Jules job, and is unaffected for a local job', () => {
+  const base = fixture('state.json').jobs[0]
+  const remoteJob = JobRecord.parse({ ...base, agent: 'jules', model: 'jules', remote: { provider: 'jules', sessionId: 'sess-1' } })
+  assert.equal(remoteJob.remote.sessionId, 'sess-1')
+
+  const localJob = JobRecord.parse(base)
+  assert.equal(localJob.remote, undefined)
 })
 
 test('tool response schemas accept current outputs', () => {

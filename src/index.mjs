@@ -8,6 +8,7 @@ import { paths } from './config.mjs'
 import { reconcileOrphans, listJobs, readResult, responsePath } from './jobstore.mjs'
 import { agentsStatusTool, routeTool, knownTaskTypes } from './tools/agents.mjs'
 import { delegateTool, jobWaitTool, jobStatusTool, jobResultTool, jobCancelTool, jobReplyTool } from './tools/jobs.mjs'
+import { julesDelegateTool, julesSourcesTool } from './tools/jules.mjs'
 import { metricsTool } from './tools/insights.mjs'
 import { learningProposeTool } from './tools/learnings.mjs'
 import { scheduleStartupDiscovery } from './startup.mjs'
@@ -36,6 +37,11 @@ const log = (...args) => console.error('[agent-hub]', ...args)
 // rely on.
 const AgentsStatusResponse = z.object({ agents: z.array(AgentStatusRow) }).passthrough()
 const LearningProposeResponse = z.object({ learning: Learning, note: z.string() }).passthrough()
+const JulesSourcesResponse = z
+  .object({
+    sources: z.array(z.object({ name: z.string().nullable(), owner: z.string().nullable(), repo: z.string().nullable() }).passthrough()),
+  })
+  .passthrough()
 
 const ok = (payload, structuredContent) => ({
   content: [{ type: 'text', text: JSON.stringify(payload, null, 2) }],
@@ -193,22 +199,74 @@ export function buildServer() {
     {
       title: 'Reply to a finished agy/opencode job, resuming its session',
       description:
-        'Start a new turn in a terminal job\'s conversation, using its recorded sessionId. Only agy (--conversation) and ' +
-        'opencode (-s) support this; copilot returns {status:"failed", errorKind:"unsupported"} without spawning anything. ' +
-        'mode defaults to the parent job\'s mode; switching read -> write goes through the same worktree gate + lock as delegate(). ' +
-        'A parent that is not yet terminal (errorKind:"not_terminal") or has no sessionId (errorKind:"no_session") is also rejected.',
+        'Start a new turn in a terminal job\'s conversation, using its recorded sessionId. agy (--conversation), opencode (-s) ' +
+        'and jules (its remote session) support this; copilot returns {status:"failed", errorKind:"unsupported"} without spawning ' +
+        'anything. For a jules job this never starts a new local job: it relays message/action to the existing remote session ' +
+        '(a RUNNING jules parent is accepted, not just a terminal one). mode defaults to the parent job\'s mode; switching ' +
+        'read -> write goes through the same worktree gate + lock as delegate() (not applicable to jules). ' +
+        'A parent that is not yet terminal/running (errorKind:"not_terminal") or has no sessionId (errorKind:"no_session") is also rejected.',
       inputSchema: {
         jobId: jobIdArg,
-        message: z.string().min(1).describe('The reply/follow-up prompt text.'),
+        message: z.string().min(1).optional().describe('The reply/follow-up prompt text. Required for every agent except a jules approve_plan.'),
         mode: modeEnum.optional(),
         timeoutS: z.number().int().positive().optional(),
         title: z.string().optional(),
+        taskType: taskTypeArg,
+        action: z
+          .enum(['message', 'approve_plan'])
+          .optional()
+          .describe(
+            'jules only: which remote call to make. Defaults to approve_plan when the session is AWAITING_PLAN_APPROVAL and no message was given, otherwise message.'
+          ),
+      },
+      outputSchema: DelegateResponse,
+      annotations: { readOnlyHint: false, openWorldHint: true },
+    },
+    guard(({ jobId, message, mode, timeoutS, title, taskType, action }) => jobReplyTool({ jobId, message, mode, timeoutS, title, taskType, action }))
+  )
+
+  server.registerTool(
+    'jules_delegate',
+    {
+      title: 'Delegate a task to Jules (Google\'s remote coding agent)',
+      description:
+        'Start a Jules session. The work runs on GOOGLE\'S OWN SERVERS, not locally — Jules clones the named GitHub source, ' +
+        'works in its own sandbox, and the result is a GITHUB PULL REQUEST (or a pushed branch), never a change to this cwd. ' +
+        'The Jules API is ALPHA and its shapes may change. Requires JULES_API_KEY in the environment and either cwd (to infer ' +
+        'the source/branch from the git remote) or an explicit source. Returns {jobId, status:"queued"} immediately; poll with ' +
+        'job_wait/job_status, read with job_result, and use job_reply to send a message or approve a plan. job_cancel on a jules ' +
+        'job ONLY stops this server\'s own polling — Jules exposes no cancel endpoint, so the remote session keeps running.',
+      inputSchema: {
+        task: z.string().min(1).describe('The prompt/task text.'),
+        cwd: z.string().min(1).optional().describe('Local checkout used to infer source/startingBranch from the git remote. Optional if source is given.'),
+        source: z.string().min(1).optional().describe('An explicit Jules source name, e.g. "sources/github/acme/widgets" (see jules_sources). Wins over cwd inference.'),
+        startingBranch: z.string().min(1).optional().describe('Branch Jules starts from. Defaults to the branch inferred from cwd, if any.'),
+        title: z.string().optional(),
+        requirePlanApproval: z.boolean().optional().default(false).describe('If true, Jules pauses for approval (job_reply action:"approve_plan") before coding.'),
+        automationMode: z.string().optional().default('AUTO_CREATE_PR').describe('Jules automationMode, e.g. AUTO_CREATE_PR.'),
+        timeoutS: z.number().int().positive().optional(),
         taskType: taskTypeArg,
       },
       outputSchema: DelegateResponse,
       annotations: { readOnlyHint: false, openWorldHint: true },
     },
-    guard(({ jobId, message, mode, timeoutS, title, taskType }) => jobReplyTool({ jobId, message, mode, timeoutS, title, taskType }))
+    guard(({ task, cwd, source, startingBranch, title, requirePlanApproval, automationMode, timeoutS, taskType }) =>
+      julesDelegateTool({ task, cwd, source, startingBranch, title, requirePlanApproval, automationMode, timeoutS, taskType })
+    )
+  )
+
+  server.registerTool(
+    'jules_sources',
+    {
+      title: 'List GitHub repos connected to the Jules account',
+      description:
+        'List the GitHub repositories connected to the configured Jules account (JULES_API_KEY). Repos are connected in the ' +
+        'Jules web UI (jules.google.com) and cannot be added through this API — use the returned source name with jules_delegate.',
+      inputSchema: {},
+      outputSchema: JulesSourcesResponse,
+      annotations: { readOnlyHint: true, openWorldHint: true, idempotentHint: true },
+    },
+    guard(() => julesSourcesTool({}))
   )
 
   server.registerTool(
