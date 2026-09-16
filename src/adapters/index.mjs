@@ -1,9 +1,10 @@
 import * as agy from './agy.mjs'
 import * as opencode from './opencode.mjs'
 import * as copilot from './copilot.mjs'
+import * as codex from './codex.mjs'
 import * as jules from '../cloud/jules/adapter.mjs'
 
-export const ADAPTERS = { agy, opencode, copilot, jules }
+export const ADAPTERS = { agy, opencode, copilot, codex, jules }
 
 export function adapterFor(agent) {
   const adapter = ADAPTERS[agent]
@@ -24,6 +25,9 @@ export function modelsArgv(agent, model) {
   if (agent === 'agy') return ['models']
   if (agent === 'opencode') return ['models', String(model).split('/')[0] || 'opencode', '--verbose']
   if (agent === 'copilot') return ['help', 'config']
+  // Codex has no model-list command; listModels() ignores stdout and returns
+  // the single CLI default, so a harmless argv keeps preflight L1 from failing.
+  if (agent === 'codex') return ['--version']
   // Jules is an API-only remote agent (see src/cloud/jules/*): there is no
   // local binary to spawn, so no argv exists for "list its models".
   if (agent === 'jules') throw new Error('jules has no CLI to list models from — it is an API-only remote agent')

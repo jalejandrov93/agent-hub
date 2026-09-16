@@ -31,7 +31,7 @@ import {
 } from './schemas.mjs'
 
 const VERSION = '2.1.0'
-const TESTED_VERSIONS = { agy: '1.2.1', opencode: '1.18.30', copilot: '1.0.31' }
+const TESTED_VERSIONS = { agy: '1.2.1', opencode: '1.18.30', copilot: '1.0.31', codex: '0.154.0' }
 
 const log = (...args) => console.error('[agent-hub]', ...args)
 
@@ -67,7 +67,7 @@ const guard = (handler, wrap = (payload) => payload) => async (args) => {
   }
 }
 
-const agentEnum = z.enum(['agy', 'opencode', 'copilot'])
+const agentEnum = z.enum(['agy', 'opencode', 'copilot', 'codex'])
 const modeEnum = z.enum(['read', 'write'])
 const jobIdArg = z.string().min(1).describe('A jobId returned by delegate().')
 const taskTypeArg = z
@@ -83,7 +83,7 @@ export function buildServer() {
     {
       title: 'Agent CLI health',
       description:
-        `Preflight (L0-L2, no ping) every agy/opencode/copilot model in the delegation map. ` +
+        `Preflight (L0-L2, no ping) every agy/opencode/copilot/codex model in the delegation map. ` +
         `Returns ready|degraded|unavailable with reason, latency, an advisory quota/dataPolicy badge.`,
       inputSchema: { refresh: z.boolean().optional().describe('Bypass the 15-minute cache and re-run the ladder.') },
       outputSchema: AgentsStatusResponse,
@@ -122,8 +122,9 @@ export function buildServer() {
     {
       title: 'Delegate a task to an agent CLI',
       description:
-        'Start a job on agy/opencode/copilot. Returns {jobId, status:"queued"} immediately; poll with job_wait ' +
-        'or job_status. Write mode requires cwd to be a secondary `git worktree add` checkout.',
+        'Start a job on agy/opencode/copilot/codex. Returns {jobId, status:"queued"} immediately; poll with job_wait ' +
+        'or job_status. Write mode requires cwd to be a secondary `git worktree add` checkout. Codex (model "default") ' +
+        'has a limited plan quota and is only a LAST fallback, never a primary.',
       inputSchema: {
         agent: agentEnum,
         model: z.string().min(1),
@@ -557,6 +558,7 @@ async function selftest() {
   checkCliVersion('agy', 'agy')
   checkCliVersion('opencode', 'opencode')
   checkCliVersion('copilot', 'copilot')
+  checkCliVersion('codex', 'codex')
 
   console.log('\nSelftest passed.')
 }

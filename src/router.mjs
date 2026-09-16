@@ -45,6 +45,8 @@ export const DELEGATION_MAP = {
       // reliable. See config.mjs MODEL_REGISTRY for accounts that do allow
       // an explicit id.
       { agent: 'copilot', model: 'auto', mode: 'read' },
+      // LAST resort only: codex's plan quota is limited (see config.mjs).
+      { agent: 'codex', model: 'default', mode: 'read' },
     ],
   },
   'second-opinion': {
@@ -73,6 +75,8 @@ export const DELEGATION_MAP = {
     chain: [
       { agent: 'opencode', model: 'deepseek/deepseek-v4-flash', mode: 'write' },
       { agent: 'copilot', model: 'auto', mode: 'write' },
+      // LAST resort only: codex's plan quota is limited (see config.mjs).
+      { agent: 'codex', model: 'default', mode: 'write' },
     ],
   },
   'implementation-with-repo-rules': {

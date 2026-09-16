@@ -37,9 +37,10 @@ export function delegateTool({ agent, model, task, cwd, mode = 'read', timeoutS,
 const TERMINAL_STATUSES = new Set(['succeeded', 'failed', 'canceled'])
 
 // job_reply supports resuming a conversation for these agents only: agy has
-// --conversation, opencode has -s/--session, jules has sendMessage/approvePlan
-// against its remote session. copilot has none of these.
-const REPLYABLE_AGENTS = new Set(['agy', 'opencode', 'jules'])
+// --conversation, opencode has -s/--session, codex has `exec resume <thread_id>`,
+// jules has sendMessage/approvePlan against its remote session. copilot has none
+// of these.
+const REPLYABLE_AGENTS = new Set(['agy', 'opencode', 'codex', 'jules'])
 
 /**
  * job_reply for a jules parent: unlike agy/opencode, this never spawns a new

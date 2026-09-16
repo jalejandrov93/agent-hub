@@ -148,7 +148,7 @@ export function startJob({
     }
   }
 
-  const argv = adapter.buildArgv({ model, prompt: effectiveTask, cwd, mode, title, variant: effectiveVariant, timeoutS: effectiveTimeoutS, sessionId })
+  const argv = adapter.buildArgv({ model, prompt: effectiveTask, cwd, mode, title, variant: effectiveVariant, timeoutS: effectiveTimeoutS, sessionId, env })
 
   // Snapshot right before spawning, AFTER the write gate/lock: a gate failure
   // must never be judged by a snapshot it never ran against.
