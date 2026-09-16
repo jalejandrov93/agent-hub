@@ -14,6 +14,15 @@ import {
   Learning,
   LearningInput,
   AgentStatusRow,
+  CloudAccountsResponse,
+  CloudAccountRow,
+  CloudSourcesResponse,
+  CloudSchedulesResponse,
+  CloudScheduleRow,
+  CloudSessionsResponse,
+  CloudActivitiesResponse,
+  CloudSourceCacheEntry,
+  JulesCheckResponse,
 } from "@shared"
 import type {
   StateResponseT,
@@ -23,6 +32,19 @@ import type {
   LearningT,
   LearningInputT,
   AgentRow,
+  CloudAccount,
+  CloudAccountInput,
+  CloudAccountPatch,
+  CloudAccountsResponseT,
+  CloudSourcesResponseT,
+  AccountPolicy,
+  CloudSchedule,
+  CloudScheduleInput,
+  CloudSchedulePatch,
+  CloudSchedulesResponseT,
+  CloudSessionsResponseT,
+  CloudActivitiesResponseT,
+  CloudSourceCacheEntryT,
 } from "./types"
 
 export class ApiError extends Error {
@@ -149,4 +171,64 @@ export function clearOverride(agent: string, model: string): Promise<unknown> {
 
 export function cancelJob(jobId: string): Promise<unknown> {
   return fetchJson(z.unknown(), `/api/jobs/${encodeURIComponent(jobId)}/cancel`, writeInit("POST"))
+}
+
+export function getAccounts(): Promise<CloudAccountsResponseT> {
+  return fetchJson(CloudAccountsResponse, "/api/accounts")
+}
+
+export function createAccount(data: CloudAccountInput): Promise<CloudAccount> {
+  return fetchJson(CloudAccountRow, "/api/accounts", writeInit("POST", data))
+}
+
+export function updateAccount(id: string, data: CloudAccountPatch): Promise<CloudAccount> {
+  return fetchJson(CloudAccountRow, `/api/accounts/${encodeURIComponent(id)}`, writeInit("PATCH", data))
+}
+
+export function deleteAccount(id: string): Promise<{ deleted: true }> {
+  return fetchJson(z.object({ deleted: z.literal(true) }), `/api/accounts/${encodeURIComponent(id)}`, writeInit("DELETE"))
+}
+
+export function setAccountPolicy(policy: AccountPolicy): Promise<{ policy: AccountPolicy }> {
+  return fetchJson(z.object({ policy: z.enum(["round_robin", "least_used", "priority"]) }), "/api/accounts/policy", writeInit("PUT", { policy }))
+}
+
+export function refreshAccountSources(id: string): Promise<CloudSourceCacheEntryT> {
+  return fetchJson(CloudSourceCacheEntry, `/api/accounts/${encodeURIComponent(id)}/refresh-sources`, writeInit("POST"))
+}
+
+export function getSources(): Promise<CloudSourcesResponseT> {
+  return fetchJson(CloudSourcesResponse, "/api/sources")
+}
+
+export function getSchedules(): Promise<CloudSchedulesResponseT> {
+  return fetchJson(CloudSchedulesResponse, "/api/schedules")
+}
+
+export function createSchedule(data: CloudScheduleInput): Promise<CloudSchedule> {
+  return fetchJson(CloudScheduleRow, "/api/schedules", writeInit("POST", data))
+}
+
+export function updateSchedule(id: string, data: CloudSchedulePatch): Promise<CloudSchedule> {
+  return fetchJson(CloudScheduleRow, `/api/schedules/${encodeURIComponent(id)}`, writeInit("PATCH", data))
+}
+
+export function deleteSchedule(id: string): Promise<{ deleted: true }> {
+  return fetchJson(z.object({ deleted: z.literal(true) }), `/api/schedules/${encodeURIComponent(id)}`, writeInit("DELETE"))
+}
+
+export function runScheduleNow(id: string): Promise<CloudSchedule> {
+  return fetchJson(CloudScheduleRow, `/api/schedules/${encodeURIComponent(id)}/run-now`, writeInit("POST"))
+}
+
+export function getCloudSessions(): Promise<CloudSessionsResponseT> {
+  return fetchJson(CloudSessionsResponse, "/api/cloud/sessions")
+}
+
+export function checkCloudJob(id: string) {
+  return fetchJson(JulesCheckResponse, `/api/cloud/jobs/${encodeURIComponent(id)}/check`, writeInit("POST"))
+}
+
+export function getCloudJobActivities(id: string): Promise<CloudActivitiesResponseT> {
+  return fetchJson(CloudActivitiesResponse, `/api/cloud/jobs/${encodeURIComponent(id)}/activities`)
 }

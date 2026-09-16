@@ -494,3 +494,59 @@ export const JulesScheduleRow = z
   .passthrough()
 
 export const JulesSchedulesResponse = z.object({ schedules: z.array(JulesScheduleRow) }).passthrough()
+
+/**
+ * Dashboard Cloud-view contracts (src/dashboard.mjs /api/accounts,
+ * /api/sources, /api/schedules, /api/cloud/*). These reuse the jules_* tool
+ * response shapes above where the route already delegates to that tool
+ * (accounts, schedules, sessions) rather than redeclaring them — the two are
+ * the same wire shape by construction.
+ */
+export const CloudAccountsResponse = JulesAccountsResponse
+export const CloudAccountRow = JulesAccountRow
+export const CloudSchedulesResponse = JulesSchedulesResponse
+export const CloudScheduleRow = JulesScheduleRow
+export const CloudSessionsResponse = JulesSessionsResponse
+export const CloudSessionRow = JulesSessionRow
+
+/** POST /api/accounts/:id/refresh-sources returns exactly this cache entry (src/cloud/sources.mjs refreshSources). */
+export const CloudSourceCacheEntry = z
+  .object({
+    fetchedAt: z.string(),
+    status: z.string(),
+    sources: z.array(
+      z
+        .object({ name: z.string(), owner: nullableString, repo: nullableString, defaultBranch: nullableString, branches: z.array(z.string()) })
+        .passthrough()
+    ),
+    error: z.string().optional(),
+  })
+  .passthrough()
+
+/**
+ * One row of GET /api/sources: a source name plus every account KNOWN to
+ * have it (from the per-account /sources cache — see src/cloud/sources.mjs),
+ * each with that account's cached status. A 'no_source_access' account is
+ * healthy; it simply cannot list sources (see cloud/sources.mjs).
+ */
+export const CloudSourceRow = z
+  .object({
+    name: z.string(),
+    owner: nullableString,
+    repo: nullableString,
+    defaultBranch: nullableString,
+    branches: z.array(z.string()),
+    accounts: z.array(z.object({ accountId: z.string(), status: nullableString }).passthrough()),
+  })
+  .passthrough()
+
+export const CloudSourceAccountSummary = z
+  .object({ accountId: z.string(), label: nullableString, status: nullableString, fetchedAt: nullableString })
+  .passthrough()
+
+export const CloudSourcesResponse = z
+  .object({ sources: z.array(CloudSourceRow), accounts: z.array(CloudSourceAccountSummary) })
+  .passthrough()
+
+/** GET /api/cloud/jobs/:id/activities: raw stdout lines, one per remote activity. */
+export const CloudActivitiesResponse = z.object({ activities: z.array(z.string()) }).passthrough()

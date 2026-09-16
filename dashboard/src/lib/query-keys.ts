@@ -5,4 +5,9 @@ export const qk = {
   metrics: ["metrics"] as const,
   proposals: ["proposals"] as const,
   learnings: ["learnings"] as const,
+  accounts: ["accounts"] as const,
+  sources: ["sources"] as const,
+  schedules: ["schedules"] as const,
+  sessions: ["sessions"] as const,
+  activities: (id: string) => ["activities", id] as const,
 }

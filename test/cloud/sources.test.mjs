@@ -3,7 +3,7 @@ import assert from 'node:assert/strict'
 import fs from 'node:fs'
 import path from 'node:path'
 import os from 'node:os'
-import { refreshSources, readSourcesCache, accountsForSource } from '../../src/cloud/sources.mjs'
+import { refreshSources, readSourcesCache, accountsForSource, normalizedSources, sourceNamesFromEntry } from '../../src/cloud/sources.mjs'
 
 function tmpHome() {
   return fs.mkdtempSync(path.join(os.tmpdir(), 'agent-hub-sources-'))
@@ -13,6 +13,12 @@ const envFor = (home) => ({ AGENT_HUB_HOME: home })
 
 function pageOf(names) {
   return { sources: names.map((name) => ({ name })) }
+}
+
+/** What refreshSources caches for a bare {name} source (no githubRepo), parsed from the name. */
+function cachedOf(name) {
+  const match = name.match(/^sources\/github\/([^/]+)\/(.+)$/)
+  return { name, owner: match ? match[1] : null, repo: match ? match[2] : null, defaultBranch: null, branches: [] }
 }
 
 test('readSourcesCache returns {} when the cache file does not exist yet', () => {
@@ -26,9 +32,45 @@ test('refreshSources stores status "ok" and the source names on a successful rea
   const entry = await refreshSources({ accountId: 'acct-a', env, client, apiKey: 'key-aaa' })
 
   assert.equal(entry.status, 'ok')
-  assert.deepEqual(entry.sources, ['sources/github/acme/widgets', 'sources/github/acme/gadgets'])
+  assert.deepEqual(entry.sources, [
+    cachedOf('sources/github/acme/widgets'),
+    cachedOf('sources/github/acme/gadgets'),
+  ])
   assert.ok(entry.fetchedAt)
   assert.deepEqual(readSourcesCache(env)['acct-a'], entry)
+})
+
+test('refreshSources caches owner/repo/defaultBranch/branches from githubRepo when present', async () => {
+  const env = envFor(tmpHome())
+  const client = {
+    listSources: async () => ({
+      sources: [
+        {
+          name: 'sources/github/acme/widgets',
+          githubRepo: {
+            owner: 'acme',
+            repo: 'widgets',
+            defaultBranch: { displayName: 'main' },
+            branches: [{ displayName: 'main' }, { displayName: 'dev' }],
+          },
+        },
+      ],
+    }),
+  }
+
+  const entry = await refreshSources({ accountId: 'acct-a', env, client, apiKey: 'key-aaa' })
+
+  assert.deepEqual(entry.sources, [
+    { name: 'sources/github/acme/widgets', owner: 'acme', repo: 'widgets', defaultBranch: 'main', branches: ['main', 'dev'] },
+  ])
+})
+
+test('normalizedSources upgrades a legacy plain-string cache entry to the richer shape', () => {
+  const legacyEntry = { status: 'ok', sources: ['sources/github/acme/widgets'] }
+  assert.deepEqual(normalizedSources(legacyEntry), [
+    { name: 'sources/github/acme/widgets', owner: null, repo: null, defaultBranch: null, branches: [] },
+  ])
+  assert.deepEqual(sourceNamesFromEntry(legacyEntry), ['sources/github/acme/widgets'])
 })
 
 test('a 401 from /sources is stored as no_source_access and does NOT throw — the account stays healthy', async () => {
