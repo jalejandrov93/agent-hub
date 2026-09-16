@@ -220,6 +220,14 @@ export function useDeleteLearningMutation() {
   })
 }
 
+export function useWorkGraphQuery() {
+  return useQuery({
+    queryKey: qk.workGraph,
+    queryFn: api.fetchWorkGraph,
+    refetchInterval: STATE_REFETCH_INTERVAL_MS,
+  })
+}
+
 export function useCreateLearningMutation() {
   const queryClient = useQueryClient()
   return useMutation({

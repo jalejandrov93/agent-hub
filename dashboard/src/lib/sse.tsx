@@ -19,6 +19,17 @@ export function keyForEventKind(kind: string): QueryKey {
   return qk.state
 }
 
+/**
+ * Every query key an event kind should invalidate. A job.* event also moves
+ * nodes/edges in the work graph (new job leaf, status change, waitsOn/
+ * continues edges), so it invalidates qk.workGraph in addition to qk.state.
+ */
+export function keysForEventKind(kind: string): QueryKey[] {
+  const primary = keyForEventKind(kind)
+  if (kind.startsWith("job.")) return [primary, qk.workGraph]
+  return [primary]
+}
+
 export type EventStreamState = {
   connection: Connection
   events: HubEventT[]
@@ -62,8 +73,9 @@ export function useEventStream(): EventStreamState {
         return next.length > MAX_EVENTS ? next.slice(next.length - MAX_EVENTS) : next
       })
 
-      const key = keyForEventKind(event.kind)
-      pendingKeys.current.set(JSON.stringify(key), key)
+      for (const key of keysForEventKind(event.kind)) {
+        pendingKeys.current.set(JSON.stringify(key), key)
+      }
       if (debounceTimer.current) clearTimeout(debounceTimer.current)
       debounceTimer.current = setTimeout(() => {
         for (const key of pendingKeys.current.values()) {

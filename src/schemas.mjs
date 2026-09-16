@@ -595,3 +595,65 @@ export const CloudSourcesResponse = z
 
 /** GET /api/cloud/jobs/:id/activities: raw stdout lines, one per remote activity. */
 export const CloudActivitiesResponse = z.object({ activities: z.array(z.string()) }).passthrough()
+
+/**
+ * GET /api/work-graph (src/workGraph.mjs): where each agent is working,
+ * derived only from git (repos/worktrees/branch ancestry) plus existing job
+ * records — zero new delegation parameters or job fields. Nodes and edges
+ * stay permissive (.passthrough()) like the rest of this file: each node
+ * kind carries different extra fields (a worktree node has branch/head, a
+ * job node has status/mode/..., a remoteBranch node has source/branch/...),
+ * and a discriminated union would only make a future field addition riskier.
+ */
+export const WorkGraphWorktree = z
+  .object({
+    path: z.string(),
+    branch: nullableString,
+    head: nullableString,
+    isMain: z.boolean(),
+    parentBranch: nullableString,
+  })
+  .passthrough()
+
+export const WorkGraphRepo = z
+  .object({
+    root: z.string(),
+    mainBranch: nullableString,
+    worktrees: z.array(WorkGraphWorktree),
+  })
+  .passthrough()
+
+export const WorkGraphNodeKind = z.enum(['repo', 'worktree', 'job', 'remoteBranch', 'outside'])
+
+export const WorkGraphNode = z
+  .object({
+    id: z.string(),
+    kind: WorkGraphNodeKind,
+    // Additive, kind-specific fields (passthrough already accepted these; declared
+    // here for a documented, typed contract): a removed worktree node
+    // (kind 'worktree') carries `removed`+`label`; a pending/unstarted Cloud
+    // node (kind 'remoteBranch') carries `label`, and the dashboard's own
+    // per-kind types add `pending`/`unstarted`.
+    removed: z.boolean().optional(),
+    label: nullableString,
+  })
+  .passthrough()
+
+export const WorkGraphEdgeKind = z.enum(['branchesFrom', 'runsIn', 'continues', 'waitsOn', 'remote'])
+
+export const WorkGraphEdge = z
+  .object({
+    kind: WorkGraphEdgeKind,
+    from: z.string(),
+    to: z.string(),
+  })
+  .passthrough()
+
+export const WorkGraphResponse = z
+  .object({
+    generatedAt: z.string(),
+    repos: z.array(WorkGraphRepo),
+    nodes: z.array(WorkGraphNode),
+    edges: z.array(WorkGraphEdge),
+  })
+  .passthrough()

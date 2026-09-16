@@ -10,4 +10,5 @@ export const qk = {
   schedules: ["schedules"] as const,
   sessions: ["sessions"] as const,
   activities: (id: string) => ["activities", id] as const,
+  workGraph: ["work-graph"] as const,
 }

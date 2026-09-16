@@ -24,6 +24,7 @@ import {
   CloudSourceCacheEntry,
   JulesCheckResponse,
   AgentsQuotaResponse,
+  WorkGraphResponse,
 } from "@shared"
 import type {
   StateResponseT,
@@ -47,6 +48,7 @@ import type {
   CloudSessionsResponseT,
   CloudActivitiesResponseT,
   CloudSourceCacheEntryT,
+  WorkGraphResponseT,
 } from "./types"
 
 export class ApiError extends Error {
@@ -237,4 +239,8 @@ export function checkCloudJob(id: string) {
 
 export function getCloudJobActivities(id: string): Promise<CloudActivitiesResponseT> {
   return fetchJson(CloudActivitiesResponse, `/api/cloud/jobs/${encodeURIComponent(id)}/activities`)
+}
+
+export function fetchWorkGraph(): Promise<WorkGraphResponseT> {
+  return fetchJson(WorkGraphResponse, "/api/work-graph")
 }

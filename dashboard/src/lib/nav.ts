@@ -9,6 +9,7 @@ import {
   CheckSquare,
   Settings,
   Cloud,
+  GitFork,
   type LucideIcon,
 } from "lucide-react"
 import type { NavBadgeKey } from "./badges"
@@ -21,6 +22,7 @@ export type RouteName =
   | "metrics"
   | "subagents"
   | "timeline"
+  | "work-graph"
   | "approvals"
   | "config"
   | "cloud"
@@ -51,6 +53,7 @@ export const NAV_GROUPS: NavGroup[] = [
     items: [
       { name: "subagents", label: "Claude subagents", path: "/subagents", icon: Users },
       { name: "timeline", label: "Timeline", path: "/timeline", icon: Activity, badge: "timeline" },
+      { name: "work-graph", label: "Work graph", path: "/work-graph", icon: GitFork },
     ],
   },
   {

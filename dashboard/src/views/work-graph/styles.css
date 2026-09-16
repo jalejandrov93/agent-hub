@@ -1,0 +1,90 @@
+/**
+ * Work graph motion: stroke-dashoffset flow along edges feeding a running
+ * job, a pulse/sonar ring on running job cards, and a staggered reveal on
+ * first mount driven by a `--step` CSS var (set inline per lane/job/edge,
+ * capped in layout.ts so a long history never produces a multi-second
+ * cascade). Ideas re-implemented from archify (MIT):
+ * https://github.com/tt-a1i/archify — no code copied, only the technique
+ * (animated flow + staggered reveal for a live agent graph).
+ *
+ * Every rule below is disabled under prefers-reduced-motion: the base state
+ * (no animation, full opacity, static stroke) is the default; animations are
+ * added only inside the media query that requires motion to be allowed.
+ */
+
+.wg-edge-flow,
+.wg-pulse-ring,
+.wg-reveal,
+.wg-breathe {
+  opacity: 1;
+  animation: none;
+}
+
+.wg-edge-dashed {
+  stroke-dasharray: 5 4;
+}
+
+@media (prefers-reduced-motion: no-preference) {
+  .wg-reveal {
+    opacity: 0;
+    animation: wg-reveal 260ms ease-out forwards;
+    animation-delay: calc(var(--step, 0) * 45ms);
+  }
+
+  .wg-edge-flow {
+    stroke-dasharray: 6 5;
+    animation: wg-flow 900ms linear infinite;
+  }
+
+  .wg-pulse-ring {
+    animation: wg-pulse 1.8s ease-out infinite;
+  }
+
+  /* Queued job dot: a subtle breathing opacity loop — alive but waiting, distinct from
+     the running pulse ring and the static succeeded/failed dots. */
+  .wg-breathe {
+    animation: wg-breathe 2.4s ease-in-out infinite;
+  }
+}
+
+@keyframes wg-breathe {
+  0%,
+  100% {
+    opacity: 1;
+  }
+  50% {
+    opacity: 0.35;
+  }
+}
+
+@keyframes wg-reveal {
+  from {
+    opacity: 0;
+    transform: translateY(2px);
+  }
+  to {
+    opacity: 1;
+    transform: translateY(0);
+  }
+}
+
+@keyframes wg-flow {
+  to {
+    stroke-dashoffset: -22;
+  }
+}
+
+@keyframes wg-pulse {
+  0% {
+    opacity: 0.55;
+    transform: scale(0.85);
+  }
+  70% {
+    opacity: 0;
+    transform: scale(1.8);
+  }
+  100% {
+    opacity: 0;
+    transform: scale(1.8);
+  }
+}

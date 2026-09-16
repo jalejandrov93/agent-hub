@@ -2,7 +2,7 @@ import { describe, expect, it, vi, beforeEach, afterEach } from "vitest"
 import { renderHook, waitFor } from "@testing-library/react"
 import { QueryClient, QueryClientProvider } from "@tanstack/react-query"
 import * as React from "react"
-import { keyForEventKind, useEventStream } from "./sse"
+import { keyForEventKind, keysForEventKind, useEventStream } from "./sse"
 import { qk } from "./query-keys"
 
 describe("keyForEventKind", () => {
@@ -22,6 +22,23 @@ describe("keyForEventKind", () => {
 
   it("falls back to the state key for an unknown kind", () => {
     expect(keyForEventKind("subagent.start")).toEqual(qk.state)
+  })
+})
+
+describe("keysForEventKind", () => {
+  it("invalidates both state and work-graph for job.* kinds", () => {
+    expect(keysForEventKind("job.started")).toEqual([qk.state, qk.workGraph])
+    expect(keysForEventKind("job.finished")).toEqual([qk.state, qk.workGraph])
+  })
+
+  it("invalidates only the state key for preflight (not job.*)", () => {
+    expect(keysForEventKind("preflight")).toEqual([qk.state])
+  })
+
+  it("invalidates only the primary key for non-job kinds", () => {
+    expect(keysForEventKind("proposal.created")).toEqual([qk.proposals])
+    expect(keysForEventKind("learning.proposed")).toEqual([qk.learnings])
+    expect(keysForEventKind("subagent.start")).toEqual([qk.state])
   })
 })
 
@@ -63,6 +80,26 @@ describe("useEventStream", () => {
     const client = new QueryClient()
     return <QueryClientProvider client={client}>{children}</QueryClientProvider>
   }
+
+  it("invalidates both the state and work-graph queries on a job.* event", async () => {
+    const client = new QueryClient()
+    const invalidateSpy = vi.spyOn(client, "invalidateQueries")
+    function localWrapper({ children }: { children: React.ReactNode }) {
+      return <QueryClientProvider client={client}>{children}</QueryClientProvider>
+    }
+
+    renderHook(() => useEventStream(), { wrapper: localWrapper })
+    const source = FakeEventSource.instances[0]
+    source.onmessage?.({
+      data: JSON.stringify({ ts: "2024-01-01T00:00:00.000Z", source: "hub", kind: "job.finished" }),
+    })
+
+    await waitFor(() => {
+      const keys = invalidateSpy.mock.calls.map((call) => call[0]?.queryKey)
+      expect(keys).toContainEqual(qk.state)
+      expect(keys).toContainEqual(qk.workGraph)
+    })
+  })
 
   it("goes live on open and appends messages to the event buffer", async () => {
     const { result } = renderHook(() => useEventStream(), { wrapper })

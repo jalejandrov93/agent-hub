@@ -30,6 +30,11 @@ import type {
   CloudSessionRow,
   CloudActivitiesResponse,
   CloudSourceCacheEntry,
+  WorkGraphResponse,
+  WorkGraphRepo,
+  WorkGraphWorktree,
+  WorkGraphNode,
+  WorkGraphEdge,
 } from "@shared"
 
 export type AgentRow = z.infer<typeof AgentStatusRow>
@@ -110,3 +115,67 @@ export type DerivedState = {
 }
 
 export type Connection = "connecting" | "live" | "reconnecting" | "offline"
+
+/**
+ * Work graph (GET /api/work-graph, src/workGraph.mjs). The wire types are
+ * permissive passthrough objects (one `kind` union, extra fields vary per
+ * kind) — these narrower per-kind shapes are what the view/layout code
+ * actually reads, and are safe to assume because the server always emits
+ * them (see workGraph.mjs's jobPayload/node builders), not re-validated here.
+ */
+export type WorkGraphResponseT = z.infer<typeof WorkGraphResponse>
+export type WorkGraphRepoT = z.infer<typeof WorkGraphRepo>
+export type WorkGraphWorktreeT = z.infer<typeof WorkGraphWorktree>
+export type WorkGraphNodeT = z.infer<typeof WorkGraphNode>
+export type WorkGraphEdgeT = z.infer<typeof WorkGraphEdge>
+
+export type WorkGraphRepoNode = { id: string; kind: "repo"; root: string; mainBranch: string | null }
+export type WorkGraphWorktreeNode = {
+  id: string
+  kind: "worktree"
+  repoRoot: string
+  path: string
+  branch: string | null
+  head: string | null
+  isMain: boolean
+  /** True for a job cwd that no longer matches any live worktree (removed after merge) — synthesized, not read from git. */
+  removed?: boolean
+  /** Display name for a removed worktree (its cwd's basename) — git can no longer tell us a branch for it. */
+  label?: string | null
+}
+export type WorkGraphJobNode = {
+  id: string
+  kind: "job"
+  jobId: string
+  agent: string
+  model: string
+  title: string | null
+  status: string
+  mode: string
+  taskType: string | null
+  createdAt: string
+  updatedAt: string
+  durationS: number | null
+  prUrl: string | null
+}
+export type WorkGraphRemoteBranchNode = {
+  id: string
+  kind: "remoteBranch"
+  source: string | null
+  /** Null until the Jules session has actually produced a branch (see `pending`). */
+  branch: string | null
+  startingBranch: string | null
+  prUrl: string | null
+  /** True for a placeholder node (no confirmed branch yet): either `from <startingBranch>` or, with `unstarted`, no remote info at all. */
+  pending?: boolean
+  unstarted?: boolean
+  /** Display label for a pending/unstarted node (e.g. "from main", "Unstarted") — branch is null so laneLabel can't derive it. */
+  label?: string | null
+}
+export type WorkGraphOutsideNode = { id: string; kind: "outside" }
+export type WorkGraphAnyNode =
+  | WorkGraphRepoNode
+  | WorkGraphWorktreeNode
+  | WorkGraphJobNode
+  | WorkGraphRemoteBranchNode
+  | WorkGraphOutsideNode
