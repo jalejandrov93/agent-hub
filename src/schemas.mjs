@@ -360,6 +360,8 @@ export const JulesCheckResponse = z
     sessionUrl: nullableString,
     lastMessage: nullableString,
     finalized: z.boolean(),
+    // True when a remote job wrongly marked failed/orphaned was reopened.
+    recovered: z.boolean().optional(),
     terminal: z.boolean(),
   })
   .passthrough()

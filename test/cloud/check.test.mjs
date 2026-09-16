@@ -130,6 +130,7 @@ test('a bare sessionId does ONE getSession and ONE listActivities, maps the fiel
     sessionUrl: 'https://jules.google.com/session/sess-1',
     lastMessage: 'All done',
     finalized: false,
+    recovered: false,
     terminal: true,
   })
   assert.equal(updates, 0)
@@ -298,6 +299,7 @@ test('checkRemoteSession never throws on an odd or empty session shape', async (
     sessionUrl: null,
     lastMessage: null,
     finalized: false,
+    recovered: false,
     terminal: false,
   })
 })
@@ -397,4 +399,82 @@ test('checkRemoteSession falls back to env.JULES_API_KEY for a job with no accou
   })
 
   assert.equal(client.calls.getSession[0].apiKey, 'key-env')
+})
+
+// Observed for real: an older agent-hub install, whose reconcileOrphans did not
+// know about remote jobs, marked three live Jules jobs failed/orphaned on its
+// next startup. A remote job has no local process, so it can never truly be
+// orphaned — and before this fix jules_check only finalized a job still
+// 'running', so a misclassified job could never recover its pull request.
+function orphanedJob() {
+  return {
+    jobId: 'j1',
+    status: 'failed',
+    errorKind: 'orphaned',
+    error: 'process not found on startup reconcile',
+    remote: { provider: 'jules', sessionId: 'sess-1' },
+  }
+}
+
+test('checkRemoteSession recovers a remote job wrongly marked orphaned and finalizes it when the session completed', async () => {
+  const store = memoryStore(orphanedJob())
+  const finished = []
+  const result = await checkRemoteSession({
+    jobId: 'j1',
+    env: { JULES_API_KEY: 'k' },
+    client: fakeClient({ session: completedSession(), activities: [] }),
+    adapter: julesAdapter,
+    readResultFn: store.readResultFn,
+    updateResultFn: store.updateResultFn,
+    appendEventFn: () => {},
+    finishRemoteJobFn: (args) => finished.push(args),
+  })
+
+  assert.equal(result.recovered, true)
+  assert.equal(result.finalized, true)
+  assert.equal(finished.length, 1)
+  assert.equal(finished[0].outcome, 'completed')
+  assert.equal(store.updates.some((p) => p.status === 'running' && p.errorKind === null), true)
+})
+
+test('checkRemoteSession reopens a wrongly orphaned remote job as running while its session is still in progress', async () => {
+  const store = memoryStore(orphanedJob())
+  const finished = []
+  const result = await checkRemoteSession({
+    jobId: 'j1',
+    env: { JULES_API_KEY: 'k' },
+    client: fakeClient({ session: completedSession({ state: 'IN_PROGRESS', outputs: [] }), activities: [] }),
+    adapter: julesAdapter,
+    readResultFn: store.readResultFn,
+    updateResultFn: store.updateResultFn,
+    appendEventFn: () => {},
+    finishRemoteJobFn: (args) => finished.push(args),
+  })
+
+  assert.equal(result.recovered, true)
+  assert.equal(result.finalized, false)
+  assert.equal(finished.length, 0)
+  assert.equal(store.record.status, 'running')
+  assert.equal(store.record.errorKind, null)
+})
+
+test('checkRemoteSession never reopens a remote job that failed for a real reason', async () => {
+  const store = memoryStore({ ...orphanedJob(), errorKind: 'auth', error: 'JULES_API_KEY rejected' })
+  const finished = []
+  const result = await checkRemoteSession({
+    jobId: 'j1',
+    env: { JULES_API_KEY: 'k' },
+    client: fakeClient({ session: completedSession(), activities: [] }),
+    adapter: julesAdapter,
+    readResultFn: store.readResultFn,
+    updateResultFn: store.updateResultFn,
+    appendEventFn: () => {},
+    finishRemoteJobFn: (args) => finished.push(args),
+  })
+
+  assert.equal(result.recovered, false)
+  assert.equal(result.finalized, false)
+  assert.equal(finished.length, 0)
+  assert.equal(store.record.status, 'failed')
+  assert.equal(store.record.errorKind, 'auth')
 })

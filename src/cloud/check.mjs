@@ -117,6 +117,7 @@ export async function checkRemoteSession({
   const terminal = adapter.isTerminalState(state)
 
   let finalized = false
+  let recovered = false
   if (resolvedJobId) {
     const current = readResultFn(resolvedJobId, env)
     const currentRemote = current?.remote ?? {}
@@ -136,7 +137,20 @@ export async function checkRemoteSession({
       env
     )
 
-    if (terminal && current?.status === 'running') {
+    // A remote job has no local process, so it can never genuinely be
+    // orphaned. An 'orphaned' failure on one was written by a reconcile that
+    // did not know about remote jobs — observed for real when an older
+    // agent-hub install marked three live Jules jobs failed on its next start.
+    // It is a misclassification to undo, not an outcome to respect: without
+    // this the job could never be finalized and its pull request would be lost.
+    // Any other failure kind is real and is left exactly as it is.
+    if (current?.status === 'failed' && current?.errorKind === 'orphaned') {
+      updateResultFn(resolvedJobId, { status: 'running', errorKind: null, error: null }, env)
+      recovered = true
+    }
+    const effectiveStatus = recovered ? 'running' : current?.status
+
+    if (terminal && effectiveStatus === 'running') {
       finishRemoteJobFn({
         jobId: resolvedJobId,
         outcome: state === 'COMPLETED' ? 'completed' : 'failed',
@@ -163,6 +177,7 @@ export async function checkRemoteSession({
     sessionUrl,
     lastMessage,
     finalized,
+    recovered,
     terminal,
   }
 }
