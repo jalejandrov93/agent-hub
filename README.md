@@ -77,6 +77,33 @@ it on demand. When `dashboard/dist/` is missing, the dashboard server answers
 Rebuilds are picked up without restarting the dashboard process (it re-reads
 the built `index.html` when its mtime changes).
 
+### Keep the checkout outside `~/.claude` (optional)
+
+Cloning straight into `~/.claude/mcp-servers/agent-hub` is the quickest path,
+but that directory then holds the whole development tree (`node_modules`,
+tests and the dashboard sources — a few hundred MB). To keep the checkout
+wherever you develop and leave only the runtime there:
+
+```bash
+git clone https://github.com/jalejandrov93/agent-hub.git ~/Desarrollo/agent-hub
+cd ~/Desarrollo/agent-hub
+npm install
+npm run install:local -- --restart
+```
+
+`npm run install:local` builds the dashboard, then copies `bin/`, `src/`,
+`skills/`, `systemd/` and `dashboard/dist/` into the install directory
+(`--target <dir>`, or `AGENT_HUB_INSTALL_DIR`, default
+`~/.claude/mcp-servers/agent-hub`), writes a runtime `package.json` with no
+workspaces, dev dependencies or `prepare` hook, installs production
+dependencies there, and records `INSTALL.json` with the version and commit it
+came from. `--restart` also restarts the dashboard unit. Because the install
+directory keeps its usual path, the MCP registration, the hooks, the systemd
+unit and the skill symlinks below need no changes; re-run the command after
+every `git pull` and restart Claude Code. Runtime state stays in
+`AGENT_HUB_HOME` and is never touched. `--skip-build` reuses the current
+`dashboard/dist/`.
+
 ### Register the MCP server
 
 Use an absolute `node` path, not a bare `node` / `#!/usr/bin/env node`: on a

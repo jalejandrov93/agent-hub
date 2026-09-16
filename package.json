@@ -1,6 +1,6 @@
 {
   "name": "agent-hub-mcp",
-  "version": "2.0.0",
+  "version": "2.1.0",
   "description": "Local MCP server that delegates bounded tasks to other agent CLIs (agy, opencode, copilot) with preflight checks, an event log and a local dashboard.",
   "license": "Apache-2.0",
   "author": "jalejandrov93",
@@ -44,7 +44,8 @@
     "test:live": "AGENT_HUB_LIVE=1 node --test test/live/*.test.mjs",
     "selftest": "node bin/agent-hub selftest",
     "build": "npm run -w dashboard build",
-    "prepare": "node scripts/build-dashboard.mjs"
+    "prepare": "node scripts/build-dashboard.mjs",
+    "install:local": "node scripts/install-local.mjs"
   },
   "engines": {
     "node": ">=20.19.0"

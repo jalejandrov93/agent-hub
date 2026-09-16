@@ -6,6 +6,19 @@ and this project adheres to [Semantic Versioning](https://semver.org/).
 
 ## [Unreleased]
 
+## [2.1.0] - 2026-09-16
+
+### Added
+
+- `npm run install:local` (`scripts/install-local.mjs`): build the dashboard
+  and install only the runtime (`bin/`, `src/`, `skills/`, `systemd/`,
+  `dashboard/dist/`, a workspace-free `package.json` and production
+  dependencies) into `~/.claude/mcp-servers/agent-hub` (or `--target` /
+  `AGENT_HUB_INSTALL_DIR`), so the git checkout can live anywhere. It writes
+  `INSTALL.json` with the installed version and commit, keeps the target's
+  `node_modules` between runs, never touches `AGENT_HUB_HOME`, and
+  `--restart` restarts the dashboard unit.
+
 ## [2.0.0] - 2026-09-15
 
 ### Added
@@ -212,7 +225,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/).
 - Local dashboard on `127.0.0.1:7777` with SSE timeline and job cancel.
 - `SubagentStart`/`SubagentStop` hook recorder for Claude Code subagents.
 
-[Unreleased]: https://github.com/jalejandrov93/agent-hub/compare/v2.0.0...HEAD
+[Unreleased]: https://github.com/jalejandrov93/agent-hub/compare/v2.1.0...HEAD
+[2.1.0]: https://github.com/jalejandrov93/agent-hub/compare/v2.0.0...v2.1.0
 [2.0.0]: https://github.com/jalejandrov93/agent-hub/compare/v1.2.0...v2.0.0
 [1.2.0]: https://github.com/jalejandrov93/agent-hub/compare/v1.1.0...v1.2.0
 [1.1.0]: https://github.com/jalejandrov93/agent-hub/compare/v1.0.0...v1.1.0
