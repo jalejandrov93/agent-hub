@@ -8,6 +8,7 @@ import {
   DEFAULT_REQUEST_TIMEOUT_MS,
   JulesApiError,
   listSources,
+  listSessions,
   createSession,
   getSession,
   listActivities,
@@ -59,6 +60,39 @@ test('listSources omits page params entirely when none are given', async () => {
   const { impl, calls } = fakeFetch(canned({ status: 200, body: { sources: [] } }))
   await listSources({ apiKey: 'k', fetchImpl: impl })
   assert.equal(calls[0].url, `${DEFAULT_BASE_URL}/sources`)
+})
+
+test('listSessions issues GET /sessions with the API key header and page params, and returns the decoded body', async () => {
+  const page = { sessions: [{ name: 'sessions/s1', state: 'COMPLETED' }] }
+  const { impl, calls } = fakeFetch(canned({ status: 200, body: page }))
+  const result = await listSessions({ apiKey: 'key-123', pageSize: 20, pageToken: 'tok-1', fetchImpl: impl })
+
+  assert.equal(calls.length, 1)
+  assert.equal(calls[0].url, `${DEFAULT_BASE_URL}/sessions?pageSize=20&pageToken=tok-1`)
+  assert.equal(calls[0].method, 'GET')
+  assert.equal(calls[0].headers['X-Goog-Api-Key'], 'key-123')
+  assert.deepEqual(result, page)
+})
+
+test('listSessions omits page params entirely when none are given', async () => {
+  const { impl, calls } = fakeFetch(canned({ status: 200, body: { sessions: [] } }))
+  await listSessions({ apiKey: 'k', fetchImpl: impl })
+  assert.equal(calls[0].url, `${DEFAULT_BASE_URL}/sessions`)
+})
+
+test('listSessions maps a non-2xx response to JulesApiError with the /sessions endpoint', async () => {
+  const body = readJson('error-429.json')
+  const { impl } = fakeFetch(canned({ status: 429, body }))
+  await assert.rejects(
+    () => listSessions({ apiKey: 'k', fetchImpl: impl }),
+    (error) => {
+      assert.ok(error instanceof JulesApiError)
+      assert.equal(error.status, 429)
+      assert.deepEqual(error.body, body)
+      assert.equal(error.endpoint, '/sessions')
+      return true
+    },
+  )
 })
 
 test('createSession POSTs the nested sourceContext shape and omits undefined optionals', async () => {
@@ -144,6 +178,16 @@ test('getSession normalises a resource name and a bare id to the same URL', asyn
   await getSession({ apiKey: 'k', sessionId: 'abc', fetchImpl: second.impl })
   assert.equal(first.calls[0].url, `${DEFAULT_BASE_URL}/sessions/abc`)
   assert.equal(second.calls[0].url, `${DEFAULT_BASE_URL}/sessions/abc`)
+})
+
+test('getSession percent-encodes a bare session id so it cannot reshape the request path', async () => {
+  const first = fakeFetch(canned({ status: 200, body: { state: 'IN_PROGRESS' } }))
+  await getSession({ apiKey: 'k', sessionId: 'abc/def?x=1', fetchImpl: first.impl })
+  assert.equal(first.calls[0].url, `${DEFAULT_BASE_URL}/sessions/abc%2Fdef%3Fx%3D1`)
+
+  const second = fakeFetch(canned({ status: 200, body: { state: 'IN_PROGRESS' } }))
+  await getSession({ apiKey: 'k', sessionId: 'sessions/../../etc/passwd', fetchImpl: second.impl })
+  assert.equal(second.calls[0].url, `${DEFAULT_BASE_URL}/sessions/..%2F..%2Fetc%2Fpasswd`)
 })
 
 test('listActivities GETs /sessions/{id}/activities with paging', async () => {

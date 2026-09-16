@@ -24,7 +24,10 @@ export class JulesApiError extends Error {
  */
 function bareSessionId(sessionId) {
   const value = String(sessionId ?? '')
-  return value.startsWith('sessions/') ? value.slice('sessions/'.length) : value
+  const bare = value.startsWith('sessions/') ? value.slice('sessions/'.length) : value
+  // A raw id is interpolated into the URL path; encoding it stops a value with
+  // '/', '?' or '..' from reshaping the request.
+  return encodeURIComponent(bare)
 }
 
 /**
@@ -92,6 +95,10 @@ async function request({ apiKey, method, path, query, body, baseUrl, fetchImpl, 
 
 export function listSources({ apiKey, pageSize, pageToken, baseUrl, fetchImpl, timeoutMs } = {}) {
   return request({ apiKey, method: 'GET', path: '/sources', query: { pageSize, pageToken }, baseUrl, fetchImpl, timeoutMs })
+}
+
+export function listSessions({ apiKey, pageSize, pageToken, baseUrl, fetchImpl, timeoutMs } = {}) {
+  return request({ apiKey, method: 'GET', path: '/sessions', query: { pageSize, pageToken }, baseUrl, fetchImpl, timeoutMs })
 }
 
 export function createSession({

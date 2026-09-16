@@ -1,5 +1,8 @@
 import { startRemoteJob as defaultStartRemoteJob } from '../cloud/runner.mjs'
+import { checkRemoteSession as defaultCheckRemoteSession } from '../cloud/check.mjs'
+import { listJobs as defaultListJobs } from '../jobstore.mjs'
 import * as defaultClient from '../cloud/jules/client.mjs'
+import * as defaultAdapter from '../cloud/jules/adapter.mjs'
 import { TASK_TYPES } from '../schemas.mjs'
 
 /** Reject a caller-supplied taskType that is not one of schemas.mjs TASK_TYPES (mirrors tools/jobs.mjs). */
@@ -50,6 +53,75 @@ export async function julesDelegateTool({
     env,
   })
   return { jobId: job.jobId, status: job.status, errorKind: job.errorKind ?? null }
+}
+
+/**
+ * One live read of a Jules session: the answer to "did it finish, what came
+ * out, and which branch is it on", with no local poller required. Thin wrapper
+ * so the transport stays in check.mjs (src/cloud/check.mjs) and this stays
+ * trivially mockable.
+ */
+export async function julesCheckTool({ jobId, sessionId, env = process.env, client = defaultClient, checkRemoteSessionFn = defaultCheckRemoteSession, ...rest } = {}) {
+  return checkRemoteSessionFn({ jobId, sessionId, env, client, ...rest })
+}
+
+// Matches the id runner.mjs persists in remote.sessionId (id first, then the
+// 'sessions/' resource name) so a local job can be matched back to a session.
+function sessionIdOf(session) {
+  if (typeof session?.id === 'string' && session.id.length > 0) return session.id
+  const name = typeof session?.name === 'string' ? session.name : ''
+  if (name.length > 0) return name.startsWith('sessions/') ? name.slice('sessions/'.length) : name
+  return null
+}
+
+/**
+ * List the account's Jules sessions straight from the API, newest first, and
+ * annotate each with the local jobId whose remote.sessionId matches (null when
+ * this machine has no record — a reinstall, or a session started elsewhere).
+ */
+export async function julesSessionsTool({ limit = 20, state, env = process.env, client = defaultClient, listJobsFn = defaultListJobs, adapter = defaultAdapter } = {}) {
+  const apiKey = env.JULES_API_KEY
+  if (!apiKey) throw new Error('JULES_API_KEY is missing or rejected')
+
+  let page
+  try {
+    page = await client.listSessions({ apiKey, pageSize: limit })
+  } catch (error) {
+    if (error?.status === 401 || error?.status === 403) throw new Error('JULES_API_KEY is missing or rejected')
+    throw error
+  }
+
+  const jobIdBySession = new Map()
+  try {
+    for (const job of listJobsFn(env)) {
+      const sessionId = job?.remote?.sessionId
+      if (sessionId && !jobIdBySession.has(sessionId)) jobIdBySession.set(sessionId, job.jobId)
+    }
+  } catch {
+    // No local job history (fresh install, unreadable runs dir): every session
+    // still comes back, just with jobId:null.
+  }
+
+  const sessions = Array.isArray(page?.sessions) ? page.sessions : []
+  return {
+    sessions: sessions
+      .filter((session) => (state ? adapter.sessionState(session) === state : true))
+      .map((session) => {
+        const sessionId = sessionIdOf(session)
+        return {
+          sessionId,
+          title: typeof session?.title === 'string' && session.title.length > 0 ? session.title : null,
+          state: adapter.sessionState(session),
+          prUrl: adapter.prUrlFromSession(session),
+          branch: adapter.branchFromSession(session),
+          sessionUrl: adapter.sessionUrl(session),
+          createTime: typeof session?.createTime === 'string' && session.createTime.length > 0 ? session.createTime : null,
+          jobId: sessionId ? jobIdBySession.get(sessionId) ?? null : null,
+        }
+      })
+      .sort((a, b) => (b.createTime ?? '').localeCompare(a.createTime ?? ''))
+      .slice(0, limit),
+  }
 }
 
 // The one shape the Jules alpha API pins down for a source is its resource

@@ -1,5 +1,5 @@
 import fs from 'node:fs'
-import { createJob as defaultCreateJob, updateResult as defaultUpdateResult, readResult as defaultReadResult, responsePath } from '../jobstore.mjs'
+import { createJob as defaultCreateJob, updateResult as defaultUpdateResult, readResult as defaultReadResult, listJobs as defaultListJobs, responsePath } from '../jobstore.mjs'
 import { appendEvent as defaultAppendEvent } from '../eventlog.mjs'
 import { resolveEffectiveTimeoutS as defaultResolveEffectiveTimeoutS } from '../timeouts.mjs'
 import { selectLearnings as defaultSelectLearnings, augmentTask as defaultAugmentTask } from '../learnings.mjs'
@@ -7,6 +7,8 @@ import { inferSourceFromCwd as defaultInferSourceFromCwd } from './gitContext.mj
 import { pollUntilTerminal as defaultPollUntilTerminal } from './poller.mjs'
 import * as defaultClient from './jules/client.mjs'
 import * as defaultAdapter from './jules/adapter.mjs'
+
+const TERMINAL_STATUSES = new Set(['succeeded', 'failed', 'canceled'])
 
 function summarize(text, max = 300) {
   if (!text) return ''
@@ -41,6 +43,7 @@ export function finishRemoteJob({
   summary,
   session,
   apiError,
+  timeoutMessage,
   adapter,
   env = process.env,
   readResultFn = defaultReadResult,
@@ -57,13 +60,21 @@ export function finishRemoteJob({
     // best-effort — a failed job still gets reported even if this write fails
   }
 
-  const remotePatch = {
-    remote: {
-      ...(current.remote ?? {}),
-      state: state ?? current.remote?.state ?? null,
-      prUrl: summary?.prUrl ?? adapter.prUrlFromSession(session) ?? current.remote?.prUrl ?? null,
-    },
+  const remote = { ...(current.remote ?? {}) }
+  if (state != null) {
+    remote.state = state
+  } else if (outcome !== 'completed') {
+    // A timeout or an error-budget failure carries no fresh state. Keeping the
+    // previous state would leave status:'failed' beside remote.state:
+    // 'IN_PROGRESS' — two fields claiming opposite things. Preserve it under
+    // lastKnownState and clear the live state so nothing says "still running".
+    remote.lastKnownState = current.remote?.state ?? null
+    remote.state = null
+  } else {
+    remote.state = current.remote?.state ?? null
   }
+  remote.prUrl = summary?.prUrl ?? adapter.prUrlFromSession(session) ?? current.remote?.prUrl ?? null
+  const remotePatch = { remote }
 
   if (outcome === 'completed') {
     updateResultFn(jobId, { status: 'succeeded', ...remotePatch }, env)
@@ -75,9 +86,15 @@ export function finishRemoteJob({
   }
 
   const timedOut = outcome === 'timeout'
-  const error = adapter.classifyError({ session, summary, timedOut, apiError }) ?? {
+  let error = adapter.classifyError({ session, summary, timedOut, apiError }) ?? {
     kind: 'crash',
     message: 'Jules session ended without a clear outcome',
+  }
+  // A resumed job that hits its local deadline is not a failed session: the
+  // remote session may simply still be running. Callers that know this pass a
+  // message saying so instead of the generic "session timed out" wording.
+  if (timedOut && typeof timeoutMessage === 'string' && timeoutMessage.length > 0) {
+    error = { ...error, message: timeoutMessage }
   }
   updateResultFn(jobId, { status: 'failed', errorKind: error.kind, error: error.message, ...remotePatch }, env)
   appendEventFn(
@@ -165,6 +182,11 @@ export function startRemoteJob({
   appendEventFn({ kind: 'job.queued', agent, model, cwd, title, jobId: job.jobId, taskType }, { env })
 
   const fail = (errorKind, message) => {
+    // A job canceled (or already finalized) while this async chain was in
+    // flight is final: neither the status nor a job.failed event may
+    // contradict it, so both the update and the event are skipped together.
+    const current = readResultFn(job.jobId, env)
+    if (TERMINAL_STATUSES.has(current.status)) return
     updateResultFn(job.jobId, { status: 'failed', errorKind, error: message }, env)
     appendEventFn({ kind: 'job.failed', agent, model, cwd, title, jobId: job.jobId, errorKind, taskType, summary: summarize(message) }, { env })
   }
@@ -222,6 +244,11 @@ export function startRemoteJob({
             source: resolvedSource,
             startingBranch: resolvedStartingBranch,
             state: adapter.sessionState(session),
+            // createSession can already return the PR and working branch; record
+            // them now so a machine that dies before the first poll still knows
+            // where Jules is working.
+            branch: adapter.branchFromSession?.(session) ?? null,
+            prUrl: adapter.prUrlFromSession?.(session) ?? null,
           },
         },
         env
@@ -249,4 +276,128 @@ export function startRemoteJob({
   })()
 
   return { job: readResultFn(job.jobId, env), done }
+}
+
+// Job ids being polled by resumeRemoteJobs in THIS process. A second call must
+// never start a duplicate poll for the same job.
+const resumingRemoteJobs = new Set()
+
+/**
+ * Re-adopt the remote (Jules) jobs left 'running' on disk after an MCP server
+ * restart. reconcileOrphans deliberately skips remote jobs (they have no local
+ * pid to judge), so without this a delegated cloud job would stay 'running'
+ * forever with nothing tracking it — defeating the point of delegating before
+ * walking away.
+ *
+ * Returns synchronously with a classification; any polling it starts continues
+ * in the background. It never throws and never rejects, so it is safe to call
+ * fire-and-forget at startup.
+ */
+export function resumeRemoteJobs({
+  env = process.env,
+  listJobsFn = defaultListJobs,
+  readResultFn = defaultReadResult,
+  updateResultFn = defaultUpdateResult,
+  appendEventFn = defaultAppendEvent,
+  client = defaultClient,
+  adapter = defaultAdapter,
+  pollFn = defaultPollUntilTerminal,
+  nowFn = Date.now,
+  finalTickTimeoutMs = 60000,
+} = {}) {
+  const resumed = []
+  const failed = []
+  const skipped = []
+
+  let jobs
+  try {
+    jobs = listJobsFn(env)
+  } catch {
+    return { resumed, failed, skipped }
+  }
+
+  const candidates = jobs.filter((job) => job?.status === 'running' && job?.remote?.sessionId)
+  const apiKey = env.JULES_API_KEY
+
+  for (const job of candidates) {
+    if (resumingRemoteJobs.has(job.jobId)) {
+      skipped.push(job.jobId)
+      continue
+    }
+
+    if (!apiKey || apiKey.length === 0) {
+      // Without a key the session can never be polled again: finish it as a
+      // failed(auth) job instead of leaving it 'running' with nothing tracking it.
+      try {
+        updateResultFn(
+          job.jobId,
+          { status: 'failed', errorKind: 'auth', error: 'JULES_API_KEY is not set — polling cannot resume without the key.' },
+          env
+        )
+        appendEventFn(
+          { kind: 'job.failed', agent: job.agent, model: job.model, cwd: job.cwd, title: job.title, jobId: job.jobId, errorKind: 'auth', taskType: job.taskType ?? null, summary: 'polling cannot resume without JULES_API_KEY' },
+          { env }
+        )
+      } catch {
+        // best-effort: still report it as failed so the caller knows it was not resumed
+      }
+      failed.push(job.jobId)
+      continue
+    }
+
+    const createdMs = Date.parse(job.createdAt)
+    const elapsedMs = Number.isFinite(createdMs) ? nowFn() - createdMs : 0
+    const remainingMs = (job.timeoutS ?? 0) * 1000 - elapsedMs
+
+    // The local deadline may already have elapsed while nothing was polling —
+    // exactly the delegate-then-walk-away case this feature exists for. Do NOT
+    // finalize on the local clock alone: the session very likely COMPLETED and
+    // opened a pull request while nobody watched. Give pollFn a small positive
+    // budget so it performs at least one getSession/listActivities round and
+    // reports the real outcome; only a genuinely still-running session falls
+    // through to a timeout, and then the message says so.
+    const deadlineElapsed = remainingMs <= 0
+    const pollTimeoutMs = deadlineElapsed ? finalTickTimeoutMs : remainingMs
+    const timeoutMessage = deadlineElapsed
+      ? 'Local deadline elapsed while the Jules session is still running remotely.'
+      : undefined
+
+    resumingRemoteJobs.add(job.jobId)
+    resumed.push(job.jobId)
+
+    ;(async () => {
+      try {
+        const pollResult = await pollFn({
+          jobId: job.jobId,
+          apiKey,
+          sessionId: job.remote.sessionId,
+          timeoutMs: pollTimeoutMs,
+          client,
+          adapter,
+          env,
+        })
+        finishRemoteJob({ jobId: job.jobId, ...pollResult, timeoutMessage, adapter, env, readResultFn, updateResultFn, appendEventFn })
+      } catch (error) {
+        // A rejected poll must not reject resumeRemoteJobs (nobody awaits it) —
+        // mark the job failed unless it is already terminal.
+        const message = String(error?.message ?? error)
+        try {
+          const current = readResultFn(job.jobId, env)
+          if (!TERMINAL_STATUSES.has(current.status)) {
+            updateResultFn(job.jobId, { status: 'failed', errorKind: 'crash', error: message }, env)
+            appendEventFn(
+              { kind: 'job.failed', agent: job.agent, model: job.model, cwd: job.cwd, title: job.title, jobId: job.jobId, errorKind: 'crash', taskType: job.taskType ?? null, summary: summarize(message) },
+              { env }
+            )
+          }
+        } catch {
+          // best-effort — a poll rejection must never take the process down
+        }
+      } finally {
+        resumingRemoteJobs.delete(job.jobId)
+      }
+    })()
+  }
+
+  return { resumed, failed, skipped }
 }

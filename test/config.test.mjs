@@ -15,9 +15,9 @@ test('opencode default timeout is 600s', () => {
   assert.equal(resolveTimeoutS('opencode', 'anything'), 600)
 })
 
-test('jules default timeout is 3600s — a remote session (plan -> code -> tests -> PR) runs far longer than a local CLI turn', () => {
-  assert.equal(DEFAULT_TIMEOUTS_S.jules.default, 3600)
-  assert.equal(resolveTimeoutS('jules', 'jules'), 3600)
+test('jules default timeout is 21600s (6h) — sized for an unattended session that is walked away from, not one watched in real time', () => {
+  assert.equal(DEFAULT_TIMEOUTS_S.jules.default, 21600)
+  assert.equal(resolveTimeoutS('jules', 'jules'), 21600)
 })
 
 test('KILL_GRACE_S is exported and used as the buffer past the adapter timeout before the hub hard-kills', () => {

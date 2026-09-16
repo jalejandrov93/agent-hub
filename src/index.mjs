@@ -8,7 +8,8 @@ import { paths } from './config.mjs'
 import { reconcileOrphans, listJobs, readResult, responsePath } from './jobstore.mjs'
 import { agentsStatusTool, routeTool, knownTaskTypes } from './tools/agents.mjs'
 import { delegateTool, jobWaitTool, jobStatusTool, jobResultTool, jobCancelTool, jobReplyTool } from './tools/jobs.mjs'
-import { julesDelegateTool, julesSourcesTool } from './tools/jules.mjs'
+import { julesDelegateTool, julesSourcesTool, julesCheckTool, julesSessionsTool } from './tools/jules.mjs'
+import { resumeRemoteJobs } from './cloud/runner.mjs'
 import { metricsTool } from './tools/insights.mjs'
 import { learningProposeTool } from './tools/learnings.mjs'
 import { scheduleStartupDiscovery } from './startup.mjs'
@@ -22,6 +23,8 @@ import {
   JobResultResponse,
   MetricsResponse,
   Learning,
+  JulesCheckResponse,
+  JulesSessionsResponse,
 } from './schemas.mjs'
 
 const VERSION = '2.1.0'
@@ -235,7 +238,10 @@ export function buildServer() {
         'The Jules API is ALPHA and its shapes may change. Requires JULES_API_KEY in the environment and either cwd (to infer ' +
         'the source/branch from the git remote) or an explicit source. Returns {jobId, status:"queued"} immediately; poll with ' +
         'job_wait/job_status, read with job_result, and use job_reply to send a message or approve a plan. job_cancel on a jules ' +
-        'job ONLY stops this server\'s own polling — Jules exposes no cancel endpoint, so the remote session keeps running.',
+        'job ONLY stops this server\'s own polling — Jules exposes no cancel endpoint, so the remote session keeps running. ' +
+        'The session keeps running even when THIS machine is off, so polling is never the only way to learn the outcome: pick the ' +
+        'session up later with jules_check (which reads the Jules API live and finalizes the local job), or jules_sessions first to ' +
+        'find a session this machine has no record of.',
       inputSchema: {
         task: z.string().min(1).describe('The prompt/task text.'),
         cwd: z.string().min(1).optional().describe('Local checkout used to infer source/startingBranch from the git remote. Optional if source is given.'),
@@ -267,6 +273,46 @@ export function buildServer() {
       annotations: { readOnlyHint: true, openWorldHint: true, idempotentHint: true },
     },
     guard(() => julesSourcesTool({}))
+  )
+
+  server.registerTool(
+    'jules_check',
+    {
+      title: 'Check a Jules session live',
+      description:
+        'Ask the Jules API RIGHT NOW what a session did — one getSession plus one activities read, with NO local poller involved. ' +
+        'This is the way to learn the outcome after a reboot or days later, when the MCP server and dashboard that started the ' +
+        'session are long gone. Pass jobId to read its remote.sessionId, persist the fresh state/PR url/branch and, when the session ' +
+        'is terminal while the job is still "running", finalize that job so job_result returns the real answer and the PR link. ' +
+        'Pass sessionId alone to inspect a session this machine has no record of. Recovery path for a Jules job whose session ' +
+        'finished while the machine was off: jules_sessions to find the session, then jules_check to finalize it locally.',
+      inputSchema: {
+        jobId: z.string().min(1).optional().describe('Local jobId whose remote.sessionId should be checked and, if terminal, finalized.'),
+        sessionId: z.string().min(1).optional().describe('A bare Jules session id, for a session this machine has no local job for.'),
+      },
+      outputSchema: JulesCheckResponse,
+      annotations: { readOnlyHint: false, openWorldHint: true, idempotentHint: true },
+    },
+    guard(({ jobId, sessionId }) => julesCheckTool({ jobId, sessionId }))
+  )
+
+  server.registerTool(
+    'jules_sessions',
+    {
+      title: 'List Jules sessions live from the API',
+      description:
+        'List the account\'s Jules sessions straight from the Jules API, newest first, WITHOUT any local polling or job history — this is ' +
+        'how you find out what a session did while the machine was off or after a reboot. Each row carries the session state, PR ' +
+        'url and working branch, plus jobId: the local job that started it, or null when this machine has no record (a reinstall, ' +
+        'or a session started elsewhere). Recovery path: find the session here, then jules_check to finalize its local job.',
+      inputSchema: {
+        limit: z.number().int().positive().max(100).optional().default(20).describe('Maximum number of sessions to return, newest first.'),
+        state: z.string().min(1).optional().describe('Only return sessions in this state, e.g. COMPLETED.'),
+      },
+      outputSchema: JulesSessionsResponse,
+      annotations: { readOnlyHint: true, openWorldHint: true, idempotentHint: true },
+    },
+    guard(({ limit, state }) => julesSessionsTool({ limit, state }))
   )
 
   server.registerTool(
@@ -499,6 +545,17 @@ async function main() {
 
   const changed = reconcileOrphans()
   if (changed.length > 0) log(`reconciled ${changed.length} orphaned job(s) on startup: ${changed.join(', ')}`)
+
+  // Fire-and-forget: resumeRemoteJobs returns synchronously and never throws,
+  // so a slow/unreachable Jules API can never block or crash the handshake.
+  try {
+    const { resumed, failed } = resumeRemoteJobs()
+    if (resumed.length > 0 || failed.length > 0) {
+      log(`resumed ${resumed.length} remote job(s) on startup; ${failed.length} could not be resumed`)
+    }
+  } catch (error) {
+    log('resumeRemoteJobs failed:', error?.message ?? error)
+  }
 
   // Fire-and-forget: never awaited, so a slow/missing CLI never delays the
   // stdio handshake below. See src/startup.mjs for the non-blocking wiring.

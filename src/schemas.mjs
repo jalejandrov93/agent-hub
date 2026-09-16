@@ -68,6 +68,7 @@ export const RemoteInfo = z
     source: nullableString,
     startingBranch: nullableString,
     state: nullableString,
+    branch: nullableString,
     prUrl: nullableString,
     activityCursor: nullableString,
     seenActivityIds: z.array(z.string()).optional(),
@@ -347,3 +348,34 @@ export const JobResultResponse = z
     errorKind: nullableString,
   })
   .passthrough()
+
+/** The live answer from jules_check: the session's current state plus what the local job did with it. */
+export const JulesCheckResponse = z
+  .object({
+    jobId: nullableString,
+    sessionId: z.string().nullable(),
+    state: z.string(),
+    prUrl: nullableString,
+    branch: nullableString,
+    sessionUrl: nullableString,
+    lastMessage: nullableString,
+    finalized: z.boolean(),
+    terminal: z.boolean(),
+  })
+  .passthrough()
+
+/** One row from jules_sessions: a live API session annotated with the local jobId that matches it. */
+export const JulesSessionRow = z
+  .object({
+    sessionId: z.string().nullable(),
+    title: nullableString,
+    state: z.string(),
+    prUrl: nullableString,
+    branch: nullableString,
+    sessionUrl: nullableString,
+    createTime: nullableString,
+    jobId: nullableString,
+  })
+  .passthrough()
+
+export const JulesSessionsResponse = z.object({ sessions: z.array(JulesSessionRow) }).passthrough()

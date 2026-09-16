@@ -1,3 +1,4 @@
+import crypto from 'node:crypto'
 import { appendStdout, updateResult, readResult } from '../jobstore.mjs'
 
 export const MIN_INTERVAL_MS = 5000
@@ -7,6 +8,24 @@ export const BACKOFF_FACTOR = 1.5
 // A misbehaving server that keeps returning the same nextPageToken must never
 // hang a poll tick, so one tick drains at most this many pages.
 const MAX_PAGES_PER_TICK = 20
+
+// Dedup memory is bounded: a long session must not grow result.json forever.
+const MAX_SEEN_ACTIVITY_IDS = 500
+
+/**
+ * A stable identity for an activity. Prefer the API's own name/id; when an
+ * activity carries neither, derive one from its content so it is still
+ * recognised on the next tick. Without this the activity is "new" forever,
+ * its line is re-appended to stdout.log every tick and the backoff never grows.
+ */
+function activityIdentity(activity) {
+  const explicit = activity?.name ?? activity?.id
+  if (explicit != null) return explicit
+  const createTime = typeof activity?.createTime === 'string' ? activity.createTime : ''
+  const description = typeof activity?.description === 'string' ? activity.description : ''
+  if (createTime.length > 0 || description.length > 0) return `anon:${createTime}:${description}`
+  return `anon:${crypto.createHash('sha1').update(JSON.stringify(activity ?? null)).digest('hex')}`
+}
 
 export function nextInterval(current, {
   sawNewActivity,
@@ -43,6 +62,7 @@ export async function pollOnce({
   nowFn = Date.now,
   appendStdoutFn = appendStdout,
   updateResultFn = updateResult,
+  readResultFn = readResult,
 }) {
   const session = await client.getSession({ apiKey, sessionId })
 
@@ -69,19 +89,16 @@ export async function pollOnce({
   const seenIds = Array.isArray(remote.seenActivityIds) ? remote.seenActivityIds : []
   const seen = new Set(seenIds)
   const seenActivityIds = [...seen]
-  // An activity with neither name nor id cannot be identified, so it can never
-  // be proven a duplicate — treat it as new rather than silently dropping it.
-  const newActivities = activities.filter((activity) => {
-    const id = activity?.name ?? activity?.id
-    return id == null || !seen.has(id)
-  })
+  const newActivities = activities.filter((activity) => !seen.has(activityIdentity(activity)))
   for (const activity of newActivities) {
-    const id = activity?.name ?? activity?.id
-    if (id != null && !seen.has(id)) {
+    const id = activityIdentity(activity)
+    if (!seen.has(id)) {
       seen.add(id)
       seenActivityIds.push(id)
     }
   }
+  // Keep only the most recent identities so the record stays bounded.
+  const cappedSeenActivityIds = seenActivityIds.slice(-MAX_SEEN_ACTIVITY_IDS)
 
   const summary = adapter.summarizeActivities(newActivities)
   const lines = Array.isArray(summary.lines) ? summary.lines : []
@@ -91,14 +108,33 @@ export async function pollOnce({
     appendStdoutFn(jobId, lines.join('\n') + '\n', env)
   }
 
+  // Re-read immediately before writing: the remote block may have changed
+  // during the network round trip (a job_reply, another process). Spread the
+  // CURRENT block and overwrite only the fields this tick owns, so a concurrent
+  // write is not silently reverted.
+  let currentRemote = remote
+  try {
+    currentRemote = readResultFn(jobId, env)?.remote ?? remote
+  } catch {
+    // no persisted record (unit tests) — fall back to the passed snapshot
+  }
+
+  // The working branch and PR url can surface on any tick, so they belong to
+  // this tick's field set. `?? currentRemote.x` keeps a value already learned
+  // on an earlier tick from being erased when a later tick reports null.
+  const branch = adapter.branchFromSession?.(session) ?? null
+  const prUrl = summary?.prUrl ?? adapter.prUrlFromSession?.(session) ?? null
+
   updateResultFn(
     jobId,
     {
       remote: {
-        ...remote,
+        ...currentRemote,
         state: session.state,
+        branch: branch ?? currentRemote.branch ?? null,
+        prUrl: prUrl ?? currentRemote.prUrl ?? null,
         activityCursor: lastToken,
-        seenActivityIds,
+        seenActivityIds: cappedSeenActivityIds,
         lastPolledAt: new Date(nowFn()).toISOString(),
       },
     },

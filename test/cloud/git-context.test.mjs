@@ -40,6 +40,12 @@ test('parseGitHubRemote tolerates a trailing slash, with or without .git', () =>
   assert.deepEqual(parseGitHubRemote('https://github.com/acme/widgets.git/'), { owner: 'acme', repo: 'widgets' })
 })
 
+test('parseGitHubRemote rejects a repo segment containing a slash', () => {
+  assert.equal(parseGitHubRemote('https://github.com/o/r/sub'), null)
+  assert.equal(parseGitHubRemote('git@github.com:o/r/sub.git'), null)
+  assert.equal(parseGitHubRemote('ssh://git@github.com/o/r/sub'), null)
+})
+
 test('parseGitHubRemote returns null for non-GitHub and malformed remotes', () => {
   assert.equal(parseGitHubRemote('git@gitlab.com:acme/widgets.git'), null)
   assert.equal(parseGitHubRemote('https://example.com/acme/widgets'), null)

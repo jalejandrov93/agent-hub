@@ -90,7 +90,11 @@ export const DEFAULT_TIMEOUTS_S = {
   // it routinely takes far longer than any local agent. Without this entry
   // resolveTimeoutS() would fall back to 240s (no table for 'jules'), which
   // would abandon a normal session via the poller's own timeoutMs deadline.
-  jules: { default: 3600 },
+  // 21600s (6h) is sized for an UNATTENDED session — the delegate-and-walk-away
+  // case this feature exists for — not a watched one; polling costs almost
+  // nothing once the backoff reaches its 60s ceiling. `timeoutS` on
+  // jules_delegate overrides this per call.
+  jules: { default: 21600 },
 }
 
 export function resolveTimeoutS(agent, model) {

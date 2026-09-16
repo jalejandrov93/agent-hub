@@ -13,6 +13,7 @@ import {
   summarizeActivities,
   sessionState,
   prUrlFromSession,
+  branchFromSession,
   sessionUrl,
   buildResponseText,
   classifyError,
@@ -222,6 +223,38 @@ test('prUrlFromSession returns null and never throws when outputs are missing or
   assert.equal(prUrlFromSession(null), null)
   assert.equal(prUrlFromSession({ outputs: 'nope' }), null)
   assert.equal(prUrlFromSession({ outputs: [{}] }), null)
+})
+
+test('branchFromSession probes each output shape in the documented order', () => {
+  assert.equal(branchFromSession({ outputs: [{ pullRequest: { headRef: 'jules/headref' } }] }), 'jules/headref')
+  assert.equal(branchFromSession({ outputs: [{ pullRequest: { head: { ref: 'jules/head-ref' } } }] }), 'jules/head-ref')
+  assert.equal(branchFromSession({ outputs: [{ pullRequest: { branch: 'jules/pr-branch' } }] }), 'jules/pr-branch')
+  assert.equal(branchFromSession({ outputs: [{ branch: 'jules/output-branch' }] }), 'jules/output-branch')
+  assert.equal(branchFromSession({ branch: 'jules/session-branch' }), 'jules/session-branch')
+  assert.equal(branchFromSession({ workingBranch: 'jules/working-branch' }), 'jules/working-branch')
+})
+
+test('branchFromSession prefers an earlier probe over a later one when both are present', () => {
+  const session = {
+    outputs: [{ pullRequest: { headRef: 'head-ref', head: { ref: 'nested-ref' }, branch: 'pr-branch' }, branch: 'output-branch' }],
+    branch: 'session-branch',
+    workingBranch: 'working-branch',
+  }
+  assert.equal(branchFromSession(session), 'head-ref')
+})
+
+test('branchFromSession accepts a single output object exactly like an array', () => {
+  assert.equal(branchFromSession({ outputs: { pullRequest: { headRef: 'solo' } } }), 'solo')
+})
+
+test('branchFromSession returns null when nothing matches or the shape is malformed', () => {
+  assert.equal(branchFromSession(readJson('session-completed.json')), null)
+  assert.equal(branchFromSession({ outputs: [{ pullRequest: { headRef: '' } }] }), null)
+  assert.equal(branchFromSession({ outputs: [{ pullRequest: {} }] }), null)
+  assert.equal(branchFromSession({ outputs: 'nope' }), null)
+  assert.equal(branchFromSession({ outputs: [{}] }), null)
+  assert.equal(branchFromSession({}), null)
+  assert.equal(branchFromSession(null), null)
 })
 
 test('sessionUrl returns the web url only when it is a non-empty string', () => {

@@ -40,7 +40,9 @@ test('the server boots over stdio and exposes the full tool set', async () => {
         'job_result',
         'job_status',
         'job_wait',
+        'jules_check',
         'jules_delegate',
+        'jules_sessions',
         'jules_sources',
         'learning_propose',
         'route',
@@ -125,6 +127,46 @@ test('jules_sources has no required input and explains sources are connected in 
     assert.deepEqual(julesSources.inputSchema.required ?? [], [])
     assert.match(julesSources.description, /web UI/i)
     assert.match(julesSources.description, /cannot be added/i)
+  } finally {
+    await close()
+  }
+})
+
+test('jules_check reads the Jules API live and documents the reboot/no-poller recovery path', async () => {
+  const { client, close } = await connect()
+  try {
+    const { tools } = await client.listTools()
+    const julesCheck = tools.find((t) => t.name === 'jules_check')
+    assert.ok(julesCheck, 'jules_check must be registered')
+    assert.deepEqual(julesCheck.inputSchema.required ?? [], [])
+    for (const phrase of [/Jules API/i, /reboot/i, /poll/i, /jules_sessions/]) {
+      assert.match(julesCheck.description, phrase, `jules_check.description should mention ${phrase}`)
+    }
+  } finally {
+    await close()
+  }
+})
+
+test('jules_sessions lists sessions live with no local polling and documents the recovery path', async () => {
+  const { client, close } = await connect()
+  try {
+    const { tools } = await client.listTools()
+    const julesSessions = tools.find((t) => t.name === 'jules_sessions')
+    assert.ok(julesSessions, 'jules_sessions must be registered')
+    for (const phrase of [/Jules API/i, /reboot/i, /poll/i, /jules_check/, /jobId/]) {
+      assert.match(julesSessions.description, phrase, `jules_sessions.description should mention ${phrase}`)
+    }
+  } finally {
+    await close()
+  }
+})
+
+test('jules_delegate mentions jules_check as the way to pick a session up later', async () => {
+  const { client, close } = await connect()
+  try {
+    const { tools } = await client.listTools()
+    const julesDelegate = tools.find((t) => t.name === 'jules_delegate')
+    assert.match(julesDelegate.description, /jules_check/)
   } finally {
     await close()
   }

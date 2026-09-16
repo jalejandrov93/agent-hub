@@ -442,3 +442,57 @@ test('job_reply lets mode/title/timeoutS be overridden explicitly (e.g. switchin
   assert.equal(capturedArgs.timeoutS, 900)
 })
 
+test('job_reply rejects a missing message for an agy parent instead of spawning with an undefined prompt', async () => {
+  const home = tmpHome()
+  const env = { AGENT_HUB_HOME: home }
+  const { updateResult } = await import('../src/jobstore.mjs?t=' + Date.now())
+  const { jobReplyTool } = await fresh(home)
+
+  const parent = createJob({ agent: 'agy', model: 'x', task: 't', cwd: '/tmp', title: 'p', mode: 'read', sessionId: 'sess-agy', env })
+  updateResult(parent.jobId, { status: 'succeeded' }, env)
+
+  let startJobCalls = 0
+  const startJobFn = () => {
+    startJobCalls++
+    return { job: { jobId: 'r', status: 'running', errorKind: null } }
+  }
+
+  const missing = await jobReplyTool({ jobId: parent.jobId, startJobFn })
+  assert.equal(missing.status, 'failed')
+  assert.equal(missing.errorKind, 'invalid')
+  assert.match(missing.error, /requires message text/)
+
+  const blank = await jobReplyTool({ jobId: parent.jobId, message: '   ', startJobFn })
+  assert.equal(blank.status, 'failed')
+  assert.equal(blank.errorKind, 'invalid')
+
+  assert.equal(startJobCalls, 0, 'a message-less reply must never spawn a local CLI')
+})
+
+test('job_reply rejects a missing message for an opencode parent instead of spawning with an undefined prompt', async () => {
+  const home = tmpHome()
+  const env = { AGENT_HUB_HOME: home }
+  const { updateResult } = await import('../src/jobstore.mjs?t=' + Date.now())
+  const { jobReplyTool } = await fresh(home)
+
+  const parent = createJob({ agent: 'opencode', model: 'x', task: 't', cwd: '/tmp', title: 'p', mode: 'read', sessionId: 'sess-oc', env })
+  updateResult(parent.jobId, { status: 'succeeded' }, env)
+
+  let startJobCalls = 0
+  const startJobFn = () => {
+    startJobCalls++
+    return { job: { jobId: 'r', status: 'running', errorKind: null } }
+  }
+
+  const missing = await jobReplyTool({ jobId: parent.jobId, startJobFn })
+  assert.equal(missing.status, 'failed')
+  assert.equal(missing.errorKind, 'invalid')
+  assert.match(missing.error, /requires message text/)
+
+  const blank = await jobReplyTool({ jobId: parent.jobId, message: '   ', startJobFn })
+  assert.equal(blank.status, 'failed')
+  assert.equal(blank.errorKind, 'invalid')
+
+  assert.equal(startJobCalls, 0, 'a message-less reply must never spawn a local CLI')
+})
+

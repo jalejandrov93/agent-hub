@@ -1,5 +1,8 @@
 import { test } from 'node:test'
 import assert from 'node:assert/strict'
+import fs from 'node:fs'
+import os from 'node:os'
+import path from 'node:path'
 import {
   MIN_INTERVAL_MS,
   MAX_INTERVAL_MS,
@@ -8,6 +11,11 @@ import {
   pollOnce,
   pollUntilTerminal,
 } from '../../src/cloud/poller.mjs'
+import { createJob, readResult, updateResult } from '../../src/jobstore.mjs'
+
+function tmpHome() {
+  return fs.mkdtempSync(path.join(os.tmpdir(), 'agent-hub-poller-'))
+}
 
 function makeAdapter({ terminal = [] } = {}) {
   return {
@@ -21,6 +29,8 @@ function makeAdapter({ terminal = [] } = {}) {
       failed: activities.some((a) => a.failed === true),
       failureMessage: activities.find((a) => a.failed)?.text ?? null,
     }),
+    branchFromSession: (session) => session?.branch ?? null,
+    prUrlFromSession: (session) => session?.prUrl ?? null,
   }
 }
 
@@ -229,6 +239,83 @@ test('pollOnce merges the previous remote block instead of replacing it', async 
   assert.equal(updates[0].patch.remote.state, 'RUNNING')
   assert.equal(updates[0].patch.remote.activityCursor, 'old-cursor')
   assert.equal(updates[0].patch.remote.lastPolledAt, new Date(1700000000000).toISOString())
+})
+
+test('pollOnce persists the branch and prUrl from the session when they become known', async () => {
+  const client = fakeClientForPollOnce({
+    session: { state: 'RUNNING', branch: 'jules/fix-paginate', prUrl: 'https://github.com/acme/widgets/pull/9' },
+    pages: [emptyPage()],
+  })
+  let patch
+  await pollOnce({
+    jobId: 'j1',
+    apiKey: 'k',
+    sessionId: 's1',
+    cursor: '',
+    remote: {},
+    client,
+    adapter: makeAdapter(),
+    nowFn: () => 0,
+    appendStdoutFn: () => {},
+    updateResultFn: (jobId, p) => {
+      patch = p
+    },
+  })
+  assert.equal(patch.remote.branch, 'jules/fix-paginate')
+  assert.equal(patch.remote.prUrl, 'https://github.com/acme/widgets/pull/9')
+})
+
+test('pollOnce takes the prUrl from the activity summary when the session does not carry it', async () => {
+  const client = fakeClientForPollOnce({ session: { state: 'RUNNING' }, pages: [emptyPage()] })
+  const adapter = {
+    ...makeAdapter(),
+    summarizeActivities: () => ({
+      lines: [],
+      prUrl: 'https://github.com/acme/widgets/pull/11',
+      changeSet: null,
+      lastAgentMessage: null,
+      completed: false,
+      failed: false,
+      failureMessage: null,
+    }),
+  }
+  let patch
+  await pollOnce({
+    jobId: 'j1',
+    apiKey: 'k',
+    sessionId: 's1',
+    cursor: '',
+    remote: {},
+    client,
+    adapter,
+    nowFn: () => 0,
+    appendStdoutFn: () => {},
+    updateResultFn: (jobId, p) => {
+      patch = p
+    },
+  })
+  assert.equal(patch.remote.prUrl, 'https://github.com/acme/widgets/pull/11')
+})
+
+test('pollOnce never overwrites a known branch or prUrl with null', async () => {
+  const client = fakeClientForPollOnce({ session: { state: 'RUNNING' }, pages: [emptyPage()] })
+  let patch
+  await pollOnce({
+    jobId: 'j1',
+    apiKey: 'k',
+    sessionId: 's1',
+    cursor: '',
+    remote: { branch: 'jules/known', prUrl: 'https://github.com/acme/widgets/pull/1' },
+    client,
+    adapter: makeAdapter(),
+    nowFn: () => 0,
+    appendStdoutFn: () => {},
+    updateResultFn: (jobId, p) => {
+      patch = p
+    },
+  })
+  assert.equal(patch.remote.branch, 'jules/known')
+  assert.equal(patch.remote.prUrl, 'https://github.com/acme/widgets/pull/1')
 })
 
 // 8. pollOnce with zero activities makes no appendStdout call and sets sawNewActivity false
@@ -579,4 +666,150 @@ test('pollOnce appends only the genuinely new activity on a later tick', async (
   assert.equal(second.sawNewActivity, true)
   assert.deepEqual(second.lines, ['two'])
   assert.deepEqual(second.summary.lines, ['two'])
+})
+
+// 20. a concurrent write to the remote block during the network round trip survives
+test('pollOnce re-reads the record and preserves a remote field written mid-tick', async () => {
+  const env = { AGENT_HUB_HOME: tmpHome() }
+  const job = createJob({ agent: 'jules', model: 'jules', task: 't', cwd: '/repo', title: 't', mode: 'write', env })
+  updateResult(job.jobId, { status: 'running', remote: { provider: 'jules', sessionId: 's1', state: 'IN_PROGRESS', activityCursor: '' } }, env)
+
+  const client = {
+    getSession: async () => ({ state: 'IN_PROGRESS' }),
+    listActivities: async () => {
+      // Simulate job_reply (or another process) touching result.remote while
+      // this tick is awaiting the network.
+      const current = readResult(job.jobId, env)
+      updateResult(job.jobId, { remote: { ...current.remote, note: 'written-mid-tick' } }, env)
+      return { activities: [], nextPageToken: '' }
+    },
+  }
+
+  await pollOnce({
+    jobId: job.jobId,
+    apiKey: 'k',
+    sessionId: 's1',
+    cursor: '',
+    remote: readResult(job.jobId, env).remote,
+    client,
+    adapter: makeAdapter(),
+    env,
+    appendStdoutFn: () => {},
+  })
+
+  const result = readResult(job.jobId, env)
+  assert.equal(result.remote.note, 'written-mid-tick')
+  assert.equal(result.remote.state, 'IN_PROGRESS')
+})
+
+// 21. an activity with neither name nor id must still dedupe on its content
+test('pollOnce dedupes an activity with neither name nor id via a content-derived identity', async () => {
+  const activity = { createTime: '2024-01-01T00:00:00Z', description: 'quiet tick', text: 'hello' }
+  const client = fakeClientForPollOnce({
+    pages: [
+      { activities: [activity], nextPageToken: '' },
+      { activities: [activity], nextPageToken: '' },
+    ],
+  })
+  const firstAppend = []
+  let firstPatch
+  const first = await pollOnce({
+    jobId: 'j1',
+    apiKey: 'k',
+    sessionId: 's1',
+    cursor: '',
+    remote: {},
+    client,
+    adapter: makeAdapter(),
+    nowFn: () => 0,
+    appendStdoutFn: (jobId, chunk) => firstAppend.push(chunk),
+    updateResultFn: (jobId, patch) => {
+      firstPatch = patch
+    },
+  })
+  const secondAppend = []
+  const second = await pollOnce({
+    jobId: 'j1',
+    apiKey: 'k',
+    sessionId: 's1',
+    cursor: '',
+    remote: firstPatch.remote,
+    client,
+    adapter: makeAdapter(),
+    nowFn: () => 0,
+    appendStdoutFn: (jobId, chunk) => secondAppend.push(chunk),
+    updateResultFn: () => {},
+  })
+
+  assert.equal(first.sawNewActivity, true)
+  assert.equal(firstAppend.length, 1)
+  assert.equal(second.sawNewActivity, false)
+  assert.deepEqual(secondAppend, [])
+})
+
+// 22. no name/id/createTime/description -> hash of the JSON is the stable identity
+test('pollOnce hashes the activity JSON when it has no name, id, createTime or description', async () => {
+  const activity = { weird: { nested: true } }
+  const client = fakeClientForPollOnce({
+    pages: [
+      { activities: [activity], nextPageToken: '' },
+      { activities: [activity], nextPageToken: '' },
+    ],
+  })
+  let firstPatch
+  const first = await pollOnce({
+    jobId: 'j1',
+    apiKey: 'k',
+    sessionId: 's1',
+    cursor: '',
+    remote: {},
+    client,
+    adapter: makeAdapter(),
+    nowFn: () => 0,
+    appendStdoutFn: () => {},
+    updateResultFn: (jobId, patch) => {
+      firstPatch = patch
+    },
+  })
+  const secondAppend = []
+  const second = await pollOnce({
+    jobId: 'j1',
+    apiKey: 'k',
+    sessionId: 's1',
+    cursor: '',
+    remote: firstPatch.remote,
+    client,
+    adapter: makeAdapter(),
+    nowFn: () => 0,
+    appendStdoutFn: (jobId, chunk) => secondAppend.push(chunk),
+    updateResultFn: () => {},
+  })
+
+  assert.equal(first.sawNewActivity, true)
+  assert.equal(second.sawNewActivity, false)
+  assert.deepEqual(secondAppend, [])
+})
+
+// 23. seenActivityIds cannot grow without bound
+test('pollOnce caps seenActivityIds at the most recent 500 entries', async () => {
+  const existing = Array.from({ length: 600 }, (_, i) => `id-${i}`)
+  const client = fakeClientForPollOnce({ pages: [emptyPage()] })
+  let patch
+  await pollOnce({
+    jobId: 'j1',
+    apiKey: 'k',
+    sessionId: 's1',
+    cursor: '',
+    remote: { seenActivityIds: existing },
+    client,
+    adapter: makeAdapter(),
+    nowFn: () => 0,
+    appendStdoutFn: () => {},
+    updateResultFn: (jobId, p) => {
+      patch = p
+    },
+  })
+  assert.equal(patch.remote.seenActivityIds.length, 500)
+  assert.equal(patch.remote.seenActivityIds[0], 'id-100')
+  assert.equal(patch.remote.seenActivityIds[499], 'id-599')
 })

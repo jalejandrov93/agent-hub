@@ -55,6 +55,29 @@ function firstOutputUrl(outputs) {
   return null
 }
 
+/**
+ * The session's working branch is nested differently across alpha shapes. Probe
+ * the field names in priority order (an earlier field wins even if it lives on
+ * a later output), reusing outputItems so a single object and an array behave
+ * identically to the url traversal.
+ */
+function firstOutputBranch(outputs) {
+  const items = outputItems(outputs).filter(isPlainObject)
+  const probes = [
+    (item) => item.pullRequest?.headRef,
+    (item) => item.pullRequest?.head?.ref,
+    (item) => item.pullRequest?.branch,
+    (item) => item.branch,
+  ]
+  for (const probe of probes) {
+    for (const item of items) {
+      const value = probe(item)
+      if (typeof value === 'string' && value.length > 0) return value
+    }
+  }
+  return null
+}
+
 function messageOf(container) {
   return typeof container?.message === 'string' ? container.message : ''
 }
@@ -169,6 +192,15 @@ export function sessionState(session) {
 
 export function prUrlFromSession(session) {
   return firstOutputUrl(session?.outputs)
+}
+
+export function branchFromSession(session) {
+  const fromOutputs = firstOutputBranch(session?.outputs)
+  if (fromOutputs) return fromOutputs
+  for (const candidate of [session?.branch, session?.workingBranch]) {
+    if (typeof candidate === 'string' && candidate.length > 0) return candidate
+  }
+  return null
 }
 
 export function sessionUrl(session) {

@@ -139,6 +139,22 @@ export async function jobReplyTool({
     return julesReply({ jobId, parent, message, action, client, env, turnDepth, warning })
   }
 
+  // Only a jules approve_plan may omit message text. For every other agent the
+  // reply IS the message: without this check a schema-legal job_reply({jobId})
+  // would reach startJobFn with task: undefined and spawn the CLI with the
+  // literal prompt "undefined".
+  if (!message || String(message).trim().length === 0) {
+    return {
+      jobId: null,
+      status: 'failed',
+      parentJobId: jobId,
+      errorKind: 'invalid',
+      error: 'job_reply requires message text',
+      turnDepth,
+      warning,
+    }
+  }
+
   if (!parent.sessionId) {
     return { jobId: null, status: 'failed', parentJobId: jobId, errorKind: 'no_session', turnDepth, warning }
   }

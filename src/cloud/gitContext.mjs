@@ -11,10 +11,12 @@ export function parseGitHubRemote(url) {
   const trimmed = url.trim().replace(/\/+$/, '')
   if (trimmed.length === 0) return null
 
-  const scp = trimmed.match(/^git@github\.com:([^/]+)\/(.+?)(?:\.git)?$/)
+  // The repo segment excludes '/': a URL like github.com/o/r/sub is not a valid
+  // two-part GitHub remote and must not become source sources/github/o/r/sub.
+  const scp = trimmed.match(/^git@github\.com:([^/]+)\/([^/]+?)(?:\.git)?$/)
   if (scp) return { owner: scp[1], repo: scp[2] }
 
-  const scheme = trimmed.match(/^(?:https?|ssh):\/\/(?:[^@/]+@)?github\.com\/([^/]+)\/(.+?)(?:\.git)?$/)
+  const scheme = trimmed.match(/^(?:https?|ssh):\/\/(?:[^@/]+@)?github\.com\/([^/]+)\/([^/]+?)(?:\.git)?$/)
   if (scheme) return { owner: scheme[1], repo: scheme[2] }
 
   return null

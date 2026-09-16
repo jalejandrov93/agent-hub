@@ -120,6 +120,31 @@ test('a failing read job (CANCELED) ends up failed with errorKind and a job.fail
   assert.ok(events.some((e) => e.jobId === job.jobId && e.kind === 'job.failed'))
 })
 
+test('startJob never passes JULES_API_KEY to the spawned local CLI, but keeps the rest of the environment', async () => {
+  const home = tmpHome()
+  const { startJob } = await freshModules(home)
+  const adapters = { fake: fakeAdapter(SUCCESS_SCRIPT) }
+
+  const previousKey = process.env.JULES_API_KEY
+  process.env.JULES_API_KEY = 'super-secret-key'
+  let capturedOptions = null
+  const spawn = (cmd, argv, options) => {
+    capturedOptions = options
+    return fakeChild()
+  }
+  try {
+    const { done } = startJob({ agent: 'fake', model: 'x', task: 't', cwd: '/tmp', mode: 'read', adapterFor: (a) => adapters[a], spawn })
+    await done
+  } finally {
+    if (previousKey === undefined) delete process.env.JULES_API_KEY
+    else process.env.JULES_API_KEY = previousKey
+  }
+
+  assert.ok(capturedOptions.env, 'spawn must receive an explicit env')
+  assert.equal(capturedOptions.env.JULES_API_KEY, undefined)
+  assert.equal(capturedOptions.env.PATH, process.env.PATH)
+})
+
 test('a write-mode job in a primary worktree is rejected before spawning anything', async () => {
   const home = tmpHome()
   const { primary } = makeRepoWithSecondaryWorktree()

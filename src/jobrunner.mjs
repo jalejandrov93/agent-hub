@@ -154,9 +154,15 @@ export function startJob({
   // must never be judged by a snapshot it never ran against.
   const snapshot = mode === 'read' ? takeSnapshotFn(cwd) : null
 
+  // The local CLIs are third-party processes outside our control, and
+  // JULES_API_KEY is a credential agent-hub itself introduced: it must not
+  // travel to them. Nothing else is filtered.
+  const childEnv = { ...process.env }
+  delete childEnv.JULES_API_KEY
+
   let child
   try {
-    child = spawn(adapter.cmd, argv, { cwd })
+    child = spawn(adapter.cmd, argv, { cwd, env: childEnv })
   } catch (error) {
     updateResult(job.jobId, { status: 'failed', errorKind: 'crash', error: String(error?.message ?? error) }, env)
     appendEvent({ kind: 'job.failed', agent, model, cwd, title, jobId: job.jobId, errorKind: 'crash', taskType, summary: String(error?.message ?? error) }, { env })
