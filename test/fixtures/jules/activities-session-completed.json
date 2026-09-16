@@ -1,0 +1,24 @@
+{
+  "activities": [
+    {
+      "name": "sessions/sess-completed-1/activities/a6",
+      "id": "a6",
+      "createTime": "2025-05-21T13:35:00Z",
+      "originator": "agent",
+      "sessionCompleted": {},
+      "artifacts": [
+        {
+          "changeSet": {
+            "source": "sources/github/acme/widgets",
+            "gitPatch": {
+              "unidiffPatch": "diff --git a/src/paginate.mjs b/src/paginate.mjs\n+const limit = Math.max(0, limit)\n",
+              "baseCommitId": "abc123def456",
+              "suggestedCommitMessage": "Optimize queries"
+            }
+          }
+        }
+      ]
+    }
+  ],
+  "nextPageToken": null
+}

@@ -15,6 +15,11 @@ test('opencode default timeout is 600s', () => {
   assert.equal(resolveTimeoutS('opencode', 'anything'), 600)
 })
 
+test('jules default timeout is 21600s (6h) — sized for an unattended session that is walked away from, not one watched in real time', () => {
+  assert.equal(DEFAULT_TIMEOUTS_S.jules.default, 21600)
+  assert.equal(resolveTimeoutS('jules', 'jules'), 21600)
+})
+
 test('KILL_GRACE_S is exported and used as the buffer past the adapter timeout before the hub hard-kills', () => {
   assert.equal(KILL_GRACE_S, 30)
 })
@@ -45,4 +50,10 @@ test('paths() exposes discoveryFile and overridesFile under the state home', () 
   const p = paths({ AGENT_HUB_HOME: '/tmp/fake-home' })
   assert.equal(p.discoveryFile, '/tmp/fake-home/discovery.json')
   assert.equal(p.overridesFile, '/tmp/fake-home/overrides.json')
+})
+
+test('paths() exposes accountsFile and sourcesCacheFile under the state home', () => {
+  const p = paths({ AGENT_HUB_HOME: '/tmp/fake-home' })
+  assert.equal(p.accountsFile, '/tmp/fake-home/accounts.json')
+  assert.equal(p.sourcesCacheFile, '/tmp/fake-home/sources-cache.json')
 })

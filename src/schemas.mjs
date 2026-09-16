@@ -52,6 +52,30 @@ export const JobStatus = z.enum(['queued', 'running', 'succeeded', 'failed', 'ca
 export const AgentStatus = z.enum(['ready', 'degraded', 'unavailable', 'skipped'])
 export const TimeoutSource = z.enum(['explicit', 'adaptive', 'default'])
 
+/**
+ * A remote agent's session tracking block (currently only Jules). Attached to
+ * JobRecord as an optional field so a local job's record is byte-for-byte
+ * unchanged. Only provider and sessionId are required — everything else is
+ * either not known yet (state, prUrl before the first poll) or genuinely
+ * optional (accountId — accounts are a later phase).
+ */
+export const RemoteInfo = z
+  .object({
+    provider: z.string(),
+    accountId: nullableString,
+    sessionId: z.string(),
+    sessionUrl: nullableString,
+    source: nullableString,
+    startingBranch: nullableString,
+    state: nullableString,
+    branch: nullableString,
+    prUrl: nullableString,
+    activityCursor: nullableString,
+    seenActivityIds: z.array(z.string()).optional(),
+    lastPolledAt: nullableString,
+  })
+  .passthrough()
+
 export const JobRecord = z
   .object({
     jobId: z.string(),
@@ -77,6 +101,7 @@ export const JobRecord = z
     turnDepth: z.number().int().nonnegative().optional(),
     timeoutSource: TimeoutSource.optional(),
     learningIds: z.array(z.string()).optional(),
+    remote: RemoteInfo.optional(),
   })
   .passthrough()
 
@@ -323,3 +348,136 @@ export const JobResultResponse = z
     errorKind: nullableString,
   })
   .passthrough()
+
+/** The live answer from jules_check: the session's current state plus what the local job did with it. */
+export const JulesCheckResponse = z
+  .object({
+    jobId: nullableString,
+    sessionId: z.string().nullable(),
+    state: z.string(),
+    prUrl: nullableString,
+    branch: nullableString,
+    sessionUrl: nullableString,
+    lastMessage: nullableString,
+    finalized: z.boolean(),
+    // True when a remote job wrongly marked failed/orphaned was reopened.
+    recovered: z.boolean().optional(),
+    terminal: z.boolean(),
+  })
+  .passthrough()
+
+/** One row from jules_sessions: a live API session annotated with the local jobId that matches it. */
+export const JulesSessionRow = z
+  .object({
+    sessionId: z.string().nullable(),
+    title: nullableString,
+    state: z.string(),
+    prUrl: nullableString,
+    branch: nullableString,
+    sessionUrl: nullableString,
+    createTime: nullableString,
+    jobId: nullableString,
+  })
+  .passthrough()
+
+export const JulesSessionsResponse = z.object({ sessions: z.array(JulesSessionRow) }).passthrough()
+
+/**
+ * One row from jules_sources: a GitHub repo connected to the Jules account.
+ * `defaultBranch` and `branches` come from githubRepo.defaultBranch.displayName
+ * and githubRepo.branches[].displayName — what a caller needs to pick a
+ * startingBranch for jules_delegate.
+ */
+export const JulesSourceRow = z
+  .object({
+    name: nullableString,
+    owner: nullableString,
+    repo: nullableString,
+    defaultBranch: nullableString,
+    branches: z.array(z.string()),
+  })
+  .passthrough()
+
+export const JulesSourcesResponse = z
+  .object({
+    sources: z.array(JulesSourceRow),
+    // Present only when the read was scoped to a configured account. A
+    // noSourceAccess row means /sources refused this account (401) — it is NOT
+    // a rejected key, so `note` explains the web-UI connection step.
+    accountId: nullableString,
+    noSourceAccess: z.boolean().optional(),
+    note: nullableString,
+  })
+  .passthrough()
+
+/** Rolling quota usage for one account, computed from local job history. */
+export const JulesAccountUsage = z
+  .object({ running: z.number().int().nonnegative(), last24h: z.number().int().nonnegative() })
+  .passthrough()
+
+/**
+ * A MASKED Jules account: keyPresent/keyLast4 replace the raw apiKey, which
+ * never leaves src/accounts.mjs. `usage` and `sourcesStatus` are joined in by
+ * jules_accounts from job history and the per-account /sources cache.
+ */
+export const JulesAccountRow = z
+  .object({
+    id: z.string(),
+    label: nullableString,
+    enabled: z.boolean(),
+    priority: z.number(),
+    dailyLimit: z.number(),
+    concurrentLimit: z.number(),
+    lastUsedAt: nullableString,
+    createdAt: z.string(),
+    updatedAt: z.string(),
+    keyPresent: z.boolean(),
+    keyLast4: nullableString,
+    usage: JulesAccountUsage.optional(),
+    sourcesStatus: nullableString,
+    sourcesFetchedAt: nullableString,
+  })
+  .passthrough()
+
+export const JulesAccountsResponse = z
+  .object({ policy: z.string(), accounts: z.array(JulesAccountRow) })
+  .passthrough()
+
+/**
+ * One recurring Jules task (schedules.json). `schedule` is an interval or a
+ * daily time; `lastResult` is a compact view of the job the schedule started
+ * last time (null when it has never run, or its record was pruned).
+ */
+export const JulesScheduleResult = z
+  .object({
+    jobId: z.string(),
+    status: z.string(),
+    errorKind: nullableString,
+    sessionId: nullableString,
+    prUrl: nullableString,
+  })
+  .passthrough()
+
+export const JulesScheduleRow = z
+  .object({
+    id: z.string(),
+    label: nullableString,
+    enabled: z.boolean(),
+    schedule: z.object({ kind: z.string() }).passthrough(),
+    prompt: z.string(),
+    source: z.string(),
+    startingBranch: nullableString,
+    automationMode: nullableString,
+    requirePlanApproval: z.boolean(),
+    accountId: nullableString,
+    lastRunAt: nullableString,
+    lastJobId: nullableString,
+    lastStatus: nullableString,
+    nextRunAt: nullableString,
+    createdAt: z.string(),
+    updatedAt: z.string(),
+    lastResult: JulesScheduleResult.nullable().optional(),
+  })
+  .passthrough()
+
+export const JulesSchedulesResponse = z.object({ schedules: z.array(JulesScheduleRow) }).passthrough()

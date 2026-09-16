@@ -229,6 +229,45 @@ After any delegated write, in this order: `git diff` (review it yourself), your 
 type-check/lint/test commands, and any other project-specific check it requires (codegen,
 bundle checks — set `AGENT_HUB_POST_EDIT_CHECK` so `agy-run.sh` prints it after a write).
 
+## Cloud delegation (Jules)
+
+Every agent above is a local CLI. Jules is not: it is a REST API, the work runs
+on Google's servers against a GitHub repo connected in the Jules web UI, and the
+output is a pull request rather than a change to `cwd`. Use it when the user
+wants to hand a task over and walk away, not for anything they are waiting on.
+
+It has its own tools and is absent from the delegation map, so `route` never
+picks it and `delegate` cannot reach it:
+
+- `jules_sources` — the repos Jules can work on. Repos are connected in the web
+  UI; the API cannot add one, so an unlisted repo needs a human there first.
+- `jules_delegate({task, cwd?, source?, startingBranch?, requirePlanApproval?,
+  automationMode?, timeoutS?})` — needs `JULES_API_KEY` and either `cwd` (the
+  source and branch are inferred from the `origin` remote) or an explicit
+  `source`. Returns `{jobId, status:'queued'}`; `job_status`, `job_wait` and
+  `job_result` then work exactly as for a local job.
+- `job_reply({jobId, message})` or `job_reply({jobId, action:'approve_plan'})` —
+  relays to the live session instead of spawning a turn. With
+  `requirePlanApproval:true` the session waits for that approval before coding.
+- `jules_check({jobId})` — one live read: state, pull-request URL, branch, last
+  message. Needs no poller.
+- `jules_sessions({limit?, state?})` — every session the account has, each with
+  the local `jobId` or `null`.
+
+**The machine being off is the normal case, not an error.** The MCP server dies
+with the session and the dashboard dies with the machine, while Jules keeps
+going. When the user comes back and asks what happened, do not report a stale
+local status: call `jules_check` (or `jules_sessions` when there is no jobId)
+and answer from the live read. `jules_check` also finalizes a job still marked
+`running`, so `job_result` starts returning the real answer with the PR link.
+
+**`job_cancel` does not stop Jules.** There is no cancel endpoint. It marks the
+job canceled and stops polling; the session keeps running and still opens its
+PR. Say that plainly rather than reporting the task as stopped.
+
+The API is alpha, quotas are per account (Pro: 100 tasks/day, 15 concurrent) and
+exhaustion surfaces as `errorKind:'quota'` from a 429.
+
 ## Parallel work: one worktree per block, serialize within it
 
 The hub's write lock (`errorKind:'locked'`) only serializes jobs targeting the exact same `cwd` —

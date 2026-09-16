@@ -1,0 +1,21 @@
+{
+  "activities": [
+    {
+      "name": "sessions/sess-running-1/activities/a1",
+      "id": "a1",
+      "createTime": "2025-05-21T13:28:30Z",
+      "originator": "agent",
+      "planGenerated": {
+        "plan": {
+          "id": "p1",
+          "steps": [
+            { "id": "s1", "title": "Inspect the repository", "description": "Read the paginate module" },
+            { "id": "s2", "title": "Implement the change", "description": "Clamp the limit" },
+            { "id": "s3", "title": "Run the test suite", "description": "node --test" }
+          ]
+        }
+      }
+    }
+  ],
+  "nextPageToken": null
+}

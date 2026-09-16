@@ -3,6 +3,7 @@ import { startJob as defaultStartJob, cancelJob } from '../jobrunner.mjs'
 import { readResult, responsePath } from '../jobstore.mjs'
 import { WRITE_ALLOWLIST, TURN_DEPTH_WARNING } from '../config.mjs'
 import { TASK_TYPES } from '../schemas.mjs'
+import * as defaultJulesClient from '../cloud/jules/client.mjs'
 
 /** Reject a caller-supplied taskType that is not one of schemas.mjs TASK_TYPES. */
 function assertTaskType(taskType) {
@@ -36,16 +37,83 @@ export function delegateTool({ agent, model, task, cwd, mode = 'read', timeoutS,
 const TERMINAL_STATUSES = new Set(['succeeded', 'failed', 'canceled'])
 
 // job_reply supports resuming a conversation for these agents only: agy has
-// --conversation, opencode has -s/--session. copilot has neither.
-const REPLYABLE_AGENTS = new Set(['agy', 'opencode'])
+// --conversation, opencode has -s/--session, jules has sendMessage/approvePlan
+// against its remote session. copilot has none of these.
+const REPLYABLE_AGENTS = new Set(['agy', 'opencode', 'jules'])
+
+/**
+ * job_reply for a jules parent: unlike agy/opencode, this never spawns a new
+ * local job — it talks directly to the existing remote session via
+ * client.sendMessage/approvePlan, using the SAME jobId (the poller already
+ * started by startRemoteJob keeps tracking that one job/session).
+ */
+async function julesReply({ jobId, parent, message, action, client, env, turnDepth, warning }) {
+  const sessionId = parent.remote?.sessionId
+  if (!sessionId) {
+    return { jobId: null, status: 'failed', parentJobId: jobId, errorKind: 'no_session', turnDepth, warning }
+  }
+
+  // No action given: approve the plan only when the session is actually
+  // waiting on one and the caller did not also send free text (a message
+  // always means "say this", regardless of the session's current state).
+  const resolvedAction = action ?? (parent.remote?.state === 'AWAITING_PLAN_APPROVAL' && !message ? 'approve_plan' : 'message')
+  const apiKey = env.JULES_API_KEY
+
+  if (resolvedAction === 'message' && (!message || String(message).trim().length === 0)) {
+    return {
+      jobId: null,
+      status: 'failed',
+      parentJobId: jobId,
+      errorKind: 'invalid',
+      error: 'job_reply on a jules job needs either message text or action:"approve_plan"',
+      turnDepth,
+      warning,
+    }
+  }
+
+  try {
+    if (resolvedAction === 'approve_plan') {
+      await client.approvePlan({ apiKey, sessionId })
+    } else {
+      await client.sendMessage({ apiKey, sessionId, prompt: message })
+    }
+  } catch (error) {
+    // Mirrors the createSession error mapping in src/cloud/runner.mjs: 429 is
+    // quota exhaustion, 401/403 is a rejected/missing key, anything else is an
+    // unclassified remote failure. The message is carried through so a caller
+    // can tell a rejected key apart from a genuine bug instead of seeing an
+    // opaque 'crash' for all three.
+    const status = error?.status
+    const errorKind = status === 429 ? 'quota' : status === 401 || status === 403 ? 'auth' : 'crash'
+    return { jobId: null, status: 'failed', parentJobId: jobId, errorKind, error: String(error?.message ?? error), turnDepth, warning }
+  }
+
+  // The reply lands on the SAME job/session — there is no new jobId to hand
+  // back, so callers keep polling job_status/job_wait on the original one.
+  return { jobId, status: parent.status, parentJobId: jobId, errorKind: null, turnDepth, warning }
+}
 
 /**
  * job_reply: start a new turn in a terminal job's conversation, using its
  * recorded sessionId. Mirrors delegate()'s shape but resumes instead of
  * starting fresh — the guided agy workflow is plan (read) -> feedback
  * (read, same session) -> "execute the approved plan" (write, same session).
+ *
+ * For a jules parent this instead relays `message`/`action` to the existing
+ * remote session (see julesReply above) rather than spawning a new job.
  */
-export async function jobReplyTool({ jobId, message, mode, timeoutS, title, taskType, startJobFn = defaultStartJob }) {
+export async function jobReplyTool({
+  jobId,
+  message,
+  mode,
+  timeoutS,
+  title,
+  taskType,
+  action,
+  startJobFn = defaultStartJob,
+  client = defaultJulesClient,
+  env = process.env,
+}) {
   assertTaskType(taskType)
   const parent = readResult(jobId)
 
@@ -57,9 +125,36 @@ export async function jobReplyTool({ jobId, message, mode, timeoutS, title, task
       ? `conversation is ${turnDepth} turns deep; consider a fresh delegate with a short summary`
       : null
 
-  if (!TERMINAL_STATUSES.has(parent.status)) {
+  const isJules = parent.agent === 'jules'
+  // A running Jules session is exactly when a reply is useful — it is a live
+  // remote conversation, not a finished local process — so 'running' is
+  // accepted in addition to a terminal status. Every other agent still
+  // requires the parent to have finished first.
+  const parentReady = isJules ? parent.status === 'running' || TERMINAL_STATUSES.has(parent.status) : TERMINAL_STATUSES.has(parent.status)
+  if (!parentReady) {
     return { jobId: null, status: 'failed', parentJobId: jobId, errorKind: 'not_terminal', turnDepth, warning }
   }
+
+  if (isJules) {
+    return julesReply({ jobId, parent, message, action, client, env, turnDepth, warning })
+  }
+
+  // Only a jules approve_plan may omit message text. For every other agent the
+  // reply IS the message: without this check a schema-legal job_reply({jobId})
+  // would reach startJobFn with task: undefined and spawn the CLI with the
+  // literal prompt "undefined".
+  if (!message || String(message).trim().length === 0) {
+    return {
+      jobId: null,
+      status: 'failed',
+      parentJobId: jobId,
+      errorKind: 'invalid',
+      error: 'job_reply requires message text',
+      turnDepth,
+      warning,
+    }
+  }
+
   if (!parent.sessionId) {
     return { jobId: null, status: 'failed', parentJobId: jobId, errorKind: 'no_session', turnDepth, warning }
   }

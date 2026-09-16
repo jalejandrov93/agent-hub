@@ -6,6 +6,32 @@ and this project adheres to [Semantic Versioning](https://semver.org/).
 
 ## [Unreleased]
 
+### Added
+
+- Google Jules as a cloud agent, reachable through its own MCP tools
+  (`jules_delegate`, `jules_sources`, `jules_check`, `jules_sessions`). The work
+  runs on Google's servers against a connected GitHub repo and produces a pull
+  request; the job is recorded like any other, so `job_status`, `job_wait`,
+  `job_result` and `job_cancel` keep working. `job_reply` relays to the live
+  session instead of spawning a turn, sending a message or approving a plan via
+  a new `action` input.
+- Reboot-safe tracking for those sessions. A poll loop streams Jules' activity
+  into the job's `stdout.log` while the server is up; on startup the server
+  resumes any job still `running`, doing one final read before declaring a
+  timeout so a session that finished unattended lands as `succeeded` with its
+  pull-request link. `jules_check` answers the same question at any time with a
+  single live read and no poller, and `jules_sessions` lists sessions even when
+  this machine has no record of them.
+
+### Changed
+
+- `JULES_API_KEY` is stripped from the environment handed to the local agent
+  CLIs. It is a credential agent-hub introduces, so it is not shared with
+  third-party programs it merely spawns.
+- `job_reply` accepts a missing `message` only for a Jules `approve_plan`; every
+  other agent now fails fast with `errorKind:'invalid'` instead of starting a
+  turn with an empty prompt.
+
 ## [2.1.0] - 2026-09-16
 
 ### Added

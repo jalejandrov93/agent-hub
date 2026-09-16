@@ -15,6 +15,9 @@ own subagents.
 - At least one of `agy`, `opencode`, or `copilot` on `PATH`, already
   authenticated with that CLI's own login flow. agent-hub does not manage
   credentials — it only spawns the CLI you already use.
+- Optional, for the Jules cloud agent: `JULES_API_KEY` in the environment
+  (generate it at jules.google.com/settings). There is no binary to install —
+  Jules is a REST API. See [Cloud delegation (Jules)](#cloud-delegation-jules).
 
 ## Layout
 
@@ -38,6 +41,13 @@ src/
   metrics.mjs          job-history aggregation (success rate, p50/p95, tokens) per agent/model/mode/taskType
   timeouts.mjs         effective timeout: explicit > adaptive (p95 x 1.5) > static default
   proposals.mjs        Wilson-bound chain-reorder proposals, human-accepted before they apply
+  cloud/
+    jules/client.mjs   Jules v1alpha REST client (injectable fetch, 30s deadline, JulesApiError)
+    jules/adapter.mjs  tolerant parsing of the alpha session/activity shapes
+    gitContext.mjs     infers sources/github/{owner}/{repo} + branch from a checkout
+    poller.mjs         the remote session poll loop (dedup by activity identity, backoff)
+    runner.mjs         startRemoteJob/finishRemoteJob/resumeRemoteJobs
+    check.mjs          one-shot live read of a session, no poller required
   learnings.mjs        curated pending/approved gotchas, sanitized and injected into root turns
   readguard.mjs        git before/after snapshot for read jobs -> read_mode_violation
   hook.mjs             SubagentStart/SubagentStop -> events
@@ -253,6 +263,55 @@ is manually held, its CLI was not found on `PATH`, its cached preflight is
 `unavailable`, or its circuit breaker is open. `route()` is advisory: it
 never blocks the caller from delegating to a skipped pair directly.
 
+### Cloud delegation (Jules)
+
+Every other agent here is a local CLI: agent-hub spawns it, streams its stdout
+and reaps it. [Jules](https://jules.google) is not. It is a REST API
+(`v1alpha`, **alpha — shapes may change**) and the work runs on Google's
+servers, against a GitHub repository you connected in the Jules web UI. The
+result is a pull request, never a change to your `cwd`. That difference drives
+every design decision below.
+
+Jules is reachable only through its own tools (`jules_delegate`,
+`jules_sources`, `jules_check`, `jules_sessions`). It is deliberately absent
+from the delegation map, so `route` never picks it and `delegate` cannot reach
+it — you get a cloud session only when you ask for one.
+
+**It survives your machine being off.** This is the point of the feature: hand
+over a task, close the laptop, come back later. Because the MCP server is a
+per-session stdio process and the dashboard is a local service, both die with
+the machine while the Jules session keeps going, so polling can never be the
+only way to learn the outcome:
+
+- While the server is up, a poll loop streams Jules' activity into the job's
+  `stdout.log`, so `job_result` and the dashboard show progress live. Activities
+  are deduplicated by identity, not by page token, and the interval backs off to
+  60s when nothing moves.
+- On startup the server resumes polling any job still marked `running`. If its
+  deadline elapsed while nothing was watching, it does one final read before
+  deciding — a session that finished overnight lands as `succeeded` with its
+  pull-request link, not as a timeout.
+- Whenever you want, `jules_check` answers "did it finish, and on which branch"
+  with a single live read and no poll loop at all. If the session ended while
+  the machine was off, it finalizes the local job so `job_result` returns the
+  real answer. `jules_sessions` lists what Jules has even when this machine has
+  no record of it, so a reinstall or a session started elsewhere is still
+  recoverable.
+
+**Cancel is local only.** The Jules API exposes no cancel endpoint. `job_cancel`
+marks the job canceled and stops this server's polling; the session keeps
+running on Google's side. The tool says so.
+
+**The key never leaves this process.** `JULES_API_KEY` travels only in the
+`X-Goog-Api-Key` header. It is never written to a job record, an event, a log
+line or a response, and it is stripped from the environment handed to the local
+agent CLIs, which are third-party programs agent-hub does not control.
+
+**Sources are read-only.** Repositories are connected to Jules through its
+GitHub App in the web UI. The API can list them (`jules_sources`) but cannot add
+one. `jules_delegate` accepts an explicit `source`, or infers it from `cwd` via
+the `origin` remote.
+
 ### Circuit breaker
 
 A per-agent+model breaker opens after `failureThreshold` (2) matching
@@ -339,8 +398,12 @@ read jobs from a disposable worktree when that matters.
 | `job_status` | `{jobId}` | Current status, no waiting. |
 | `job_result` | `{jobId, maxLines?, tailLines?}` | Head of the response (default 20 lines) plus extra `tailLines` from the end (default 10, never repeating a head line) and `fullPath`, `truncated`, `tailTruncated`. |
 | `job_cancel` | `{jobId}` | Kills the whole process group; marks `canceled`. |
-| `job_reply` | `{jobId, message, mode?, timeoutS?, title?, taskType?}` | Starts a new turn in a **terminal** agy/opencode job's conversation, using its recorded `sessionId`. `mode` and `taskType` default to the parent job's; switching to `write` goes through the same worktree gate + lock as `delegate`. copilot has no session resume and returns `{status:'failed', errorKind:'unsupported'}` without spawning anything. A non-terminal parent gets `errorKind:'not_terminal'`; a parent with no `sessionId` gets `errorKind:'no_session'`. Returns `turnDepth` and, from 5 turns deep, a `warning` to start a fresh `delegate` with a short summary. |
+| `job_reply` | `{jobId, message?, mode?, timeoutS?, title?, taskType?, action?}` | Starts a new turn in a **terminal** agy/opencode job's conversation, using its recorded `sessionId`. `mode` and `taskType` default to the parent job's; switching to `write` goes through the same worktree gate + lock as `delegate`. copilot has no session resume and returns `{status:'failed', errorKind:'unsupported'}` without spawning anything. A non-terminal parent gets `errorKind:'not_terminal'`; a parent with no `sessionId` gets `errorKind:'no_session'`. Returns `turnDepth` and, from 5 turns deep, a `warning` to start a fresh `delegate` with a short summary. |
 | `agents_metrics` | `{groupBy?: ('agent'\|'model'\|'mode'\|'taskType')[]}` | Success rate, p50/p95 latency, error kinds and tokens per group (default: all four dimensions) from job history. |
+| `jules_delegate` | `{task, cwd?, source?, startingBranch?, title?, requirePlanApproval?, automationMode?, timeoutS?, taskType?}` | Starts a Jules cloud session. Needs `JULES_API_KEY` and either `cwd` (infers the source and branch from the `origin` remote) or an explicit `source`. Returns `{jobId, status:'queued'}`; the job behaves like any other for `job_status`/`job_wait`/`job_result`. The result is a GitHub pull request. |
+| `jules_sources` | `{}` | The GitHub repos connected to the Jules account. Connect new ones in the Jules web UI — the API cannot add them. |
+| `jules_check` | `{jobId?, sessionId?}` | One live read of a session: `state`, `prUrl`, `branch`, `sessionUrl`, last message. Needs no poller, so it works after a reboot, and it finalizes a local job whose session ended while the machine was off. |
+| `jules_sessions` | `{limit?, state?}` | Lists sessions straight from the Jules API, newest first, each with the local `jobId` when this machine has one and `null` when it does not. The recovery path when the local record is gone. |
 | `learning_propose` | `{text, agent?, model?, taskType?, sourceJobId?}` | Records a gotcha as **pending**; a human must approve it in the dashboard before it is injected into a prompt. Returns `{learning, note}`. |
 
 Every tool also declares a zod `outputSchema` and returns the same payload as

@@ -1,0 +1,10 @@
+{
+  "name": "sessions/sess-failed-1",
+  "id": "sess-failed-1",
+  "title": "Migrate the build to ESM",
+  "prompt": "Migrate the build to ESM",
+  "state": "FAILED",
+  "createTime": "2025-05-21T14:00:00Z",
+  "url": "https://jules.google.com/session/sess-failed-1",
+  "outputs": []
+}

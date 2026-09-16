@@ -8,6 +8,8 @@ import { paths } from './config.mjs'
 import { reconcileOrphans, listJobs, readResult, responsePath } from './jobstore.mjs'
 import { agentsStatusTool, routeTool, knownTaskTypes } from './tools/agents.mjs'
 import { delegateTool, jobWaitTool, jobStatusTool, jobResultTool, jobCancelTool, jobReplyTool } from './tools/jobs.mjs'
+import { julesDelegateTool, julesSourcesTool, julesCheckTool, julesSessionsTool, julesAccountsTool, julesSchedulesTool } from './tools/jules.mjs'
+import { resumeRemoteJobs } from './cloud/runner.mjs'
 import { metricsTool } from './tools/insights.mjs'
 import { learningProposeTool } from './tools/learnings.mjs'
 import { scheduleStartupDiscovery } from './startup.mjs'
@@ -21,6 +23,11 @@ import {
   JobResultResponse,
   MetricsResponse,
   Learning,
+  JulesCheckResponse,
+  JulesSessionsResponse,
+  JulesSourcesResponse,
+  JulesAccountsResponse,
+  JulesSchedulesResponse,
 } from './schemas.mjs'
 
 const VERSION = '2.1.0'
@@ -193,22 +200,153 @@ export function buildServer() {
     {
       title: 'Reply to a finished agy/opencode job, resuming its session',
       description:
-        'Start a new turn in a terminal job\'s conversation, using its recorded sessionId. Only agy (--conversation) and ' +
-        'opencode (-s) support this; copilot returns {status:"failed", errorKind:"unsupported"} without spawning anything. ' +
-        'mode defaults to the parent job\'s mode; switching read -> write goes through the same worktree gate + lock as delegate(). ' +
-        'A parent that is not yet terminal (errorKind:"not_terminal") or has no sessionId (errorKind:"no_session") is also rejected.',
+        'Start a new turn in a terminal job\'s conversation, using its recorded sessionId. agy (--conversation), opencode (-s) ' +
+        'and jules (its remote session) support this; copilot returns {status:"failed", errorKind:"unsupported"} without spawning ' +
+        'anything. For a jules job this never starts a new local job: it relays message/action to the existing remote session ' +
+        '(a RUNNING jules parent is accepted, not just a terminal one). mode defaults to the parent job\'s mode; switching ' +
+        'read -> write goes through the same worktree gate + lock as delegate() (not applicable to jules). ' +
+        'A parent that is not yet terminal/running (errorKind:"not_terminal") or has no sessionId (errorKind:"no_session") is also rejected.',
       inputSchema: {
         jobId: jobIdArg,
-        message: z.string().min(1).describe('The reply/follow-up prompt text.'),
+        message: z.string().min(1).optional().describe('The reply/follow-up prompt text. Required for every agent except a jules approve_plan.'),
         mode: modeEnum.optional(),
         timeoutS: z.number().int().positive().optional(),
         title: z.string().optional(),
         taskType: taskTypeArg,
+        action: z
+          .enum(['message', 'approve_plan'])
+          .optional()
+          .describe(
+            'jules only: which remote call to make. Defaults to approve_plan when the session is AWAITING_PLAN_APPROVAL and no message was given, otherwise message.'
+          ),
       },
       outputSchema: DelegateResponse,
       annotations: { readOnlyHint: false, openWorldHint: true },
     },
-    guard(({ jobId, message, mode, timeoutS, title, taskType }) => jobReplyTool({ jobId, message, mode, timeoutS, title, taskType }))
+    guard(({ jobId, message, mode, timeoutS, title, taskType, action }) => jobReplyTool({ jobId, message, mode, timeoutS, title, taskType, action }))
+  )
+
+  server.registerTool(
+    'jules_delegate',
+    {
+      title: 'Delegate a task to Jules (Google\'s remote coding agent)',
+      description:
+        'Start a Jules session. The work runs on GOOGLE\'S OWN SERVERS, not locally — Jules clones the named GitHub source, ' +
+        'works in its own sandbox, and the result is a GITHUB PULL REQUEST (or a pushed branch), never a change to this cwd. ' +
+        'The Jules API is ALPHA and its shapes may change. Requires JULES_API_KEY in the environment and either cwd (to infer ' +
+        'the source/branch from the git remote) or an explicit source. Returns {jobId, status:"queued"} immediately; poll with ' +
+        'job_wait/job_status, read with job_result, and use job_reply to send a message or approve a plan. job_cancel on a jules ' +
+        'job ONLY stops this server\'s own polling — Jules exposes no cancel endpoint, so the remote session keeps running. ' +
+        'The session keeps running even when THIS machine is off, so polling is never the only way to learn the outcome: pick the ' +
+        'session up later with jules_check (which reads the Jules API live and finalizes the local job), or jules_sessions first to ' +
+        'find a session this machine has no record of.',
+      inputSchema: {
+        task: z.string().min(1).describe('The prompt/task text.'),
+        cwd: z.string().min(1).optional().describe('Local checkout used to infer source/startingBranch from the git remote. Optional if source is given.'),
+        source: z.string().min(1).optional().describe('An explicit Jules source name, e.g. "sources/github/acme/widgets" (see jules_sources). Wins over cwd inference.'),
+        startingBranch: z.string().min(1).optional().describe('Branch Jules starts from. Defaults to the branch inferred from cwd, if any.'),
+        title: z.string().optional(),
+        requirePlanApproval: z.boolean().optional().default(false).describe('If true, Jules pauses for approval (job_reply action:"approve_plan") before coding.'),
+        automationMode: z.string().optional().default('AUTO_CREATE_PR').describe('Jules automationMode, e.g. AUTO_CREATE_PR.'),
+        timeoutS: z.number().int().positive().optional(),
+        taskType: taskTypeArg,
+        account: z.string().min(1).optional().describe('Jules account id to use (see jules_accounts). Defaults to the configured selection policy; falls back to env.JULES_API_KEY when no accounts exist.'),
+      },
+      outputSchema: DelegateResponse,
+      annotations: { readOnlyHint: false, openWorldHint: true },
+    },
+    guard(({ task, cwd, source, startingBranch, title, requirePlanApproval, automationMode, timeoutS, taskType, account }) =>
+      julesDelegateTool({ task, cwd, source, startingBranch, title, requirePlanApproval, automationMode, timeoutS, taskType, account })
+    )
+  )
+
+  server.registerTool(
+    'jules_sources',
+    {
+      title: 'List GitHub repos connected to the Jules account',
+      description:
+        'List the GitHub repositories connected to a Jules account. Repos are connected in the Jules web UI (jules.google.com) and ' +
+        'cannot be added through this API — use the returned source name with jules_delegate. Pass account to choose a configured ' +
+        'account (see jules_accounts); with none configured this reads env.JULES_API_KEY. An account whose /sources call is refused ' +
+        'reports noSourceAccess (it has no source access), which is NOT a rejected key.',
+      inputSchema: {
+        account: z.string().min(1).optional().describe('Jules account id to read (see jules_accounts). Defaults to the highest-priority enabled account, or env.JULES_API_KEY when none are configured.'),
+      },
+      outputSchema: JulesSourcesResponse,
+      annotations: { readOnlyHint: true, openWorldHint: true, idempotentHint: true },
+    },
+    guard(({ account }) => julesSourcesTool({ account }))
+  )
+
+  server.registerTool(
+    'jules_accounts',
+    {
+      title: 'List configured Jules accounts',
+      description:
+        'Read-only view of the configured Jules accounts: masked keys (keyPresent/keyLast4, never the raw key), their rolling-24h and ' +
+        'concurrent usage, and the last /sources cache status per account. Accounts are created and edited in the dashboard. Use an id ' +
+        'from here as jules_delegate/jules_sources account.',
+      inputSchema: {},
+      outputSchema: JulesAccountsResponse,
+      annotations: { readOnlyHint: true, idempotentHint: true },
+    },
+    guard(() => julesAccountsTool({}))
+  )
+
+  server.registerTool(
+    'jules_schedules',
+    {
+      title: 'List recurring Jules tasks',
+      description:
+        'Read-only view of the recurring Jules tasks owned by the dashboard service: each schedule with its next run and the ' +
+        'outcome of the job it started last time. The Jules API has no scheduling, so agent-hub owns recurrence; schedules are ' +
+        'created and edited in the dashboard, never here. A schedule whose previous job is still running is skipped (recorded as ' +
+        'lastStatus "skipped") rather than piling up a duplicate session against the same repo.',
+      inputSchema: {},
+      outputSchema: JulesSchedulesResponse,
+      annotations: { readOnlyHint: true, idempotentHint: true },
+    },
+    guard(() => julesSchedulesTool({}))
+  )
+
+  server.registerTool(
+    'jules_check',
+    {
+      title: 'Check a Jules session live',
+      description:
+        'Ask the Jules API RIGHT NOW what a session did — one getSession plus one activities read, with NO local poller involved. ' +
+        'This is the way to learn the outcome after a reboot or days later, when the MCP server and dashboard that started the ' +
+        'session are long gone. Pass jobId to read its remote.sessionId, persist the fresh state/PR url/branch and, when the session ' +
+        'is terminal while the job is still "running", finalize that job so job_result returns the real answer and the PR link. ' +
+        'Pass sessionId alone to inspect a session this machine has no record of. Recovery path for a Jules job whose session ' +
+        'finished while the machine was off: jules_sessions to find the session, then jules_check to finalize it locally.',
+      inputSchema: {
+        jobId: z.string().min(1).optional().describe('Local jobId whose remote.sessionId should be checked and, if terminal, finalized.'),
+        sessionId: z.string().min(1).optional().describe('A bare Jules session id, for a session this machine has no local job for.'),
+      },
+      outputSchema: JulesCheckResponse,
+      annotations: { readOnlyHint: false, openWorldHint: true, idempotentHint: true },
+    },
+    guard(({ jobId, sessionId }) => julesCheckTool({ jobId, sessionId }))
+  )
+
+  server.registerTool(
+    'jules_sessions',
+    {
+      title: 'List Jules sessions live from the API',
+      description:
+        'List the account\'s Jules sessions straight from the Jules API, newest first, WITHOUT any local polling or job history — this is ' +
+        'how you find out what a session did while the machine was off or after a reboot. Each row carries the session state, PR ' +
+        'url and working branch, plus jobId: the local job that started it, or null when this machine has no record (a reinstall, ' +
+        'or a session started elsewhere). Recovery path: find the session here, then jules_check to finalize its local job.',
+      inputSchema: {
+        limit: z.number().int().positive().max(100).optional().default(20).describe('Maximum number of sessions to return, newest first.'),
+        state: z.string().min(1).optional().describe('Only return sessions in this state, e.g. COMPLETED.'),
+      },
+      outputSchema: JulesSessionsResponse,
+      annotations: { readOnlyHint: true, openWorldHint: true, idempotentHint: true },
+    },
+    guard(({ limit, state }) => julesSessionsTool({ limit, state }))
   )
 
   server.registerTool(
@@ -442,10 +580,24 @@ async function main() {
   const changed = reconcileOrphans()
   if (changed.length > 0) log(`reconciled ${changed.length} orphaned job(s) on startup: ${changed.join(', ')}`)
 
+  // Fire-and-forget: resumeRemoteJobs returns synchronously and never throws,
+  // so a slow/unreachable Jules API can never block or crash the handshake.
+  try {
+    const { resumed, failed } = resumeRemoteJobs()
+    if (resumed.length > 0 || failed.length > 0) {
+      log(`resumed ${resumed.length} remote job(s) on startup; ${failed.length} could not be resumed`)
+    }
+  } catch (error) {
+    log('resumeRemoteJobs failed:', error?.message ?? error)
+  }
+
   // Fire-and-forget: never awaited, so a slow/missing CLI never delays the
   // stdio handshake below. See src/startup.mjs for the non-blocking wiring.
   scheduleStartupDiscovery()
 
+  // Deliberately NOT startScheduler(): this MCP server is a per-session stdio
+  // process, and the dashboard already runs the scheduler as the one
+  // long-lived process. Two schedulers would double-fire every schedule.
   const server = buildServer()
   await server.connect(new StdioServerTransport())
   log(`ready — state dir ${paths().home}`)

@@ -18,6 +18,13 @@ export function paths(env = process.env) {
     discoveryFile: path.join(home, 'discovery.json'),
     overridesFile: path.join(home, 'overrides.json'),
     proposalsFile: path.join(home, 'proposals.json'),
+    // Recurring Jules tasks. Owned by the long-lived dashboard process, which
+    // is the only process here that outlives a Claude session (see scheduler.mjs).
+    schedulesFile: path.join(home, 'schedules.json'),
+    // Holds raw Jules API keys, so it is written 0600 (see accounts.mjs).
+    accountsFile: path.join(home, 'accounts.json'),
+    // Per-account /sources cache. Not credentials, so default mode is fine.
+    sourcesCacheFile: path.join(home, 'sources-cache.json'),
     learningsFile: path.join(home, 'learnings.json'),
     runsDir: path.join(home, 'runs'),
     locksDir: path.join(home, 'runs', '.locks'),
@@ -85,6 +92,16 @@ export const DEFAULT_TIMEOUTS_S = {
   },
   opencode: { default: 600 },
   copilot: { default: 300 },
+  // A Jules session runs asynchronously on Google's own infrastructure through
+  // a full plan -> code -> test -> PR cycle, not a single local CLI turn, so
+  // it routinely takes far longer than any local agent. Without this entry
+  // resolveTimeoutS() would fall back to 240s (no table for 'jules'), which
+  // would abandon a normal session via the poller's own timeoutMs deadline.
+  // 21600s (6h) is sized for an UNATTENDED session — the delegate-and-walk-away
+  // case this feature exists for — not a watched one; polling costs almost
+  // nothing once the backoff reaches its 60s ceiling. `timeoutS` on
+  // jules_delegate overrides this per call.
+  jules: { default: 21600 },
 }
 
 export function resolveTimeoutS(agent, model) {

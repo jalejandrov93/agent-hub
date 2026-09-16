@@ -1,0 +1,287 @@
+import { startRemoteJob as defaultStartRemoteJob } from '../cloud/runner.mjs'
+import { checkRemoteSession as defaultCheckRemoteSession } from '../cloud/check.mjs'
+import { listJobs as defaultListJobs, readResult as defaultReadResult } from '../jobstore.mjs'
+import { listSchedules as defaultListSchedules } from '../schedules.mjs'
+import {
+  listAccounts as defaultListAccounts,
+  getAccountSecret as defaultGetAccountSecret,
+  usageFor as defaultUsageFor,
+  readPolicy as defaultReadPolicy,
+} from '../accounts.mjs'
+import { readSourcesCache as defaultReadSourcesCache } from '../cloud/sources.mjs'
+import * as defaultClient from '../cloud/jules/client.mjs'
+import * as defaultAdapter from '../cloud/jules/adapter.mjs'
+import { TASK_TYPES } from '../schemas.mjs'
+
+/** Reject a caller-supplied taskType that is not one of schemas.mjs TASK_TYPES (mirrors tools/jobs.mjs). */
+function assertTaskType(taskType) {
+  if (taskType != null && !TASK_TYPES.includes(taskType)) {
+    throw new Error(`unknown taskType: ${taskType}`)
+  }
+}
+
+/**
+ * Start a Jules session. Returns the same {jobId, status, errorKind} shape as
+ * delegateTool (tools/jobs.mjs), so job_status/job_wait/job_result keep
+ * working unchanged for a Jules job. Unlike delegateTool this never touches
+ * the local worktree — startRemoteJob (src/cloud/runner.mjs) resolves the
+ * GitHub source and edits a remote branch via the Jules API.
+ */
+export async function julesDelegateTool({
+  task,
+  cwd,
+  source,
+  startingBranch,
+  title,
+  requirePlanApproval,
+  automationMode,
+  timeoutS,
+  taskType,
+  account,
+  env = process.env,
+  startRemoteJobFn = defaultStartRemoteJob,
+}) {
+  assertTaskType(taskType)
+  if (!cwd && !source) {
+    throw new Error('jules_delegate requires either cwd (to infer the GitHub source from) or an explicit source')
+  }
+
+  const { job } = await startRemoteJobFn({
+    agent: 'jules',
+    model: 'jules',
+    task,
+    cwd,
+    source,
+    startingBranch,
+    title,
+    requirePlanApproval,
+    automationMode,
+    timeoutS,
+    taskType,
+    account,
+    turnDepth: 0,
+    env,
+  })
+  return { jobId: job.jobId, status: job.status, errorKind: job.errorKind ?? null }
+}
+
+/**
+ * One live read of a Jules session: the answer to "did it finish, what came
+ * out, and which branch is it on", with no local poller required. Thin wrapper
+ * so the transport stays in check.mjs (src/cloud/check.mjs) and this stays
+ * trivially mockable.
+ */
+export async function julesCheckTool({ jobId, sessionId, env = process.env, client = defaultClient, checkRemoteSessionFn = defaultCheckRemoteSession, ...rest } = {}) {
+  return checkRemoteSessionFn({ jobId, sessionId, env, client, ...rest })
+}
+
+// Matches the id runner.mjs persists in remote.sessionId (id first, then the
+// 'sessions/' resource name) so a local job can be matched back to a session.
+function sessionIdOf(session) {
+  if (typeof session?.id === 'string' && session.id.length > 0) return session.id
+  const name = typeof session?.name === 'string' ? session.name : ''
+  if (name.length > 0) return name.startsWith('sessions/') ? name.slice('sessions/'.length) : name
+  return null
+}
+
+/**
+ * List the account's Jules sessions straight from the API, newest first, and
+ * annotate each with the local jobId whose remote.sessionId matches (null when
+ * this machine has no record — a reinstall, or a session started elsewhere).
+ */
+export async function julesSessionsTool({ limit = 20, state, env = process.env, client = defaultClient, listJobsFn = defaultListJobs, adapter = defaultAdapter } = {}) {
+  const apiKey = env.JULES_API_KEY
+  if (!apiKey) throw new Error('JULES_API_KEY is missing or rejected')
+
+  let page
+  try {
+    page = await client.listSessions({ apiKey, pageSize: limit })
+  } catch (error) {
+    if (error?.status === 401 || error?.status === 403) throw new Error('JULES_API_KEY is missing or rejected')
+    throw error
+  }
+
+  const jobIdBySession = new Map()
+  try {
+    for (const job of listJobsFn(env)) {
+      const sessionId = job?.remote?.sessionId
+      if (sessionId && !jobIdBySession.has(sessionId)) jobIdBySession.set(sessionId, job.jobId)
+    }
+  } catch {
+    // No local job history (fresh install, unreadable runs dir): every session
+    // still comes back, just with jobId:null.
+  }
+
+  const sessions = Array.isArray(page?.sessions) ? page.sessions : []
+  return {
+    sessions: sessions
+      .filter((session) => (state ? adapter.sessionState(session) === state : true))
+      .map((session) => {
+        const sessionId = sessionIdOf(session)
+        return {
+          sessionId,
+          title: typeof session?.title === 'string' && session.title.length > 0 ? session.title : null,
+          state: adapter.sessionState(session),
+          prUrl: adapter.prUrlFromSession(session),
+          branch: adapter.branchFromSession(session),
+          sessionUrl: adapter.sessionUrl(session),
+          createTime: typeof session?.createTime === 'string' && session.createTime.length > 0 ? session.createTime : null,
+          jobId: sessionId ? jobIdBySession.get(sessionId) ?? null : null,
+        }
+      })
+      .sort((a, b) => (b.createTime ?? '').localeCompare(a.createTime ?? ''))
+      .slice(0, limit),
+  }
+}
+
+// The one shape the Jules alpha API pins down for a source is its resource
+// name, 'sources/github/{owner}/{repo}' — githubRepo is an observed-in-the-
+// wild convenience field, not a documented guarantee, so it is only ever a
+// preferred value, never the sole source of owner/repo.
+function ownerRepoFromName(name) {
+  const match = typeof name === 'string' ? name.match(/^sources\/github\/([^/]+)\/(.+)$/) : null
+  return match ? { owner: match[1], repo: match[2] } : { owner: null, repo: null }
+}
+
+/**
+ * List the GitHub repos connected to a Jules account. Sources are connected in
+ * the Jules web UI — there is no API to add one.
+ *
+ * With no `account` and no accounts configured this behaves exactly as before
+ * (env.JULES_API_KEY). With accounts configured it defaults to the
+ * highest-priority enabled account. A 401/403 from /sources is reported as
+ * "this account has no source access", never as a rejected key: a valid,
+ * usable key was observed being refused by /sources while /sessions worked.
+ */
+export async function julesSourcesTool({
+  account,
+  env = process.env,
+  client = defaultClient,
+  fetchImpl,
+  listAccountsFn = defaultListAccounts,
+  getAccountSecretFn = defaultGetAccountSecret,
+} = {}) {
+  const accounts = listAccountsFn(env)
+  let accountId = null
+  let apiKey = null
+
+  if (account) {
+    apiKey = getAccountSecretFn(account, env)
+    if (!apiKey) throw new Error(`account not found: ${account}`)
+    accountId = account
+  } else if (accounts.length > 0) {
+    const enabled = accounts
+      .filter((candidate) => candidate.enabled !== false)
+      .sort((a, b) => (a.priority ?? 0) - (b.priority ?? 0))
+    const first = enabled[0]
+    if (first) {
+      accountId = first.id
+      apiKey = getAccountSecretFn(first.id, env)
+    }
+  }
+
+  if (!apiKey) apiKey = env.JULES_API_KEY
+  if (!apiKey) {
+    throw new Error('JULES_API_KEY is missing or rejected')
+  }
+
+  let page
+  try {
+    page = await client.listSources({ apiKey, fetchImpl })
+  } catch (error) {
+    if (error?.status === 401 || error?.status === 403) {
+      if (accountId) {
+        return {
+          sources: [],
+          accountId,
+          noSourceAccess: true,
+          note:
+            `Account ${accountId} has no source access: the Jules API refused /sources with ${error.status}. ` +
+            'This is not a credential failure — repositories are connected in the Jules web UI (jules.google.com).',
+        }
+      }
+      throw new Error('JULES_API_KEY is missing or rejected')
+    }
+    throw error
+  }
+
+  const sources = Array.isArray(page?.sources) ? page.sources : []
+  const result = {
+    sources: sources.map((s) => {
+      const fallback = ownerRepoFromName(s?.name)
+      const githubRepo = s?.githubRepo
+      const defaultBranchName = githubRepo?.defaultBranch?.displayName
+      return {
+        name: s?.name ?? null,
+        owner: githubRepo?.owner ?? fallback.owner,
+        repo: githubRepo?.repo ?? fallback.repo,
+        defaultBranch:
+          typeof defaultBranchName === 'string' && defaultBranchName.length > 0 ? defaultBranchName : null,
+        branches: Array.isArray(githubRepo?.branches)
+          ? githubRepo.branches.map((branch) => branch?.displayName).filter((name) => typeof name === 'string' && name.length > 0)
+          : [],
+      }
+    }),
+  }
+  if (accountId) result.accountId = accountId
+  return result
+}
+
+/**
+ * Read-only view of the configured accounts for the dashboard/MCP: masked
+ * accounts (never the raw key) with their live quota usage and last /sources
+ * cache status. Creating/editing accounts belongs to the dashboard, so there is
+ * deliberately no write tool here.
+ */
+export function julesAccountsTool({
+  env = process.env,
+  listAccountsFn = defaultListAccounts,
+  usageForFn = defaultUsageFor,
+  readSourcesCacheFn = defaultReadSourcesCache,
+  readPolicyFn = defaultReadPolicy,
+} = {}) {
+  const cache = readSourcesCacheFn(env)
+  return {
+    policy: readPolicyFn(env),
+    accounts: listAccountsFn(env).map((account) => ({
+      ...account,
+      usage: usageForFn(account.id, env),
+      sourcesStatus: cache[account.id]?.status ?? null,
+      sourcesFetchedAt: cache[account.id]?.fetchedAt ?? null,
+    })),
+  }
+}
+
+/**
+ * Read-only view of the recurring Jules tasks: each schedule with its next run
+ * and the outcome of the job it started last time. Creating and editing
+ * schedules belongs to the dashboard, so there is deliberately no write tool.
+ */
+export function julesSchedulesTool({
+  env = process.env,
+  listSchedulesFn = defaultListSchedules,
+  readResultFn = defaultReadResult,
+} = {}) {
+  return {
+    schedules: listSchedulesFn(env).map((schedule) => {
+      let lastResult = null
+      if (schedule.lastJobId) {
+        try {
+          const job = readResultFn(schedule.lastJobId, env)
+          lastResult = {
+            jobId: job.jobId,
+            status: job.status,
+            errorKind: job.errorKind ?? null,
+            sessionId: job.remote?.sessionId ?? null,
+            prUrl: job.remote?.prUrl ?? null,
+          }
+        } catch {
+          // The job record is gone (pruned runs dir): the schedule still shows,
+          // just without a last result.
+          lastResult = null
+        }
+      }
+      return { ...schedule, lastResult }
+    }),
+  }
+}

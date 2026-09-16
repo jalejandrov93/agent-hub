@@ -1,0 +1,24 @@
+{
+  "activities": [
+    {
+      "name": "sessions/sess-running-1/activities/a8",
+      "id": "a8",
+      "createTime": "2025-05-21T13:32:00Z",
+      "originator": "agent",
+      "agentMessaged": { "agentMessage": "Draft change set ready" },
+      "artifacts": [
+        {
+          "changeSet": {
+            "source": "sources/github/acme/widgets",
+            "gitPatch": {
+              "unidiffPatch": "diff --git a/src/paginate.mjs b/src/paginate.mjs\n+const limit = Math.max(0, limit)\n",
+              "baseCommitId": "abc123def456",
+              "suggestedCommitMessage": "Fix off-by-one in paginate()"
+            }
+          }
+        }
+      ]
+    }
+  ],
+  "nextPageToken": null
+}

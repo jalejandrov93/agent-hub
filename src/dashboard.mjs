@@ -16,6 +16,7 @@ import { computeMetrics } from './metrics.mjs'
 import { listProposals, refreshProposals, decideProposal } from './proposals.mjs'
 import { listLearnings, proposeLearning, decideLearning, deleteLearning } from './learnings.mjs'
 import { jobResultTool } from './tools/jobs.mjs'
+import { startScheduler } from './scheduler.mjs'
 
 const HERE = path.dirname(fileURLToPath(import.meta.url))
 // The Vite-built React app lands here (built by a separate package); this
@@ -805,6 +806,14 @@ export function startDashboard({ port = 7777, env = process.env } = {}) {
   pruneCacheForMap(env)
 
   const server = createServer({ env })
+
+  // The dashboard is the ONLY long-lived process here (systemd --user), so
+  // recurring Jules tasks live in it: the MCP server is a per-session stdio
+  // process that dies with the Claude session. AGENT_HUB_SCHEDULER=0 disables
+  // it (tests, or a machine where another instance already owns the schedules).
+  const scheduler = env.AGENT_HUB_SCHEDULER === '0' ? null : startScheduler({ env })
+  server.on('close', () => scheduler?.stop())
+
   server.listen(port, '127.0.0.1', () => {
     console.error(`[agent-hub] dashboard listening on http://127.0.0.1:${port}`)
   })

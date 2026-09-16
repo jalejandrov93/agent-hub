@@ -8,6 +8,7 @@ import { resolveVariant, KILL_GRACE_S } from './config.mjs'
 import { resolveEffectiveTimeoutS as defaultResolveEffectiveTimeoutS } from './timeouts.mjs'
 import { selectLearnings as defaultSelectLearnings, augmentTask as defaultAugmentTask } from './learnings.mjs'
 import { takeSnapshot as defaultTakeSnapshot, diffSnapshots as defaultDiffSnapshots, formatViolation as defaultFormatViolation } from './readguard.mjs'
+import { startRemoteJob as defaultStartRemoteJob } from './cloud/runner.mjs'
 
 // jobId -> { pgid } for jobs still running in THIS process. Used by
 // cancelJob for an immediate kill; reconcileOrphans (jobstore.mjs) covers
@@ -51,7 +52,45 @@ export function startJob({
   takeSnapshotFn = defaultTakeSnapshot,
   diffSnapshotsFn = defaultDiffSnapshots,
   formatViolationFn = defaultFormatViolation,
+  // Jules-only fields, forwarded untouched to startRemoteJobFn for a remote
+  // adapter; unused (and harmless) for every local agent.
+  source,
+  startingBranch,
+  requirePlanApproval,
+  automationMode,
+  startRemoteJobFn = defaultStartRemoteJob,
 }) {
+  // Resolved BEFORE anything else — including learnings/timeout/createJob —
+  // because a remote adapter (Jules) edits a branch on GitHub via its own
+  // infrastructure, never this process's cwd: the "must be a secondary
+  // worktree" write-mode gate and the read-mode snapshot must never run for
+  // it. One side effect: an unknown agent now throws here, before any job
+  // record exists (previously adapterFor ran after createJob/the write gate;
+  // no existing test pinned that ordering).
+  const adapter = adapterFor(agent)
+  if (adapter.remote) {
+    return startRemoteJobFn({
+      agent,
+      model,
+      task,
+      cwd,
+      title,
+      source,
+      startingBranch,
+      requirePlanApproval,
+      automationMode,
+      timeoutS,
+      taskType,
+      turnDepth,
+      parentJobId,
+      env,
+      adapter,
+      resolveEffectiveTimeoutSFn,
+      selectLearningsFn,
+      augmentTaskFn,
+    })
+  }
+
   // Only a root turn (no resumed session, depth 0) gets curated learnings
   // prepended — a reply turn continues a conversation that already has them.
   const isRootTurn = !sessionId && (turnDepth ?? 0) === 0
@@ -109,16 +148,21 @@ export function startJob({
     }
   }
 
-  const adapter = adapterFor(agent)
   const argv = adapter.buildArgv({ model, prompt: effectiveTask, cwd, mode, title, variant: effectiveVariant, timeoutS: effectiveTimeoutS, sessionId })
 
   // Snapshot right before spawning, AFTER the write gate/lock: a gate failure
   // must never be judged by a snapshot it never ran against.
   const snapshot = mode === 'read' ? takeSnapshotFn(cwd) : null
 
+  // The local CLIs are third-party processes outside our control, and
+  // JULES_API_KEY is a credential agent-hub itself introduced: it must not
+  // travel to them. Nothing else is filtered.
+  const childEnv = { ...process.env }
+  delete childEnv.JULES_API_KEY
+
   let child
   try {
-    child = spawn(adapter.cmd, argv, { cwd })
+    child = spawn(adapter.cmd, argv, { cwd, env: childEnv })
   } catch (error) {
     updateResult(job.jobId, { status: 'failed', errorKind: 'crash', error: String(error?.message ?? error) }, env)
     appendEvent({ kind: 'job.failed', agent, model, cwd, title, jobId: job.jobId, errorKind: 'crash', taskType, summary: String(error?.message ?? error) }, { env })
@@ -271,6 +315,24 @@ export async function cancelJob(jobId, { env = process.env } = {}) {
   // no-ops when it sees it, so this ordering is what keeps a cancel from also
   // producing a spurious job.failed(errorKind:'empty') event for the same job.
   const updated = updateResult(jobId, { status: 'canceled', errorKind: 'canceled_by_user' }, env)
+
+  if (result.remote) {
+    // There is no Jules API to cancel a remote session: marking the record
+    // canceled above is enough — pollUntilTerminal (src/cloud/poller.mjs)
+    // reads the record on its next tick and stops itself there. The session
+    // on Jules' own infrastructure keeps running; only OUR polling/reporting
+    // of it stops. A remote job also never acquired the local write lock (its
+    // mode is 'write' but checkWriteAllowed/acquireWriteLock never ran for
+    // it — see startJob's remote branch), so releaseWriteLock must not run
+    // either: doing so would release a lock a concurrent LOCAL write-mode
+    // job on the same cwd actually holds.
+    appendEvent(
+      { kind: 'job.canceled', agent: result.agent, model: result.model, cwd: result.cwd, title: result.title, jobId, taskType: result.taskType ?? null },
+      { env }
+    )
+    active.delete(jobId)
+    return updated
+  }
 
   const pgid = active.get(jobId)?.pgid ?? result.pgid
   if (pgid) {

@@ -20,6 +20,11 @@ import {
   RouteResult,
   JobResultResponse,
   DelegateResponse,
+  RemoteInfo,
+  JulesCheckResponse,
+  JulesSessionsResponse,
+  JulesSourcesResponse,
+  JulesAccountsResponse,
 } from '../src/schemas.mjs'
 import { DELEGATION_MAP } from '../src/router.mjs'
 import { VALID_KINDS } from '../src/eventlog.mjs'
@@ -87,6 +92,102 @@ test('LearningInput rejects empty and over-long text', () => {
   assert.throws(() => LearningInput.parse({ text: '' }))
   assert.throws(() => LearningInput.parse({ text: 'x'.repeat(LEARNING_TEXT_MAX + 1) }))
   assert.equal(LearningInput.parse({ text: 'agy hangs on X', agent: 'agy' }).agent, 'agy')
+})
+
+test('RemoteInfo requires only provider and sessionId, everything else nullable/optional', () => {
+  const remote = RemoteInfo.parse({ provider: 'jules', sessionId: 'sess-1' })
+  assert.equal(remote.provider, 'jules')
+  assert.equal(remote.sessionId, 'sess-1')
+
+  const full = RemoteInfo.parse({
+    provider: 'jules',
+    accountId: null,
+    sessionId: 'sess-1',
+    sessionUrl: 'https://jules.google.com/session/sess-1',
+    source: 'sources/github/acme/widgets',
+    startingBranch: 'main',
+    state: 'IN_PROGRESS',
+    prUrl: null,
+    activityCursor: 'tok-2',
+    seenActivityIds: ['a1', 'a2'],
+    lastPolledAt: '2026-09-15T00:00:00.000Z',
+  })
+  assert.equal(full.state, 'IN_PROGRESS')
+
+  assert.throws(() => RemoteInfo.parse({ sessionId: 'sess-1' }), /provider/)
+  assert.throws(() => RemoteInfo.parse({ provider: 'jules' }), /sessionId/)
+})
+
+test('RemoteInfo accepts the working branch and the jules tool response schemas parse', () => {
+  assert.equal(RemoteInfo.parse({ provider: 'jules', sessionId: 'sess-1', branch: 'jules/fix-paginate' }).branch, 'jules/fix-paginate')
+
+  JulesCheckResponse.parse({
+    jobId: 'j-1',
+    sessionId: 'sess-1',
+    state: 'COMPLETED',
+    prUrl: 'https://github.com/acme/widgets/pull/42',
+    branch: 'jules/fix-paginate',
+    sessionUrl: 'https://jules.google.com/session/sess-1',
+    lastMessage: 'Done',
+    finalized: true,
+    terminal: true,
+  })
+  JulesCheckResponse.parse({ jobId: null, sessionId: null, state: 'UNKNOWN', prUrl: null, branch: null, sessionUrl: null, lastMessage: null, finalized: false, terminal: false })
+
+  const parsed = JulesSessionsResponse.parse({
+    sessions: [
+      {
+        sessionId: 'sess-1',
+        title: 'Fix paginate',
+        state: 'COMPLETED',
+        prUrl: 'https://github.com/acme/widgets/pull/42',
+        branch: 'jules/fix-paginate',
+        sessionUrl: 'https://jules.google.com/session/sess-1',
+        createTime: '2026-09-15T10:00:00Z',
+        jobId: 'j-1',
+      },
+    ],
+  })
+  assert.equal(parsed.sessions[0].jobId, 'j-1')
+  JulesSessionsResponse.parse({ sessions: [{ sessionId: null, state: 'UNKNOWN', jobId: null }] })
+})
+
+test('JobRecord accepts an optional remote block for a Jules job, and is unaffected for a local job', () => {
+  const base = fixture('state.json').jobs[0]
+  const remoteJob = JobRecord.parse({ ...base, agent: 'jules', model: 'jules', remote: { provider: 'jules', sessionId: 'sess-1' } })
+  assert.equal(remoteJob.remote.sessionId, 'sess-1')
+
+  const localJob = JobRecord.parse(base)
+  assert.equal(localJob.remote, undefined)
+})
+
+test('jules_accounts and jules_sources account-aware schemas parse', () => {
+  const parsed = JulesAccountsResponse.parse({
+    policy: 'round_robin',
+    accounts: [
+      {
+        id: 'acct-1',
+        label: 'pro',
+        enabled: true,
+        priority: 0,
+        dailyLimit: 100,
+        concurrentLimit: 15,
+        lastUsedAt: null,
+        createdAt: '2026-09-15T00:00:00Z',
+        updatedAt: '2026-09-15T00:00:00Z',
+        keyPresent: true,
+        keyLast4: '-aaa',
+        usage: { running: 1, last24h: 3 },
+        sourcesStatus: 'ok',
+        sourcesFetchedAt: '2026-09-15T00:00:00Z',
+      },
+    ],
+  })
+  assert.equal(parsed.accounts[0].keyPresent, true)
+  assert.equal(parsed.accounts[0].usage.last24h, 3)
+
+  JulesSourcesResponse.parse({ sources: [], accountId: 'acct-1', noSourceAccess: true, note: 'no source access' })
+  JulesSourcesResponse.parse({ sources: [] })
 })
 
 test('tool response schemas accept current outputs', () => {

@@ -1,0 +1,12 @@
+{
+  "activities": [
+    {
+      "name": "sessions/sess-running-1/activities/a4",
+      "id": "a4",
+      "createTime": "2025-05-21T13:30:00Z",
+      "originator": "agent",
+      "agentMessaged": { "agentMessage": "I updated the parser and added a regression test" }
+    }
+  ],
+  "nextPageToken": null
+}

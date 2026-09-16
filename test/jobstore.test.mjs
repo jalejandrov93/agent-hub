@@ -160,6 +160,22 @@ test('reconcileOrphans marks running jobs with a dead pid as failed/orphaned', a
   assert.equal(result.errorKind, 'orphaned')
 })
 
+test('reconcileOrphans skips a remote (Jules) job — it has no local pid, so it must never be killed off on restart', async () => {
+  const home = tmpHome()
+  const { createJob, updateResult, readResult, reconcileOrphans } = await freshJobstore(home)
+
+  const job = createJob({ agent: 'jules', model: 'jules', task: 't', cwd: '/tmp', title: 't' })
+  updateResult(job.jobId, {
+    status: 'running',
+    remote: { provider: 'jules', sessionId: 'sess-1' },
+    // no pid/pgid at all — a remote job never spawns a local process
+  })
+
+  const changed = reconcileOrphans()
+  assert.deepEqual(changed, [])
+  assert.equal(readResult(job.jobId).status, 'running')
+})
+
 test('reconcileOrphans leaves running jobs with a live pid untouched', async () => {
   const home = tmpHome()
   const { createJob, updateResult, readResult, reconcileOrphans } = await freshJobstore(home)

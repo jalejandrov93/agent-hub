@@ -120,6 +120,31 @@ test('a failing read job (CANCELED) ends up failed with errorKind and a job.fail
   assert.ok(events.some((e) => e.jobId === job.jobId && e.kind === 'job.failed'))
 })
 
+test('startJob never passes JULES_API_KEY to the spawned local CLI, but keeps the rest of the environment', async () => {
+  const home = tmpHome()
+  const { startJob } = await freshModules(home)
+  const adapters = { fake: fakeAdapter(SUCCESS_SCRIPT) }
+
+  const previousKey = process.env.JULES_API_KEY
+  process.env.JULES_API_KEY = 'super-secret-key'
+  let capturedOptions = null
+  const spawn = (cmd, argv, options) => {
+    capturedOptions = options
+    return fakeChild()
+  }
+  try {
+    const { done } = startJob({ agent: 'fake', model: 'x', task: 't', cwd: '/tmp', mode: 'read', adapterFor: (a) => adapters[a], spawn })
+    await done
+  } finally {
+    if (previousKey === undefined) delete process.env.JULES_API_KEY
+    else process.env.JULES_API_KEY = previousKey
+  }
+
+  assert.ok(capturedOptions.env, 'spawn must receive an explicit env')
+  assert.equal(capturedOptions.env.JULES_API_KEY, undefined)
+  assert.equal(capturedOptions.env.PATH, process.env.PATH)
+})
+
 test('a write-mode job in a primary worktree is rejected before spawning anything', async () => {
   const home = tmpHome()
   const { primary } = makeRepoWithSecondaryWorktree()
@@ -474,6 +499,96 @@ test('an already-failed read job keeps its errorKind and only gains readModeViol
   const failed = eventlog.readTail({ n: 20 }).filter((e) => e.jobId === job.jobId && e.kind === 'job.failed')
   assert.equal(failed.length, 1)
   assert.equal(failed[0].errorKind, 'crash')
+})
+
+test('an unknown agent throws before any job record is created (adapterFor now resolves at the very top of startJob)', async () => {
+  const home = tmpHome()
+  const { startJob } = await freshModules(home)
+
+  assert.throws(() => startJob({ agent: 'not-a-real-agent', model: 'x', task: 't', cwd: '/tmp' }), /unknown agent: not-a-real-agent/)
+
+  const runsDir = path.join(home, 'runs')
+  const entries = fs.existsSync(runsDir) ? fs.readdirSync(runsDir).filter((e) => e !== '.locks') : []
+  assert.deepEqual(entries, [], 'no job directory should exist for an agent that was never resolved')
+})
+
+test('startJob routes a remote adapter (e.g. jules) to startRemoteJobFn, before the write-mode gate/lock and read-mode snapshot ever run', async () => {
+  const home = tmpHome()
+  const { startJob } = await freshModules(home)
+  const { primary } = makeRepoWithSecondaryWorktree()
+  const fakeAdapterForJules = { remote: true, id: 'jules-fake' }
+  let captured = null
+  const startRemoteJobFn = (args) => {
+    captured = args
+    return { job: { jobId: 'remote-job-1', status: 'queued', mode: 'write' }, done: Promise.resolve() }
+  }
+
+  const { job, done } = startJob({
+    agent: 'jules',
+    model: 'jules',
+    task: 't',
+    cwd: primary, // a PRIMARY worktree — checkWriteAllowed would reject this for a local write-mode job
+    mode: 'write',
+    adapterFor: () => fakeAdapterForJules,
+    startRemoteJobFn,
+  })
+  await done
+
+  assert.equal(job.jobId, 'remote-job-1')
+  assert.notEqual(job.errorKind, 'worktree_denied', 'the write-mode gate must never run for a remote adapter')
+  assert.equal(captured.agent, 'jules')
+  assert.equal(captured.cwd, primary)
+  assert.equal(captured.adapter, fakeAdapterForJules)
+})
+
+test('canceling a remote job never releases a write lock it never acquired (would otherwise break a concurrent local write-mode job on the same cwd)', async () => {
+  const home = tmpHome()
+  const { secondary } = makeRepoWithSecondaryWorktree()
+  const { startJob, cancelJob, jobstore } = await freshModules(home)
+
+  // A real local write-mode job holds the lock on `secondary`.
+  const adapters = { fake: fakeAdapter(`setTimeout(() => console.log(JSON.stringify({status:"SUCCESS",response:"PONG"})), 300)`) }
+  const localJob = startJob({ agent: 'fake', model: 'x', task: 't', cwd: secondary, mode: 'write', adapterFor: (a) => adapters[a] })
+  assert.equal(localJob.job.status, 'running')
+
+  // A "remote" jules job sharing the same cwd — must never touch the lock.
+  const fakeAdapterForJules = { remote: true, id: 'jules-fake' }
+  const startRemoteJobFn = ({ env, cwd }) => {
+    const job = jobstore.createJob({ agent: 'jules', model: 'jules', task: 't', cwd, title: 't', mode: 'write', env })
+    jobstore.updateResult(job.jobId, { status: 'running', remote: { provider: 'jules', sessionId: 'sess-1' } }, env)
+    return { job: jobstore.readResult(job.jobId, env), done: new Promise(() => {}) }
+  }
+  const remoteJob = startJob({ agent: 'jules', model: 'jules', task: 't', cwd: secondary, mode: 'write', adapterFor: () => fakeAdapterForJules, startRemoteJobFn })
+  await cancelJob(remoteJob.job.jobId)
+  assert.equal(jobstore.readResult(remoteJob.job.jobId).status, 'canceled')
+
+  // A second concurrent local write-mode job to the same cwd is still rejected — the real lock is untouched.
+  const second = startJob({ agent: 'fake', model: 'x', task: 't', cwd: secondary, mode: 'write', adapterFor: (a) => adapters[a] })
+  assert.equal(second.job.status, 'failed')
+  assert.equal(second.job.errorKind, 'locked')
+
+  await localJob.done
+})
+
+test('canceling a remote job marks it canceled and appends job.canceled, without attempting to kill a local process group', async () => {
+  const home = tmpHome()
+  const { startJob, cancelJob, jobstore, eventlog } = await freshModules(home)
+  const fakeAdapterForJules = { remote: true, id: 'jules-fake' }
+  const startRemoteJobFn = ({ env }) => {
+    const job = jobstore.createJob({ agent: 'jules', model: 'jules', task: 't', cwd: '/tmp', title: 't', mode: 'write', env })
+    jobstore.updateResult(job.jobId, { status: 'running', remote: { provider: 'jules', sessionId: 'sess-1' } }, env)
+    return { job: jobstore.readResult(job.jobId, env), done: new Promise(() => {}) } // the remote session keeps running
+  }
+
+  const { job } = startJob({ agent: 'jules', model: 'jules', task: 't', cwd: '/tmp', mode: 'write', adapterFor: () => fakeAdapterForJules, startRemoteJobFn })
+  assert.equal(job.status, 'running')
+
+  const canceled = await cancelJob(job.jobId)
+  assert.equal(canceled.status, 'canceled')
+  assert.equal(jobstore.readResult(job.jobId).status, 'canceled')
+
+  const events = eventlog.readTail({ n: 20 }).filter((e) => e.jobId === job.jobId)
+  assert.ok(events.some((e) => e.kind === 'job.canceled'))
 })
 
 test('cancelJob never leaves a spurious job.failed event alongside job.canceled (finishJob races the kill)', async () => {

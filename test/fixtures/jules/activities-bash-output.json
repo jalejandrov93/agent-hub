@@ -1,0 +1,23 @@
+{
+  "activities": [
+    {
+      "name": "sessions/sess-running-1/activities/a10",
+      "id": "a10",
+      "createTime": "2025-05-21T13:33:00Z",
+      "originator": "agent",
+      "progressUpdated": {
+        "title": "Running tests",
+        "description": "Executing node --test"
+      },
+      "artifacts": [
+        {
+          "bashOutput": {
+            "command": "node --test",
+            "output": "pass 579"
+          }
+        }
+      ]
+    }
+  ],
+  "nextPageToken": null
+}
