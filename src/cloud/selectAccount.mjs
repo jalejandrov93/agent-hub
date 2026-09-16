@@ -4,7 +4,7 @@ import {
   usageFor as defaultUsageFor,
   readPolicy,
 } from '../accounts.mjs'
-import { readSourcesCache as defaultReadSourcesCache } from './sources.mjs'
+import { readSourcesCache as defaultReadSourcesCache, sourceNamesFromEntry } from './sources.mjs'
 
 /**
  * Pick one Jules account for a delegation.
@@ -64,7 +64,7 @@ export function selectAccount({
     for (const entry of eligible) {
       const cached = cache[entry.account.id]
       if (!cached || cached.status !== 'ok') unknown.push(entry)
-      else if (Array.isArray(cached.sources) && cached.sources.includes(source)) known.push(entry)
+      else if (sourceNamesFromEntry(cached).includes(source)) known.push(entry)
       // else: cache is good and does not list the source -> known to lack it.
     }
     if (known.length > 0) pool = known

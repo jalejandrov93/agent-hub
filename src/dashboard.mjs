@@ -18,10 +18,10 @@ import { listLearnings, proposeLearning, decideLearning, deleteLearning } from '
 import { jobResultTool } from './tools/jobs.mjs'
 import { startScheduler, runScheduleNow } from './scheduler.mjs'
 import { createAccount, updateAccount, deleteAccount, setPolicy, listAccounts } from './accounts.mjs'
-import { refreshSources, readSourcesCache } from './cloud/sources.mjs'
+import { refreshSources, readSourcesCache, normalizedSources } from './cloud/sources.mjs'
 import { createSchedule, updateSchedule, deleteSchedule } from './schedules.mjs'
 import { checkRemoteSession } from './cloud/check.mjs'
-import { julesAccountsTool, julesSchedulesTool, julesSourcesTool, julesSessionsTool } from './tools/jules.mjs'
+import { julesAccountsTool, julesSchedulesTool, julesSessionsTool } from './tools/jules.mjs'
 import { keyForAccount } from './cloud/credentials.mjs'
 import { stdoutPath } from './jobstore.mjs'
 import * as defaultClient from './cloud/jules/client.mjs'
@@ -780,61 +780,50 @@ export function createServer({ env = process.env, commandRunner = runCommand, di
     }
 
     if (url.pathname === '/api/sources' && req.method === 'GET') {
-      Promise.resolve()
-        .then(async () => {
-          const accounts = listAccounts(env)
-          const cache = readSourcesCache(env)
-          const merged = {}
+      try {
+        const accounts = listAccounts(env)
+        const cache = readSourcesCache(env)
+        const sourcesByName = new Map()
 
-          for (const account of accounts) {
-            const cached = cache[account.id] || {}
-            const status = cached.status || 'unknown'
-            const sourceNames = Array.isArray(cached.sources) ? cached.sources : []
-
-            for (const name of sourceNames) {
-              if (!merged[name]) {
-                merged[name] = {
-                  accounts: {},
-                  defaultBranch: null,
-                  branches: []
-                }
+        for (const account of accounts) {
+          const entry = cache[account.id]
+          const status = entry?.status ?? null
+          for (const source of normalizedSources(entry)) {
+            let merged = sourcesByName.get(source.name)
+            if (!merged) {
+              merged = {
+                name: source.name,
+                owner: source.owner,
+                repo: source.repo,
+                defaultBranch: source.defaultBranch,
+                branches: source.branches,
+                accounts: [],
               }
-              merged[name].accounts[account.id] = status
+              sourcesByName.set(source.name, merged)
+            } else {
+              // A source cached richly by one account fills in what an older
+              // or thinner cache entry from another account could not.
+              if (!merged.owner && source.owner) merged.owner = source.owner
+              if (!merged.repo && source.repo) merged.repo = source.repo
+              if (!merged.defaultBranch && source.defaultBranch) merged.defaultBranch = source.defaultBranch
+              if (merged.branches.length === 0 && source.branches.length > 0) merged.branches = source.branches
             }
+            merged.accounts.push({ accountId: account.id, status })
           }
+        }
 
-          // Try to get defaultBranch and branches from julesSourcesTool
-          // For each merged source, we can map to what's available.
-          // The issue description explicitly asked for "the merged cache: per source name, which accounts are known to have it, plus each account's status, defaultBranch and branches."
-          // Wait, the prompt says "the merged cache: per source name, which accounts are known to have it, plus each account's status, defaultBranch and branches."
-          // Which implies the returned payload is an object keyed by source name, or a list of them.
-          // Let's iterate the enabled accounts and call julesSourcesTool to fetch the branches for known repos.
-
-          for (const account of accounts) {
-            if (account.enabled === false) continue
-            try {
-              const result = await julesSourcesTool({ account: account.id, env, client })
-              for (const src of result.sources) {
-                if (merged[src.name]) {
-                  merged[src.name].defaultBranch = src.defaultBranch
-                  merged[src.name].branches = src.branches
-                } else {
-                  merged[src.name] = {
-                    accounts: { [account.id]: 'ok' },
-                    defaultBranch: src.defaultBranch,
-                    branches: src.branches
-                  }
-                }
-              }
-            } catch {
-              // skip if fail to fetch
-            }
-          }
-
-          return merged
+        sendJson(res, 200, {
+          sources: Array.from(sourcesByName.values()),
+          accounts: accounts.map((account) => ({
+            accountId: account.id,
+            label: account.label,
+            status: cache[account.id]?.status ?? null,
+            fetchedAt: cache[account.id]?.fetchedAt ?? null,
+          })),
         })
-        .then((payload) => sendJson(res, 200, payload))
-        .catch((error) => sendError(res, domainError(error)))
+      } catch (error) {
+        sendError(res, domainError(error))
+      }
       return
     }
 

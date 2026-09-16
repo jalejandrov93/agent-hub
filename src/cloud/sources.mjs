@@ -14,12 +14,65 @@ import * as defaultClient from './jules/client.mjs'
  * GET /sessions — see selectAccount.mjs.
  *
  * Shape: { [accountId]: { fetchedAt, status, sources } } with status one of
- * 'ok' | 'no_source_access' | 'error'. `sources` is a list of resource names
- * ('sources/github/{owner}/{repo}'), the identifier jules_delegate accepts.
+ * 'ok' | 'no_source_access' | 'error'. `sources` is a list of
+ * { name, owner, repo, defaultBranch, branches } — everything a caller needs
+ * to pick a startingBranch for jules_delegate without a second live call.
+ * `name` ('sources/github/{owner}/{repo}') is the identifier jules_delegate
+ * accepts. A cache written before this shape existed may still hold plain
+ * name strings; every reader here treats both shapes as equivalent.
  */
 
 function sourceName(source) {
   return typeof source?.name === 'string' && source.name.length > 0 ? source.name : null
+}
+
+// The one shape the Jules alpha API pins down for a source is its resource
+// name, 'sources/github/{owner}/{repo}' — githubRepo is an observed-in-the-
+// wild convenience field, not a documented guarantee, so it is only ever a
+// preferred value, never the sole source of owner/repo.
+function ownerRepoFromName(name) {
+  const match = typeof name === 'string' ? name.match(/^sources\/github\/([^/]+)\/(.+)$/) : null
+  return match ? { owner: match[1], repo: match[2] } : { owner: null, repo: null }
+}
+
+/** Raw Jules API source item -> the cached shape: {name, owner, repo, defaultBranch, branches}. */
+function mapSource(raw) {
+  const name = sourceName(raw)
+  const fallback = ownerRepoFromName(name)
+  const githubRepo = raw?.githubRepo
+  const defaultBranchName = githubRepo?.defaultBranch?.displayName
+  return {
+    name,
+    owner: githubRepo?.owner ?? fallback.owner,
+    repo: githubRepo?.repo ?? fallback.repo,
+    defaultBranch: typeof defaultBranchName === 'string' && defaultBranchName.length > 0 ? defaultBranchName : null,
+    branches: Array.isArray(githubRepo?.branches)
+      ? githubRepo.branches.map((branch) => branch?.displayName).filter((name) => typeof name === 'string' && name.length > 0)
+      : [],
+  }
+}
+
+/**
+ * Normalize one cache entry's `sources` to the richer shape regardless of
+ * whether it was written before or after that shape existed. A legacy plain
+ * string becomes {name, owner: null, repo: null, defaultBranch: null,
+ * branches: []} — the caller loses nothing it had (the name), and gains
+ * nothing it never had either.
+ */
+export function normalizedSources(entry) {
+  if (!Array.isArray(entry?.sources)) return []
+  return entry.sources
+    .map((source) =>
+      typeof source === 'string'
+        ? { name: source, owner: null, repo: null, defaultBranch: null, branches: [] }
+        : source
+    )
+    .filter((source) => typeof source?.name === 'string' && source.name.length > 0)
+}
+
+/** Plain source names out of a cache entry, in either shape. */
+export function sourceNamesFromEntry(entry) {
+  return normalizedSources(entry).map((source) => source.name)
 }
 
 function cachePath(env) {
@@ -37,7 +90,7 @@ export async function refreshSources({ accountId, env = process.env, client = de
   let entry
   try {
     const page = await client.listSources({ apiKey })
-    const sources = Array.isArray(page?.sources) ? page.sources.map(sourceName).filter((name) => name !== null) : []
+    const sources = Array.isArray(page?.sources) ? page.sources.map(mapSource).filter((source) => source.name !== null) : []
     entry = { fetchedAt: new Date().toISOString(), status: 'ok', sources }
   } catch (error) {
     // Only an error carrying an HTTP status came from the API. Anything else
@@ -84,7 +137,7 @@ export function accountsForSource(source, env = process.env) {
       unknown.push(accountId)
       continue
     }
-    if (Array.isArray(entry.sources) && entry.sources.includes(source)) accounts.push(accountId)
+    if (sourceNamesFromEntry(entry).includes(source)) accounts.push(accountId)
   }
 
   return { accounts, unknown }

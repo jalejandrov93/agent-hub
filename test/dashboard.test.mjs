@@ -1097,13 +1097,15 @@ test('refresh-sources happy path', async () => {
     const res = await postJson(port, `/api/accounts/${acc.id}/refresh-sources`, {})
     assert.equal(res.status, 200)
     assert.equal(res.body.status, 'ok')
-    assert.deepEqual(res.body.sources, ['sources/github/a/b'])
+    assert.deepEqual(res.body.sources, [
+      { name: 'sources/github/a/b', owner: 'a', repo: 'b', defaultBranch: null, branches: [] },
+    ])
   } finally {
     server.close()
   }
 })
 
-test('GET /api/sources happy path: returns merged cache', async () => {
+test('GET /api/sources happy path: returns one entry per source name with every account known to have it', async () => {
   const env = { AGENT_HUB_HOME: tmpHome() }
   const { createAccount } = await import('../src/accounts.mjs?t=' + Date.now())
   const acc = createAccount({ label: 'test', apiKey: 'key-123' }, env)
@@ -1127,10 +1129,19 @@ test('GET /api/sources happy path: returns merged cache', async () => {
     const res = await get(port, '/api/sources')
     assert.equal(res.status, 200)
     const body = typeof res.body === 'string' ? JSON.parse(res.body) : res.body;
-    assert.ok(body['sources/github/a/b'])
-    assert.equal(body['sources/github/a/b'].defaultBranch, 'main')
-    assert.deepEqual(body['sources/github/a/b'].branches, ['main', 'dev'])
-    assert.deepEqual(body['sources/github/a/b'].accounts[acc.id], 'ok')
+    assert.equal(body.sources.length, 1)
+    const source = body.sources[0]
+    assert.equal(source.name, 'sources/github/a/b')
+    assert.equal(source.owner, 'a')
+    assert.equal(source.repo, 'b')
+    assert.equal(source.defaultBranch, 'main')
+    assert.deepEqual(source.branches, ['main', 'dev'])
+    assert.deepEqual(source.accounts, [{ accountId: acc.id, status: 'ok' }])
+
+    assert.deepEqual(body.accounts, [
+      { accountId: acc.id, label: 'test', status: 'ok', fetchedAt: body.accounts[0].fetchedAt },
+    ])
+    assert.ok(body.accounts[0].fetchedAt)
   } finally {
     server.close()
   }
@@ -1219,6 +1230,106 @@ test('Cloud sessions happy paths', async () => {
     const actResBody = typeof actRes.body === 'string' ? JSON.parse(actRes.body) : actRes.body;
     assert.deepEqual(actResBody.activities, ['{"activity":"foo"}', '{"activity":"bar"}'])
 
+  } finally {
+    server.close()
+  }
+})
+
+test('Cloud contract: every Cloud GET route parses with its shared schema from src/schemas.mjs', async () => {
+  // The dashboard's Cloud view (dashboard/src/lib/api.ts) and this server are
+  // written by separate agents. A hand-rolled zod schema on the frontend can
+  // drift from what the server actually returns without any test noticing,
+  // because view tests mock @/lib/api instead of hitting the real server.
+  // This test starts the real server and parses every real Cloud response
+  // with the SAME schema the frontend imports from @shared — so a drift on
+  // either side fails here, not in production.
+  const env = { AGENT_HUB_HOME: tmpHome() }
+  const {
+    CloudAccountsResponse,
+    CloudSourcesResponse,
+    CloudSchedulesResponse,
+    CloudSessionsResponse,
+    CloudActivitiesResponse,
+  } = await import('../src/schemas.mjs?t=' + Date.now())
+  const { createAccount } = await import('../src/accounts.mjs?t=' + Date.now())
+  const { refreshSources } = await import('../src/cloud/sources.mjs?t=' + Date.now())
+  const { createSchedule, updateSchedule } = await import('../src/schedules.mjs?t=' + Date.now())
+  const { createJob, updateResult, appendStdout } = await import('../src/jobstore.mjs?t=' + Date.now())
+
+  // Two accounts, so /api/accounts and /api/sources each have more than one
+  // row to merge.
+  const accA = createAccount({ label: 'pro-1', apiKey: 'key-aaaa1111' }, env)
+  createAccount({ label: 'pro-2', apiKey: 'key-bbbb2222' }, env)
+
+  const fakeClient = {
+    async listSources() {
+      return {
+        sources: [
+          {
+            name: 'sources/github/acme/widgets',
+            githubRepo: {
+              owner: 'acme',
+              repo: 'widgets',
+              defaultBranch: { displayName: 'main' },
+              branches: [{ displayName: 'main' }, { displayName: 'dev' }],
+            },
+          },
+        ],
+      }
+    },
+    async listSessions() {
+      return {
+        sessions: [
+          { id: 'ses-1', name: 'sessions/ses-1', title: 'Fix the thing', state: 'IN_PROGRESS', createTime: new Date().toISOString() },
+        ],
+      }
+    },
+    async getSession() {
+      return { id: 'ses-1', state: 'IN_PROGRESS' }
+    },
+  }
+
+  // Seed a sources cache for one account.
+  await refreshSources({ accountId: accA.id, env, client: fakeClient, apiKey: 'key-aaaa1111' })
+
+  // Seed a running Jules job so /api/cloud/sessions and /api/cloud/jobs/:id/activities have something real to return.
+  const job = createJob({ agent: 'jules', model: 'jules', task: 'do it', cwd: null, env })
+  updateResult(job.jobId, { status: 'running', remote: { sessionId: 'ses-1', state: 'IN_PROGRESS', accountId: accA.id } }, env)
+  appendStdout(job.jobId, '[jules] started\n', env)
+
+  // Seed a schedule linked to that job's outcome.
+  const schedule = createSchedule(
+    {
+      label: 'nightly',
+      schedule: { kind: 'daily', at: '02:00', weekdays: [1, 2, 3, 4, 5] },
+      prompt: 'p',
+      source: 'sources/github/acme/widgets',
+      accountId: accA.id,
+    },
+    env
+  )
+  updateSchedule(schedule.id, { lastJobId: job.jobId, lastRunAt: new Date().toISOString(), lastStatus: 'running' }, env)
+
+  const server = createServer({ env, client: fakeClient })
+  const port = await listen(server)
+  try {
+    const accountsBody = JSON.parse((await get(port, '/api/accounts')).body)
+    assert.doesNotThrow(() => CloudAccountsResponse.parse(accountsBody), 'GET /api/accounts must match the shared CloudAccountsResponse schema')
+
+    const sourcesBody = JSON.parse((await get(port, '/api/sources')).body)
+    assert.doesNotThrow(() => CloudSourcesResponse.parse(sourcesBody), 'GET /api/sources must match the shared CloudSourcesResponse schema')
+
+    const schedulesBody = JSON.parse((await get(port, '/api/schedules')).body)
+    assert.doesNotThrow(() => CloudSchedulesResponse.parse(schedulesBody), 'GET /api/schedules must match the shared CloudSchedulesResponse schema')
+
+    const sessionsBody = JSON.parse((await get(port, '/api/cloud/sessions')).body)
+    assert.doesNotThrow(() => CloudSessionsResponse.parse(sessionsBody), 'GET /api/cloud/sessions must match the shared CloudSessionsResponse schema')
+
+    const activitiesBody = JSON.parse((await get(port, `/api/cloud/jobs/${job.jobId}/activities`)).body)
+    assert.doesNotThrow(
+      () => CloudActivitiesResponse.parse(activitiesBody),
+      'GET /api/cloud/jobs/:id/activities must match the shared CloudActivitiesResponse schema'
+    )
   } finally {
     server.close()
   }

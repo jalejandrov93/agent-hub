@@ -1,7 +1,7 @@
 import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query"
 import * as api from "./api"
 import { qk } from "./query-keys"
-import type { LearningInputT, CloudAccount, CloudSchedule } from "./types"
+import type { LearningInputT, CloudAccountPatch, CloudSchedulePatch } from "./types"
 
 const STATE_REFETCH_INTERVAL_MS = 15000
 
@@ -113,7 +113,7 @@ export function useCreateAccountMutation() {
 export function useUpdateAccountMutation() {
   const queryClient = useQueryClient()
   return useMutation({
-    mutationFn: ({ id, data }: { id: string; data: Partial<CloudAccount> }) => api.updateAccount(id, data),
+    mutationFn: ({ id, data }: { id: string; data: CloudAccountPatch }) => api.updateAccount(id, data),
     onSuccess: () => queryClient.invalidateQueries({ queryKey: qk.accounts }),
   })
 }
@@ -167,7 +167,7 @@ export function useCreateScheduleMutation() {
 export function useUpdateScheduleMutation() {
   const queryClient = useQueryClient()
   return useMutation({
-    mutationFn: ({ id, data }: { id: string; data: Partial<CloudSchedule> }) => api.updateSchedule(id, data),
+    mutationFn: ({ id, data }: { id: string; data: CloudSchedulePatch }) => api.updateSchedule(id, data),
     onSuccess: () => queryClient.invalidateQueries({ queryKey: qk.schedules }),
   })
 }

@@ -14,6 +14,15 @@ import {
   Learning,
   LearningInput,
   AgentStatusRow,
+  CloudAccountsResponse,
+  CloudAccountRow,
+  CloudSourcesResponse,
+  CloudSchedulesResponse,
+  CloudScheduleRow,
+  CloudSessionsResponse,
+  CloudActivitiesResponse,
+  CloudSourceCacheEntry,
+  JulesCheckResponse,
 } from "@shared"
 import type {
   StateResponseT,
@@ -24,61 +33,19 @@ import type {
   LearningInputT,
   AgentRow,
   CloudAccount,
-  CloudSource,
+  CloudAccountInput,
+  CloudAccountPatch,
+  CloudAccountsResponseT,
+  CloudSourcesResponseT,
   AccountPolicy,
   CloudSchedule,
-  CloudSession,
-  CloudActivity,
+  CloudScheduleInput,
+  CloudSchedulePatch,
+  CloudSchedulesResponseT,
+  CloudSessionsResponseT,
+  CloudActivitiesResponseT,
+  CloudSourceCacheEntryT,
 } from "./types"
-
-// TODO: Remove these local schemas once they are available in @shared
-const CloudAccountSchema = z.object({
-  id: z.string(),
-  label: z.string(),
-  keyMasked: z.string(),
-  enabled: z.boolean(),
-  usageToday: z.number(),
-  dailyLimit: z.number().nullable(),
-  runningCount: z.number(),
-  concurrentLimit: z.number().nullable(),
-  sourceCount: z.number(),
-  sourceStatus: z.enum(["ok", "no_source_access"]),
-  lastUsed: z.string().nullable(),
-})
-
-const CloudSourceSchema = z.object({
-  id: z.string(),
-  repo: z.string(),
-  accounts: z.array(z.string()),
-  defaultBranch: z.string(),
-  branches: z.array(z.string()),
-})
-
-const CloudScheduleSchema = z.object({
-  id: z.string(),
-  label: z.string(),
-  schedule: z.string(),
-  source: z.string(),
-  nextRun: z.string().nullable(),
-  lastRun: z.string().nullable(),
-  lastResult: z.enum(["success", "failed"]).nullable(),
-  enabled: z.boolean(),
-})
-
-const CloudSessionSchema = z.object({
-  id: z.string(),
-  state: z.enum(["running", "completed", "failed"]),
-  title: z.string(),
-  branch: z.string(),
-  pullRequestLink: z.string().nullable(),
-  localJobId: z.string().nullable(),
-})
-
-const CloudActivitySchema = z.object({
-  id: z.string(),
-  ts: z.string(),
-  message: z.string(),
-})
 
 export class ApiError extends Error {
   status: number
@@ -206,16 +173,16 @@ export function cancelJob(jobId: string): Promise<unknown> {
   return fetchJson(z.unknown(), `/api/jobs/${encodeURIComponent(jobId)}/cancel`, writeInit("POST"))
 }
 
-export function getAccounts(): Promise<{ accounts: CloudAccount[] }> {
-  return fetchJson(z.object({ accounts: z.array(CloudAccountSchema) }), "/api/accounts")
+export function getAccounts(): Promise<CloudAccountsResponseT> {
+  return fetchJson(CloudAccountsResponse, "/api/accounts")
 }
 
-export function createAccount(data: { label: string; key: string; concurrentLimit?: number; dailyLimit?: number }): Promise<CloudAccount> {
-  return fetchJson(CloudAccountSchema, "/api/accounts", writeInit("POST", data))
+export function createAccount(data: CloudAccountInput): Promise<CloudAccount> {
+  return fetchJson(CloudAccountRow, "/api/accounts", writeInit("POST", data))
 }
 
-export function updateAccount(id: string, data: Partial<CloudAccount>): Promise<CloudAccount> {
-  return fetchJson(CloudAccountSchema, `/api/accounts/${encodeURIComponent(id)}`, writeInit("PATCH", data))
+export function updateAccount(id: string, data: CloudAccountPatch): Promise<CloudAccount> {
+  return fetchJson(CloudAccountRow, `/api/accounts/${encodeURIComponent(id)}`, writeInit("PATCH", data))
 }
 
 export function deleteAccount(id: string): Promise<{ deleted: true }> {
@@ -226,42 +193,42 @@ export function setAccountPolicy(policy: AccountPolicy): Promise<{ policy: Accou
   return fetchJson(z.object({ policy: z.enum(["round_robin", "least_used", "priority"]) }), "/api/accounts/policy", writeInit("PUT", { policy }))
 }
 
-export function refreshAccountSources(id: string): Promise<{ success: boolean }> {
-  return fetchJson(z.object({ success: z.boolean() }), `/api/accounts/${encodeURIComponent(id)}/refresh-sources`, writeInit("POST"))
+export function refreshAccountSources(id: string): Promise<CloudSourceCacheEntryT> {
+  return fetchJson(CloudSourceCacheEntry, `/api/accounts/${encodeURIComponent(id)}/refresh-sources`, writeInit("POST"))
 }
 
-export function getSources(): Promise<{ sources: CloudSource[] }> {
-  return fetchJson(z.object({ sources: z.array(CloudSourceSchema) }), "/api/sources")
+export function getSources(): Promise<CloudSourcesResponseT> {
+  return fetchJson(CloudSourcesResponse, "/api/sources")
 }
 
-export function getSchedules(): Promise<{ schedules: CloudSchedule[] }> {
-  return fetchJson(z.object({ schedules: z.array(CloudScheduleSchema) }), "/api/schedules")
+export function getSchedules(): Promise<CloudSchedulesResponseT> {
+  return fetchJson(CloudSchedulesResponse, "/api/schedules")
 }
 
-export function createSchedule(data: { label: string; schedule: string; source: string; enabled?: boolean }): Promise<CloudSchedule> {
-  return fetchJson(CloudScheduleSchema, "/api/schedules", writeInit("POST", data))
+export function createSchedule(data: CloudScheduleInput): Promise<CloudSchedule> {
+  return fetchJson(CloudScheduleRow, "/api/schedules", writeInit("POST", data))
 }
 
-export function updateSchedule(id: string, data: Partial<CloudSchedule>): Promise<CloudSchedule> {
-  return fetchJson(CloudScheduleSchema, `/api/schedules/${encodeURIComponent(id)}`, writeInit("PATCH", data))
+export function updateSchedule(id: string, data: CloudSchedulePatch): Promise<CloudSchedule> {
+  return fetchJson(CloudScheduleRow, `/api/schedules/${encodeURIComponent(id)}`, writeInit("PATCH", data))
 }
 
 export function deleteSchedule(id: string): Promise<{ deleted: true }> {
   return fetchJson(z.object({ deleted: z.literal(true) }), `/api/schedules/${encodeURIComponent(id)}`, writeInit("DELETE"))
 }
 
-export function runScheduleNow(id: string): Promise<{ success: boolean }> {
-  return fetchJson(z.object({ success: z.boolean() }), `/api/schedules/${encodeURIComponent(id)}/run-now`, writeInit("POST"))
+export function runScheduleNow(id: string): Promise<CloudSchedule> {
+  return fetchJson(CloudScheduleRow, `/api/schedules/${encodeURIComponent(id)}/run-now`, writeInit("POST"))
 }
 
-export function getCloudSessions(): Promise<{ sessions: CloudSession[] }> {
-  return fetchJson(z.object({ sessions: z.array(CloudSessionSchema) }), "/api/cloud/sessions")
+export function getCloudSessions(): Promise<CloudSessionsResponseT> {
+  return fetchJson(CloudSessionsResponse, "/api/cloud/sessions")
 }
 
-export function checkCloudJob(id: string): Promise<{ success: boolean }> {
-  return fetchJson(z.object({ success: z.boolean() }), `/api/cloud/jobs/${encodeURIComponent(id)}/check`, writeInit("POST"))
+export function checkCloudJob(id: string) {
+  return fetchJson(JulesCheckResponse, `/api/cloud/jobs/${encodeURIComponent(id)}/check`, writeInit("POST"))
 }
 
-export function getCloudJobActivities(id: string): Promise<{ activities: CloudActivity[] }> {
-  return fetchJson(z.object({ activities: z.array(CloudActivitySchema) }), `/api/cloud/jobs/${encodeURIComponent(id)}/activities`)
+export function getCloudJobActivities(id: string): Promise<CloudActivitiesResponseT> {
+  return fetchJson(CloudActivitiesResponse, `/api/cloud/jobs/${encodeURIComponent(id)}/activities`)
 }

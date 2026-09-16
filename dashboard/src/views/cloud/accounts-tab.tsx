@@ -7,11 +7,19 @@ import { Input } from "@/components/ui/input"
 import { Field, FieldLabel } from "@/components/ui/field"
 import { Dialog, DialogContent, DialogHeader, DialogTitle, DialogFooter } from "@/components/ui/dialog"
 import { Select, SelectTrigger, SelectValue, SelectContent, SelectGroup, SelectItem } from "@/components/ui/select"
-import { Badge } from "@/components/ui/badge"
+import { StatusBadge } from "@/components/StatusBadge"
 import { Skeleton } from "@/components/ui/skeleton"
 import { Trash, RefreshCw, Pencil } from "lucide-react"
 import { RelativeTime } from "@/components/RelativeTime"
 import type { CloudAccount, AccountPolicy } from "@/lib/types"
+
+/** sourcesStatus is 'ok' | 'no_source_access' | 'error', or absent when never refreshed. */
+function sourcesStatusValue(status: string | null | undefined): string {
+  if (status === "ok") return "succeeded"
+  if (status === "error") return "failed"
+  if (status === "no_source_access") return "no_source_access"
+  return "never_checked"
+}
 
 function AccountFormDialog({
   account,
@@ -25,14 +33,14 @@ function AccountFormDialog({
   onOpenChange: (open: boolean) => void
 }) {
   const [label, setLabel] = React.useState(account?.label ?? "")
-  const [key, setKey] = React.useState("")
+  const [apiKey, setApiKey] = React.useState("")
   const [concurrentLimit, setConcurrentLimit] = React.useState(account?.concurrentLimit?.toString() ?? "")
   const [dailyLimit, setDailyLimit] = React.useState(account?.dailyLimit?.toString() ?? "")
 
   React.useEffect(() => {
     if (isOpen) {
       setLabel(account?.label ?? "")
-      setKey("")
+      setApiKey("")
       setConcurrentLimit(account?.concurrentLimit?.toString() ?? "")
       setDailyLimit(account?.dailyLimit?.toString() ?? "")
     }
@@ -43,7 +51,7 @@ function AccountFormDialog({
 
   const isPending = createMut.isPending || updateMut.isPending
 
-  const isValid = label.trim().length > 0 && (account ? true : key.trim().length > 0)
+  const isValid = label.trim().length > 0 && (account ? true : apiKey.trim().length > 0)
 
   const handleSubmit = (e: React.FormEvent) => {
     e.preventDefault()
@@ -59,7 +67,7 @@ function AccountFormDialog({
       )
     } else {
       createMut.mutate(
-        { label, key, concurrentLimit: cLimit, dailyLimit: dLimit },
+        { label, apiKey, concurrentLimit: cLimit, dailyLimit: dLimit },
         { onSuccess: onClose }
       )
     }
@@ -79,7 +87,7 @@ function AccountFormDialog({
           {!account && (
             <Field>
               <FieldLabel htmlFor="account-key">API Key</FieldLabel>
-              <Input id="account-key" type="password" value={key} onChange={(e) => setKey(e.target.value)} disabled={isPending} />
+              <Input id="account-key" type="password" value={apiKey} onChange={(e) => setApiKey(e.target.value)} disabled={isPending} />
             </Field>
           )}
           <Field>
@@ -125,7 +133,7 @@ function AccountActions({ account }: { account: CloudAccount }) {
         open={isDeleteOpen}
         onOpenChange={setIsDeleteOpen}
         title="Delete account"
-        description={`Are you sure you want to delete ${account.label}?`}
+        description={`Are you sure you want to delete ${account.label ?? account.id}?`}
         onConfirm={() => deleteMut.mutate(account.id)}
         confirmLabel="Delete"
         destructive={true}
@@ -149,12 +157,16 @@ export function AccountsTab() {
     {
       key: "label",
       header: "Label",
-      cell: (row) => <div className="font-medium">{row.label}</div>,
+      cell: (row) => <div className="font-medium">{row.label ?? row.id}</div>,
     },
     {
       key: "key",
       header: "Key",
-      cell: (row) => <div className="font-mono text-muted-foreground">{row.keyMasked}</div>,
+      cell: (row) => (
+        <div className="font-mono text-muted-foreground">
+          {row.keyPresent ? `••••${row.keyLast4 ?? ""}` : "No key"}
+        </div>
+      ),
     },
     {
       key: "enabled",
@@ -172,10 +184,10 @@ export function AccountsTab() {
     },
     {
       key: "usage",
-      header: "Usage (Today)",
+      header: "Usage (24h)",
       cell: (row) => (
         <div>
-          {row.usageToday} {row.dailyLimit ? `/ ${row.dailyLimit}` : ""}
+          {row.usage?.last24h ?? 0} / {row.dailyLimit}
         </div>
       ),
     },
@@ -184,24 +196,19 @@ export function AccountsTab() {
       header: "Running",
       cell: (row) => (
         <div>
-          {row.runningCount} {row.concurrentLimit ? `/ ${row.concurrentLimit}` : ""}
+          {row.usage?.running ?? 0} / {row.concurrentLimit}
         </div>
       ),
     },
     {
       key: "sources",
       header: "Sources",
-      cell: (row) => (
-        <div className="flex items-center gap-2">
-          <span>{row.sourceCount}</span>
-          {row.sourceStatus === "no_source_access" && <Badge variant="destructive">No access</Badge>}
-        </div>
-      ),
+      cell: (row) => <StatusBadge kind="status" value={sourcesStatusValue(row.sourcesStatus)} />,
     },
     {
       key: "lastUsed",
       header: "Last Used",
-      cell: (row) => row.lastUsed ? <RelativeTime iso={row.lastUsed} /> : <span className="text-muted-foreground">Never</span>,
+      cell: (row) => row.lastUsedAt ? <RelativeTime iso={row.lastUsedAt} /> : <span className="text-muted-foreground">Never</span>,
     },
     {
       key: "actions",
@@ -216,7 +223,7 @@ export function AccountsTab() {
       <div className="flex items-center justify-between">
         <div className="flex items-center gap-4">
           <Select
-            value="round_robin"
+            value={data.policy}
             onValueChange={(v) => setPolicyMut.mutate(v as AccountPolicy)}
           >
             <SelectTrigger className="w-[180px]" id="policy-select">
