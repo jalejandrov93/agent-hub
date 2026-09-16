@@ -8,7 +8,7 @@ import { paths } from './config.mjs'
 import { reconcileOrphans, listJobs, readResult, responsePath } from './jobstore.mjs'
 import { agentsStatusTool, routeTool, knownTaskTypes } from './tools/agents.mjs'
 import { delegateTool, jobWaitTool, jobStatusTool, jobResultTool, jobCancelTool, jobReplyTool } from './tools/jobs.mjs'
-import { julesDelegateTool, julesSourcesTool, julesCheckTool, julesSessionsTool, julesAccountsTool } from './tools/jules.mjs'
+import { julesDelegateTool, julesSourcesTool, julesCheckTool, julesSessionsTool, julesAccountsTool, julesSchedulesTool } from './tools/jules.mjs'
 import { resumeRemoteJobs } from './cloud/runner.mjs'
 import { metricsTool } from './tools/insights.mjs'
 import { learningProposeTool } from './tools/learnings.mjs'
@@ -27,6 +27,7 @@ import {
   JulesSessionsResponse,
   JulesSourcesResponse,
   JulesAccountsResponse,
+  JulesSchedulesResponse,
 } from './schemas.mjs'
 
 const VERSION = '2.1.0'
@@ -290,6 +291,22 @@ export function buildServer() {
       annotations: { readOnlyHint: true, idempotentHint: true },
     },
     guard(() => julesAccountsTool({}))
+  )
+
+  server.registerTool(
+    'jules_schedules',
+    {
+      title: 'List recurring Jules tasks',
+      description:
+        'Read-only view of the recurring Jules tasks owned by the dashboard service: each schedule with its next run and the ' +
+        'outcome of the job it started last time. The Jules API has no scheduling, so agent-hub owns recurrence; schedules are ' +
+        'created and edited in the dashboard, never here. A schedule whose previous job is still running is skipped (recorded as ' +
+        'lastStatus "skipped") rather than piling up a duplicate session against the same repo.',
+      inputSchema: {},
+      outputSchema: JulesSchedulesResponse,
+      annotations: { readOnlyHint: true, idempotentHint: true },
+    },
+    guard(() => julesSchedulesTool({}))
   )
 
   server.registerTool(
@@ -578,6 +595,9 @@ async function main() {
   // stdio handshake below. See src/startup.mjs for the non-blocking wiring.
   scheduleStartupDiscovery()
 
+  // Deliberately NOT startScheduler(): this MCP server is a per-session stdio
+  // process, and the dashboard already runs the scheduler as the one
+  // long-lived process. Two schedulers would double-fire every schedule.
   const server = buildServer()
   await server.connect(new StdioServerTransport())
   log(`ready — state dir ${paths().home}`)

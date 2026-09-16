@@ -18,6 +18,9 @@ export function paths(env = process.env) {
     discoveryFile: path.join(home, 'discovery.json'),
     overridesFile: path.join(home, 'overrides.json'),
     proposalsFile: path.join(home, 'proposals.json'),
+    // Recurring Jules tasks. Owned by the long-lived dashboard process, which
+    // is the only process here that outlives a Claude session (see scheduler.mjs).
+    schedulesFile: path.join(home, 'schedules.json'),
     // Holds raw Jules API keys, so it is written 0600 (see accounts.mjs).
     accountsFile: path.join(home, 'accounts.json'),
     // Per-account /sources cache. Not credentials, so default mode is fine.

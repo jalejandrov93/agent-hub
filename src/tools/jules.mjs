@@ -1,6 +1,7 @@
 import { startRemoteJob as defaultStartRemoteJob } from '../cloud/runner.mjs'
 import { checkRemoteSession as defaultCheckRemoteSession } from '../cloud/check.mjs'
-import { listJobs as defaultListJobs } from '../jobstore.mjs'
+import { listJobs as defaultListJobs, readResult as defaultReadResult } from '../jobstore.mjs'
+import { listSchedules as defaultListSchedules } from '../schedules.mjs'
 import {
   listAccounts as defaultListAccounts,
   getAccountSecret as defaultGetAccountSecret,
@@ -248,5 +249,39 @@ export function julesAccountsTool({
       sourcesStatus: cache[account.id]?.status ?? null,
       sourcesFetchedAt: cache[account.id]?.fetchedAt ?? null,
     })),
+  }
+}
+
+/**
+ * Read-only view of the recurring Jules tasks: each schedule with its next run
+ * and the outcome of the job it started last time. Creating and editing
+ * schedules belongs to the dashboard, so there is deliberately no write tool.
+ */
+export function julesSchedulesTool({
+  env = process.env,
+  listSchedulesFn = defaultListSchedules,
+  readResultFn = defaultReadResult,
+} = {}) {
+  return {
+    schedules: listSchedulesFn(env).map((schedule) => {
+      let lastResult = null
+      if (schedule.lastJobId) {
+        try {
+          const job = readResultFn(schedule.lastJobId, env)
+          lastResult = {
+            jobId: job.jobId,
+            status: job.status,
+            errorKind: job.errorKind ?? null,
+            sessionId: job.remote?.sessionId ?? null,
+            prUrl: job.remote?.prUrl ?? null,
+          }
+        } catch {
+          // The job record is gone (pruned runs dir): the schedule still shows,
+          // just without a last result.
+          lastResult = null
+        }
+      }
+      return { ...schedule, lastResult }
+    }),
   }
 }

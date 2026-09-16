@@ -4,8 +4,9 @@ import fs from 'node:fs'
 import path from 'node:path'
 import os from 'node:os'
 import { fileURLToPath } from 'node:url'
-import { julesDelegateTool, julesSourcesTool, julesCheckTool, julesSessionsTool, julesAccountsTool } from '../../src/tools/jules.mjs'
+import { julesDelegateTool, julesSourcesTool, julesCheckTool, julesSessionsTool, julesAccountsTool, julesSchedulesTool } from '../../src/tools/jules.mjs'
 import { createAccount } from '../../src/accounts.mjs'
+import { createSchedule, updateSchedule } from '../../src/schedules.mjs'
 import { refreshSources } from '../../src/cloud/sources.mjs'
 
 const FIXTURES = path.join(path.dirname(fileURLToPath(import.meta.url)), '..', 'fixtures', 'jules')
@@ -399,4 +400,44 @@ test('julesAccountsTool returns masked accounts with usage and source-cache stat
   assert.deepEqual(row.usage, { running: 0, last24h: 0 })
   assert.equal(row.sourcesStatus, 'ok')
   assert.ok(!JSON.stringify(result).includes('key-aaa'), 'the raw key must never appear in jules_accounts output')
+})
+
+test('julesSchedulesTool returns schedules with their next run and last result', () => {
+  const env = { AGENT_HUB_HOME: tmpHome() }
+  const created = createSchedule(
+    { label: 'nightly', schedule: { kind: 'interval', everyMinutes: 30 }, prompt: 'p', source: 'sources/github/acme/widgets' },
+    env,
+    { nowMs: Date.now() }
+  )
+  updateSchedule(created.id, { lastJobId: 'job-1', lastStatus: 'queued' }, env)
+
+  const readResultFn = (jobId) => ({
+    jobId,
+    status: 'running',
+    errorKind: null,
+    remote: { provider: 'jules', sessionId: 's-1', prUrl: null },
+  })
+
+  const result = julesSchedulesTool({ env, readResultFn })
+  assert.equal(result.schedules.length, 1)
+  assert.equal(result.schedules[0].id, created.id)
+  assert.ok(result.schedules[0].nextRunAt, 'next run is surfaced')
+  assert.equal(result.schedules[0].lastResult.status, 'running')
+  assert.equal(result.schedules[0].lastResult.sessionId, 's-1')
+})
+
+test('julesSchedulesTool tolerates a lastJobId whose record is gone', () => {
+  const env = { AGENT_HUB_HOME: tmpHome() }
+  const created = createSchedule(
+    { label: 'nightly', schedule: { kind: 'interval', everyMinutes: 30 }, prompt: 'p', source: 'sources/github/acme/widgets' },
+    env,
+    { nowMs: Date.now() }
+  )
+  updateSchedule(created.id, { lastJobId: 'job-gone' }, env)
+
+  const readResultFn = () => {
+    throw new Error('job not found: job-gone')
+  }
+  const result = julesSchedulesTool({ env, readResultFn })
+  assert.equal(result.schedules[0].lastResult, null)
 })

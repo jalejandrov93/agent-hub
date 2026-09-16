@@ -440,3 +440,42 @@ export const JulesAccountRow = z
 export const JulesAccountsResponse = z
   .object({ policy: z.string(), accounts: z.array(JulesAccountRow) })
   .passthrough()
+
+/**
+ * One recurring Jules task (schedules.json). `schedule` is an interval or a
+ * daily time; `lastResult` is a compact view of the job the schedule started
+ * last time (null when it has never run, or its record was pruned).
+ */
+export const JulesScheduleResult = z
+  .object({
+    jobId: z.string(),
+    status: z.string(),
+    errorKind: nullableString,
+    sessionId: nullableString,
+    prUrl: nullableString,
+  })
+  .passthrough()
+
+export const JulesScheduleRow = z
+  .object({
+    id: z.string(),
+    label: nullableString,
+    enabled: z.boolean(),
+    schedule: z.object({ kind: z.string() }).passthrough(),
+    prompt: z.string(),
+    source: z.string(),
+    startingBranch: nullableString,
+    automationMode: nullableString,
+    requirePlanApproval: z.boolean(),
+    accountId: nullableString,
+    lastRunAt: nullableString,
+    lastJobId: nullableString,
+    lastStatus: nullableString,
+    nextRunAt: nullableString,
+    createdAt: z.string(),
+    updatedAt: z.string(),
+    lastResult: JulesScheduleResult.nullable().optional(),
+  })
+  .passthrough()
+
+export const JulesSchedulesResponse = z.object({ schedules: z.array(JulesScheduleRow) }).passthrough()
