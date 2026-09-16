@@ -65,6 +65,30 @@ test('refreshSources caches owner/repo/defaultBranch/branches from githubRepo wh
   ])
 })
 
+test('refreshSources follows nextPageToken and requests pageSize 100, caching sources from every page', async () => {
+  const env = envFor(tmpHome())
+  const calls = []
+  const client = {
+    listSources: async (args) => {
+      calls.push(args)
+      if (!args.pageToken) return { sources: [{ name: 'sources/github/acme/widgets' }], nextPageToken: 'tok-2' }
+      return { sources: [{ name: 'sources/github/acme/gadgets' }] }
+    },
+  }
+
+  const entry = await refreshSources({ accountId: 'acct-a', env, client, apiKey: 'key-aaa' })
+
+  assert.equal(calls.length, 2)
+  assert.equal(calls[0].pageSize, 100)
+  assert.equal(calls[0].pageToken, undefined)
+  assert.equal(calls[1].pageToken, 'tok-2')
+  assert.equal(entry.status, 'ok')
+  assert.deepEqual(entry.sources, [
+    cachedOf('sources/github/acme/widgets'),
+    cachedOf('sources/github/acme/gadgets'),
+  ])
+})
+
 test('normalizedSources upgrades a legacy plain-string cache entry to the richer shape', () => {
   const legacyEntry = { status: 'ok', sources: ['sources/github/acme/widgets'] }
   assert.deepEqual(normalizedSources(legacyEntry), [

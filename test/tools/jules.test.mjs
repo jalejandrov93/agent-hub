@@ -324,9 +324,11 @@ test('julesSourcesTool returns owner/repo plus defaultBranch and branches from t
   }
   let capturedArgs = null
   const client = {
+    // Only the first (no-pageToken) request returns this page; the second
+    // request (made because it carries nextPageToken) returns nothing further.
     listSources: async (args) => {
       capturedArgs = args
-      return page
+      return args.pageToken ? { sources: [] } : page
     },
   }
 
@@ -384,6 +386,23 @@ test('julesSourcesTool prefers explicit githubRepo fields over the parsed name w
   assert.deepEqual(result.sources, [
     { name: 'sources/github/acme/widgets', owner: 'other-owner', repo: 'other-repo', defaultBranch: 'trunk', branches: ['trunk'] },
   ])
+})
+
+test('julesSourcesTool follows nextPageToken and merges sources from every page, requesting pageSize 100', async () => {
+  const calls = []
+  const client = {
+    listSources: async (args) => {
+      calls.push(args)
+      if (!args.pageToken) return { sources: [{ name: 'sources/github/acme/widgets' }], nextPageToken: 'tok-2' }
+      return { sources: [{ name: 'sources/github/acme/gadgets' }] }
+    },
+  }
+
+  const result = await julesSourcesTool({ env: isolated({ JULES_API_KEY: 'k' }), client })
+
+  assert.equal(calls.length, 2)
+  assert.equal(calls[0].pageSize, 100)
+  assert.deepEqual(result.sources.map((s) => s.name), ['sources/github/acme/widgets', 'sources/github/acme/gadgets'])
 })
 
 test('julesSourcesTool re-throws any other client error unchanged', async () => {

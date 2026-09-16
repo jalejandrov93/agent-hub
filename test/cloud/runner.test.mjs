@@ -7,6 +7,7 @@ import { fileURLToPath } from 'node:url'
 import { startRemoteJob, finishRemoteJob, resumeRemoteJobs } from '../../src/cloud/runner.mjs'
 import { createJob, readResult, updateResult, responsePath } from '../../src/jobstore.mjs'
 import { createAccount, setPolicy, listAccounts } from '../../src/accounts.mjs'
+import { refreshSources } from '../../src/cloud/sources.mjs'
 import * as julesAdapter from '../../src/cloud/jules/adapter.mjs'
 
 function tmpHome() {
@@ -684,6 +685,108 @@ test('a non-429 createSession failure is not retried on another account', async 
 
   assert.equal(calls, 1, 'an auth failure is the account\'s problem, not a quota failover trigger')
   assert.equal(readResult(job.jobId, env).errorKind, 'auth')
+})
+
+// --- stale sources cache recovery (source_unavailable on the first attempt) ---
+
+test('a stale sources cache lacking the target source triggers one refresh, then selection succeeds', async () => {
+  const env = accountsEnv()
+  const account = createAccount({ label: 'a', apiKey: 'key-aaa' }, env)
+  // Cache is 'ok' but lists only another source — stale, exactly as pagination
+  // stopping early (the bug T1 fixes) would leave it.
+  await refreshSources({
+    accountId: account.id,
+    env,
+    apiKey: 'key-aaa',
+    client: { listSources: async () => ({ sources: [{ name: 'sources/github/acme/other' }] }) },
+  })
+
+  let refreshCalls = 0
+  const refreshSourcesFn = async ({ accountId, apiKey }) => {
+    refreshCalls++
+    return refreshSources({
+      accountId,
+      env,
+      apiKey,
+      client: {
+        listSources: async () => ({
+          sources: [{ name: 'sources/github/acme/other' }, { name: 'sources/github/acme/widgets' }],
+        }),
+      },
+    })
+  }
+
+  let captured = null
+  const client = {
+    createSession: async (args) => {
+      captured = args
+      return { id: 's1', state: 'QUEUED' }
+    },
+  }
+  const pollFn = async () => ({ outcome: 'completed', state: 'COMPLETED', summary: {}, session: {}, apiError: null })
+
+  const { job, done } = startRemoteJob({
+    task: 't',
+    cwd: '/repo',
+    source: 'sources/github/acme/widgets',
+    env,
+    client,
+    adapter: julesAdapter,
+    pollFn,
+    refreshSourcesFn,
+  })
+  await done
+
+  assert.equal(refreshCalls, 1, 'refresh runs exactly once for the stale-cache recovery')
+  assert.equal(captured.apiKey, 'key-aaa')
+  const result = readResult(job.jobId, env)
+  assert.equal(result.status, 'succeeded')
+  assert.equal(result.remote.accountId, account.id)
+})
+
+test('when refresh does not resolve a stale cache, delegation still fails with the existing message and refresh runs at most once', async () => {
+  const env = accountsEnv()
+  const account = createAccount({ label: 'a', apiKey: 'key-aaa' }, env)
+  await refreshSources({
+    accountId: account.id,
+    env,
+    apiKey: 'key-aaa',
+    client: { listSources: async () => ({ sources: [{ name: 'sources/github/acme/other' }] }) },
+  })
+
+  let refreshCalls = 0
+  const refreshSourcesFn = async ({ accountId, apiKey }) => {
+    refreshCalls++
+    return refreshSources({
+      accountId,
+      env,
+      apiKey,
+      client: { listSources: async () => ({ sources: [{ name: 'sources/github/acme/other' }] }) },
+    })
+  }
+
+  const client = {
+    createSession: async () => {
+      throw new Error('createSession must never be called with no eligible account')
+    },
+  }
+
+  const { job, done } = startRemoteJob({
+    task: 't',
+    cwd: '/repo',
+    source: 'sources/github/acme/widgets',
+    env,
+    client,
+    adapter: julesAdapter,
+    refreshSourcesFn,
+  })
+  await done
+
+  assert.equal(refreshCalls, 1, 'refresh must not be retried once it has already run')
+  const result = readResult(job.jobId, env)
+  assert.equal(result.status, 'failed')
+  assert.equal(result.errorKind, 'quota')
+  assert.match(result.error, /no Jules account available: source_unavailable/)
 })
 
 test('resumeRemoteJobs polls a job with the key of its OWN remote.accountId, not the env key', async () => {

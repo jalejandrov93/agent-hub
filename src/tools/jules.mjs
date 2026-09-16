@@ -11,6 +11,7 @@ import {
 import { readSourcesCache as defaultReadSourcesCache } from '../cloud/sources.mjs'
 import { keyForAccount } from '../cloud/credentials.mjs'
 import * as defaultClient from '../cloud/jules/client.mjs'
+import { listAllSources } from '../cloud/jules/client.mjs'
 import * as defaultAdapter from '../cloud/jules/adapter.mjs'
 import { TASK_TYPES } from '../schemas.mjs'
 
@@ -233,7 +234,9 @@ export async function julesSourcesTool({
 
   let page
   try {
-    page = await client.listSources({ apiKey, fetchImpl })
+    // Page through the full source list — the API defaults pageSize to 30
+    // (max 100), so a single-page read only ever saw the first 30 repos.
+    page = await listAllSources(client, { apiKey, fetchImpl })
   } catch (error) {
     if (error?.status === 401 || error?.status === 403) {
       if (scopedAccountId) {

@@ -1,6 +1,7 @@
 import { paths } from '../config.mjs'
 import { readJsonSafe, updateJsonLocked } from '../fsutil.mjs'
 import * as defaultClient from './jules/client.mjs'
+import { listAllSources } from './jules/client.mjs'
 
 /**
  * Per-account cache of each account's /sources list.
@@ -89,7 +90,10 @@ export async function refreshSources({ accountId, env = process.env, client = de
 
   let entry
   try {
-    const page = await client.listSources({ apiKey })
+    // The Jules API defaults pageSize to 30 (max 100): a single-page read left
+    // sources-cache.json holding only the first 30 of 53 sources on a real
+    // account, so every read here pages through the full list.
+    const page = await listAllSources(client, { apiKey })
     const sources = Array.isArray(page?.sources) ? page.sources.map(mapSource).filter((source) => source.name !== null) : []
     entry = { fetchedAt: new Date().toISOString(), status: 'ok', sources }
   } catch (error) {

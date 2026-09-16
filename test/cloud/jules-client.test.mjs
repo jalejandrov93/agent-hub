@@ -7,7 +7,9 @@ import {
   DEFAULT_BASE_URL,
   DEFAULT_REQUEST_TIMEOUT_MS,
   JulesApiError,
+  SOURCES_PAGE_CAP,
   listSources,
+  listAllSources,
   listSessions,
   createSession,
   getSession,
@@ -270,6 +272,65 @@ test('a non-2xx non-JSON response throws JulesApiError with the raw text as body
       return true
     },
   )
+})
+
+test('listAllSources requests pageSize 100 and follows nextPageToken until a page has none', async () => {
+  const calls = []
+  const client = {
+    listSources: async (args) => {
+      calls.push(args)
+      if (calls.length === 1) return { sources: [{ name: 'sources/github/acme/widgets' }], nextPageToken: 'tok-2' }
+      if (calls.length === 2) return { sources: [{ name: 'sources/github/acme/gadgets' }], nextPageToken: 'tok-3' }
+      return { sources: [{ name: 'sources/github/acme/gizmos' }] }
+    },
+  }
+
+  const result = await listAllSources(client, { apiKey: 'k' })
+
+  assert.equal(calls.length, 3)
+  assert.deepEqual(calls.map((c) => c.pageToken), [undefined, 'tok-2', 'tok-3'])
+  assert.ok(calls.every((c) => c.pageSize === 100), 'every page request asks for the API max pageSize')
+  assert.ok(calls.every((c) => c.apiKey === 'k'))
+  assert.deepEqual(result.sources.map((s) => s.name), [
+    'sources/github/acme/widgets',
+    'sources/github/acme/gadgets',
+    'sources/github/acme/gizmos',
+  ])
+})
+
+test('listAllSources returns a single page unchanged when the client mock has no nextPageToken (existing mockability)', async () => {
+  const client = { listSources: async () => ({ sources: [{ name: 'sources/github/acme/widgets' }] }) }
+  const result = await listAllSources(client, { apiKey: 'k' })
+  assert.deepEqual(result.sources.map((s) => s.name), ['sources/github/acme/widgets'])
+})
+
+test('listAllSources is bounded by SOURCES_PAGE_CAP when a server keeps advancing the token forever', async () => {
+  let calls = 0
+  const client = {
+    listSources: async () => {
+      calls++
+      return { sources: [], nextPageToken: `tok-${calls}` }
+    },
+  }
+
+  await listAllSources(client, { apiKey: 'k' })
+
+  assert.equal(calls, SOURCES_PAGE_CAP, `must stop at the page cap instead of looping forever`)
+})
+
+test('listAllSources stops as soon as the server repeats the same nextPageToken, instead of looping forever', async () => {
+  let calls = 0
+  const client = {
+    listSources: async () => {
+      calls++
+      return { sources: [{ name: `sources/github/acme/repo-${calls}` }], nextPageToken: 'stuck-token' }
+    },
+  }
+
+  const result = await listAllSources(client, { apiKey: 'k' })
+
+  assert.equal(calls, 2, 'the repeated token must stop the loop right after it is first observed')
+  assert.deepEqual(result.sources.map((s) => s.name), ['sources/github/acme/repo-1', 'sources/github/acme/repo-2'])
 })
 
 test('a rejected fetch throws JulesApiError with status 0, body null and the original error as cause', async () => {

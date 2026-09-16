@@ -12,7 +12,7 @@ import {
   markAccountUsed as defaultMarkAccountUsed,
 } from '../accounts.mjs'
 import { selectAccount as defaultSelectAccount } from './selectAccount.mjs'
-import { readSourcesCache as defaultReadSourcesCache } from './sources.mjs'
+import { readSourcesCache as defaultReadSourcesCache, refreshSources as defaultRefreshSources } from './sources.mjs'
 import { keyForJob, keyForAccount } from './credentials.mjs'
 import * as defaultClient from './jules/client.mjs'
 import * as defaultAdapter from './jules/adapter.mjs'
@@ -188,6 +188,29 @@ function selectCredential({
 }
 
 /**
+ * Refresh sources for every enabled account that has a key. Used once, when
+ * selectCredential's first attempt fails with reason 'source_unavailable' —
+ * every eligible account's cache is 'ok' but none lists the requested source.
+ * That is exactly the symptom a stale cache leaves behind (see listAllSources
+ * in cloud/jules/client.mjs: a single-page read used to cap a cache at the
+ * API's default 30 sources of e.g. 53), so one refresh-and-retry recovers
+ * without a real "no access" failure. Each refresh is independent and
+ * best-effort — refreshSources already never throws for an API error, and a
+ * defect in a caller-supplied refreshSourcesFn must not abort the others or
+ * fail the delegation.
+ */
+async function refreshStaleAccountSources({ env, client, listAccountsFn, getAccountSecretFn, refreshSourcesFn }) {
+  const targets = listAccountsFn(env)
+    .filter((account) => account.enabled !== false)
+    .map((account) => ({ accountId: account.id, apiKey: getAccountSecretFn(account.id, env) }))
+    .filter((target) => target.apiKey)
+
+  await Promise.all(
+    targets.map(({ accountId, apiKey }) => Promise.resolve(refreshSourcesFn({ accountId, env, client, apiKey })).catch(() => {}))
+  )
+}
+
+/**
  * The key a resumed/polled job must use comes from credentials.mjs (the single
  * source of truth): its own account when it has one, otherwise the env key.
  */
@@ -235,6 +258,7 @@ export function startRemoteJob({
   usageForFn = defaultUsageFor,
   readSourcesCacheFn = defaultReadSourcesCache,
   markAccountUsedFn = defaultMarkAccountUsed,
+  refreshSourcesFn = defaultRefreshSources,
 }) {
   // Mirrors startJob: only a root turn gets curated learnings prepended. A
   // Jules job never resumes via a local sessionId (job_reply talks to the
@@ -321,9 +345,12 @@ export function startRemoteJob({
       let apiKey = null
       let accountId = null
       let session = null
+      // Never refresh more than once per delegation, even if selection keeps
+      // failing with source_unavailable after the refresh already ran.
+      let staleCacheRefreshed = false
 
       for (let attempt = 0; attempt < MAX_ACCOUNT_ATTEMPTS; attempt++) {
-        const credential = selectCredential({
+        let credential = selectCredential({
           explicitAccount: attempt === 0 ? account : null,
           source: resolvedSource,
           exclude: attempted,
@@ -334,6 +361,31 @@ export function startRemoteJob({
           usageForFn,
           readSourcesCacheFn,
         })
+
+        // Only on the first attempt, before any account has actually been
+        // tried: a stale cache (every eligible account's list is 'ok' but none
+        // yet includes the source) looks identical to real "no access" without
+        // this recovery.
+        if (
+          !credential.apiKey &&
+          credential.reason === 'source_unavailable' &&
+          attempted.length === 0 &&
+          !staleCacheRefreshed
+        ) {
+          staleCacheRefreshed = true
+          await refreshStaleAccountSources({ env, client, listAccountsFn, getAccountSecretFn, refreshSourcesFn })
+          credential = selectCredential({
+            explicitAccount: attempt === 0 ? account : null,
+            source: resolvedSource,
+            exclude: attempted,
+            env,
+            listAccountsFn,
+            selectAccountFn,
+            getAccountSecretFn,
+            usageForFn,
+            readSourcesCacheFn,
+          })
+        }
 
         if (!credential.apiKey) {
           if (attempted.length > 0) {

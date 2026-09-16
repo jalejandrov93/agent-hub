@@ -97,6 +97,41 @@ export function listSources({ apiKey, pageSize, pageToken, baseUrl, fetchImpl, t
   return request({ apiKey, method: 'GET', path: '/sources', query: { pageSize, pageToken }, baseUrl, fetchImpl, timeoutMs })
 }
 
+// A misbehaving server that keeps advancing (or repeating) nextPageToken must
+// never hang a caller forever, mirroring MAX_PAGES_PER_TICK in poller.mjs.
+export const SOURCES_PAGE_CAP = 20
+
+/**
+ * Fetch every source across all pages of GET /sources, requesting the API's
+ * max pageSize (100) per page and following `nextPageToken` until a page
+ * carries none.
+ *
+ * `client` need only expose `listSources` with the same shape as this
+ * module's own export — this is deliberate, not just permissive: it lets
+ * every existing caller's test mock (a plain `{ listSources }` object
+ * returning one page with no `nextPageToken`) keep working unchanged, while
+ * production code passes the real client module.
+ *
+ * Bounded two ways: SOURCES_PAGE_CAP caps the total number of requests, and a
+ * `nextPageToken` identical to the token just used to fetch the current page
+ * stops the loop immediately — a server echoing the same token back would
+ * otherwise re-fetch the same page forever.
+ */
+export async function listAllSources(client, { apiKey, baseUrl, fetchImpl, timeoutMs } = {}) {
+  const sources = []
+  let pageToken
+  for (let page = 0; page < SOURCES_PAGE_CAP; page++) {
+    const usedToken = pageToken
+    const result = await client.listSources({ apiKey, pageSize: 100, pageToken, baseUrl, fetchImpl, timeoutMs })
+    const pageSources = Array.isArray(result?.sources) ? result.sources : []
+    sources.push(...pageSources)
+    const nextToken = result?.nextPageToken
+    if (!nextToken || nextToken === usedToken) break
+    pageToken = nextToken
+  }
+  return { sources }
+}
+
 export function listSessions({ apiKey, pageSize, pageToken, baseUrl, fetchImpl, timeoutMs } = {}) {
   return request({ apiKey, method: 'GET', path: '/sessions', query: { pageSize, pageToken }, baseUrl, fetchImpl, timeoutMs })
 }
