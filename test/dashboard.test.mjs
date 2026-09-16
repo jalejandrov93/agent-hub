@@ -1012,3 +1012,259 @@ test('startDashboard prunes stale preflight-cache rows at boot, keeps live ones,
     server.close()
   }
 })
+test('Accounts CRUD happy path and raw apiKey is never exposed', async () => {
+  const env = { AGENT_HUB_HOME: tmpHome() }
+  const server = createServer({ env })
+  const port = await listen(server)
+  try {
+    // 1. POST /api/accounts
+    const createRes = await postJson(port, '/api/accounts', { label: 'my-acc', apiKey: 'key-aaa' })
+    assert.equal(createRes.status, 201)
+    const accId = createRes.body.id
+    assert.ok(accId)
+    assert.equal(createRes.body.apiKey, undefined)
+    assert.equal(createRes.body.keyLast4, '-aaa')
+    assert.equal(createRes.body.keyPresent, true)
+
+    // 2. GET /api/accounts
+    const listRes = await get(port, '/api/accounts')
+    assert.equal(listRes.status, 200)
+    assert.ok(listRes.body, 'listRes body should be truthy')
+    assert.ok(typeof listRes.body === 'string' ? JSON.parse(listRes.body) : listRes.body)
+    const listResBody = typeof listRes.body === 'string' ? JSON.parse(listRes.body) : listRes.body
+    assert.equal(listResBody.accounts.length, 1)
+    assert.equal(listResBody.accounts[0].apiKey, undefined)
+
+    // 3. PATCH /api/accounts/:id
+    const patchRes = await postJson(port, `/api/accounts/${accId}`, { label: 'new-label' }, { method: 'PATCH' })
+    assert.equal(patchRes.status, 200)
+    assert.equal(patchRes.body.label, 'new-label')
+    assert.equal(patchRes.body.apiKey, undefined)
+
+    // 4. PUT /api/accounts/policy
+    const policyRes = await postJson(port, '/api/accounts/policy', { policy: 'least_used' }, { method: 'PUT' })
+    assert.equal(policyRes.status, 200)
+    assert.equal(policyRes.body.policy, 'least_used')
+
+    // 5. DELETE /api/accounts/:id
+    const delRes = await postJson(port, `/api/accounts/${accId}`, undefined, { method: 'DELETE' })
+    assert.equal(delRes.status, 200)
+    assert.equal(delRes.body.deleted, true)
+  } finally {
+    server.close()
+  }
+})
+
+test('refresh-sources maps 401 to 200 with no_source_access status', async () => {
+  const env = { AGENT_HUB_HOME: tmpHome() }
+  const { createAccount } = await import('../src/accounts.mjs?t=' + Date.now())
+  const acc = createAccount({ label: 'test', apiKey: 'key-401' }, env)
+
+  const fakeClient = {
+    async listSources() {
+      const err = new Error('unauthorized')
+      err.status = 401
+      throw err
+    }
+  }
+
+  const server = createServer({ env, client: fakeClient })
+  const port = await listen(server)
+  try {
+    const res = await postJson(port, `/api/accounts/${acc.id}/refresh-sources`, {})
+    assert.equal(res.status, 200)
+    assert.equal(res.body.status, 'no_source_access')
+  } finally {
+    server.close()
+  }
+})
+
+test('refresh-sources happy path', async () => {
+  const env = { AGENT_HUB_HOME: tmpHome() }
+  const { createAccount } = await import('../src/accounts.mjs?t=' + Date.now())
+  const acc = createAccount({ label: 'test', apiKey: 'key-123' }, env)
+
+  const fakeClient = {
+    async listSources() {
+      return { sources: [{ name: 'sources/github/a/b' }] }
+    }
+  }
+
+  const server = createServer({ env, client: fakeClient })
+  const port = await listen(server)
+  try {
+    const res = await postJson(port, `/api/accounts/${acc.id}/refresh-sources`, {})
+    assert.equal(res.status, 200)
+    assert.equal(res.body.status, 'ok')
+    assert.deepEqual(res.body.sources, ['sources/github/a/b'])
+  } finally {
+    server.close()
+  }
+})
+
+test('GET /api/sources happy path: returns merged cache', async () => {
+  const env = { AGENT_HUB_HOME: tmpHome() }
+  const { createAccount } = await import('../src/accounts.mjs?t=' + Date.now())
+  const acc = createAccount({ label: 'test', apiKey: 'key-123' }, env)
+
+  const { refreshSources } = await import('../src/cloud/sources.mjs?t=' + Date.now())
+  const fakeClient = {
+    async listSources() {
+      return {
+        sources: [{
+          name: 'sources/github/a/b',
+          githubRepo: { owner: 'a', repo: 'b', defaultBranch: { displayName: 'main' }, branches: [{ displayName: 'main' }, { displayName: 'dev' }] }
+        }]
+      }
+    }
+  }
+  await refreshSources({ accountId: acc.id, env, client: fakeClient, apiKey: 'key-123' })
+
+  const server = createServer({ env, client: fakeClient })
+  const port = await listen(server)
+  try {
+    const res = await get(port, '/api/sources')
+    assert.equal(res.status, 200)
+    const body = typeof res.body === 'string' ? JSON.parse(res.body) : res.body;
+    assert.ok(body['sources/github/a/b'])
+    assert.equal(body['sources/github/a/b'].defaultBranch, 'main')
+    assert.deepEqual(body['sources/github/a/b'].branches, ['main', 'dev'])
+    assert.deepEqual(body['sources/github/a/b'].accounts[acc.id], 'ok')
+  } finally {
+    server.close()
+  }
+})
+
+test('Schedules CRUD and run-now happy path', async () => {
+  const env = { AGENT_HUB_HOME: tmpHome() }
+
+  const fakeClient = {
+    async createJob() { return { jobId: 'cloud-job-1' } }
+  }
+
+  const server = createServer({ env, client: fakeClient })
+  const port = await listen(server)
+  try {
+    const payload = { source: 'a/b', prompt: 'test', schedule: { kind: 'interval', everyMinutes: 10 } }
+
+    // 1. POST
+    const createRes = await postJson(port, '/api/schedules', payload)
+    assert.equal(createRes.status, 201)
+    const schedId = createRes.body.id
+    assert.ok(schedId)
+
+    // 2. GET
+    const listRes = await get(port, '/api/schedules')
+    assert.equal(listRes.status, 200)
+    const listResBody = typeof listRes.body === 'string' ? JSON.parse(listRes.body) : listRes.body;
+    assert.equal(listResBody.schedules.length, 1)
+
+    // 3. PATCH
+    const patchRes = await postJson(port, `/api/schedules/${schedId}`, { prompt: 'new-prompt' }, { method: 'PATCH' })
+    assert.equal(patchRes.status, 200)
+    assert.equal(patchRes.body.prompt, 'new-prompt')
+
+    // 4. POST run-now
+    const runNowRes = await postJson(port, `/api/schedules/${schedId}/run-now`, {})
+    assert.equal(runNowRes.status, 200)
+    assert.ok(runNowRes.body.id === schedId)
+
+    // 5. DELETE
+    const delRes = await postJson(port, `/api/schedules/${schedId}`, undefined, { method: 'DELETE' })
+    assert.equal(delRes.status, 200)
+  } finally {
+    server.close()
+  }
+})
+
+test('Cloud sessions happy paths', async () => {
+  const env = { AGENT_HUB_HOME: tmpHome(), JULES_API_KEY: 'key-env' }
+  const { createJob, updateResult, appendStdout } = await import('../src/jobstore.mjs?t=' + Date.now())
+
+  const job = createJob({ agent: 'jules', model: 'jules', task: 't', cwd: '/tmp', env })
+  updateResult(job.jobId, { remote: { sessionId: 'ses-123', state: 'PENDING' } }, env)
+  appendStdout(job.jobId, '{"activity":"foo"}\n', env)
+  appendStdout(job.jobId, '{"activity":"bar"}\n', env)
+
+  const fakeClient = {
+    async listSessions() {
+      return { sessions: [{ id: 'ses-123', name: 'sessions/ses-123', state: 'PENDING' }] }
+    },
+    async getSession() {
+      return { id: 'ses-123', state: 'COMPLETED' }
+    },
+    async listActivities() {
+      return { activities: [] }
+    }
+  }
+
+  const server = createServer({ env, client: fakeClient })
+  const port = await listen(server)
+  try {
+    const { createAccount } = await import('../src/accounts.mjs?t=' + Date.now())
+    const acc = createAccount({ label: 'test', apiKey: 'key-123' }, env)
+
+    const sessRes = await get(port, `/api/cloud/sessions?account=${acc.id}`)
+    assert.equal(sessRes.status, 200)
+    const sessResBody = typeof sessRes.body === 'string' ? JSON.parse(sessRes.body) : sessRes.body;
+    assert.equal(sessResBody.sessions.length, 1)
+
+    const checkRes = await postJson(port, `/api/cloud/jobs/${job.jobId}/check`, {})
+    assert.equal(checkRes.status, 200)
+    assert.equal(checkRes.body.state, 'COMPLETED')
+
+    const actRes = await get(port, `/api/cloud/jobs/${job.jobId}/activities`)
+    assert.equal(actRes.status, 200)
+    const actResBody = typeof actRes.body === 'string' ? JSON.parse(actRes.body) : actRes.body;
+    assert.deepEqual(actResBody.activities, ['{"activity":"foo"}', '{"activity":"bar"}'])
+
+  } finally {
+    server.close()
+  }
+})
+
+test('CSRF/content-type guard rejecting a non-JSON write on a new route', async () => {
+  const env = { AGENT_HUB_HOME: tmpHome() }
+  const server = createServer({ env })
+  const port = await listen(server)
+  try {
+    const res = await rawRequest(port, '/api/accounts', {
+      method: 'POST',
+      headers: { Host: '127.0.0.1', 'Content-Type': 'text/plain' },
+      body: JSON.stringify({ label: 'test', apiKey: 'key-123' }),
+    })
+    assert.equal(res.status, 415)
+  } finally {
+    server.close()
+  }
+})
+
+test('404 for an unknown account and an unknown schedule', async () => {
+  const env = { AGENT_HUB_HOME: tmpHome() }
+  const server = createServer({ env })
+  const port = await listen(server)
+  try {
+    const patchAcc = await postJson(port, '/api/accounts/acct-nope', { label: '1' }, { method: 'PATCH' })
+    assert.equal(patchAcc.status, 404)
+
+    const patchSched = await postJson(port, '/api/schedules/sched-nope', { prompt: '1' }, { method: 'PATCH' })
+    assert.equal(patchSched.status, 404)
+  } finally {
+    server.close()
+  }
+})
+
+test('400 for an invalid policy and an invalid schedule', async () => {
+  const env = { AGENT_HUB_HOME: tmpHome() }
+  const server = createServer({ env })
+  const port = await listen(server)
+  try {
+    const policyRes = await postJson(port, '/api/accounts/policy', { policy: 'invalid-policy' }, { method: 'PUT' })
+    assert.equal(policyRes.status, 400)
+
+    const schedRes = await postJson(port, '/api/schedules', { schedule: 'invalid-schedule' })
+    assert.equal(schedRes.status, 400)
+  } finally {
+    server.close()
+  }
+})
