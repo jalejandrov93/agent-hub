@@ -1,6 +1,12 @@
 import { test } from 'node:test'
 import assert from 'node:assert/strict'
+import fs from 'node:fs'
+import path from 'node:path'
+import { fileURLToPath } from 'node:url'
 import { julesDelegateTool, julesSourcesTool, julesCheckTool, julesSessionsTool } from '../../src/tools/jules.mjs'
+
+const FIXTURES = path.join(path.dirname(fileURLToPath(import.meta.url)), '..', 'fixtures', 'jules')
+const readJson = (name) => JSON.parse(fs.readFileSync(path.join(FIXTURES, name), 'utf8'))
 
 test('julesDelegateTool requires either cwd or source', async () => {
   await assert.rejects(() => julesDelegateTool({ task: 't' }), /requires either cwd .* or .* source/i)
@@ -207,11 +213,31 @@ test('julesSourcesTool maps a 401/403 JulesApiError to a clean message', async (
   await assert.rejects(() => julesSourcesTool({ env: { JULES_API_KEY: 'bad' }, client }), /JULES_API_KEY is missing or rejected/)
 })
 
-test('julesSourcesTool returns {sources: [{name, owner, repo}]} from the connected GitHub repos', async () => {
+test('julesSourcesTool returns owner/repo plus defaultBranch and branches from the connected GitHub repos', async () => {
   const page = {
     sources: [
-      { name: 'sources/github/acme/widgets', id: 'github/acme/widgets', githubRepo: { owner: 'acme', repo: 'widgets', defaultBranch: 'main' } },
-      { name: 'sources/github/acme/gadgets', id: 'github/acme/gadgets', githubRepo: { owner: 'acme', repo: 'gadgets', defaultBranch: 'develop' } },
+      {
+        name: 'sources/github/acme/widgets',
+        id: 'github/acme/widgets',
+        githubRepo: {
+          owner: 'acme',
+          repo: 'widgets',
+          isPrivate: true,
+          defaultBranch: { displayName: 'main' },
+          branches: [{ displayName: 'develop' }, { displayName: 'main' }],
+        },
+      },
+      {
+        name: 'sources/github/acme/gadgets',
+        id: 'github/acme/gadgets',
+        githubRepo: {
+          owner: 'acme',
+          repo: 'gadgets',
+          isPrivate: false,
+          defaultBranch: { displayName: 'develop' },
+          branches: [{ displayName: 'develop' }],
+        },
+      },
     ],
     nextPageToken: 'tok-2',
   }
@@ -226,11 +252,20 @@ test('julesSourcesTool returns {sources: [{name, owner, repo}]} from the connect
   const result = await julesSourcesTool({ env: { JULES_API_KEY: 'k' }, client })
   assert.deepEqual(result, {
     sources: [
-      { name: 'sources/github/acme/widgets', owner: 'acme', repo: 'widgets' },
-      { name: 'sources/github/acme/gadgets', owner: 'acme', repo: 'gadgets' },
+      { name: 'sources/github/acme/widgets', owner: 'acme', repo: 'widgets', defaultBranch: 'main', branches: ['develop', 'main'] },
+      { name: 'sources/github/acme/gadgets', owner: 'acme', repo: 'gadgets', defaultBranch: 'develop', branches: ['develop'] },
     ],
   })
   assert.equal(capturedArgs.apiKey, 'k')
+})
+
+test('julesSourcesTool reads the real githubRepo defaultBranch.displayName and branches[].displayName shape', async () => {
+  const page = readJson('sources-page.json')
+  const client = { listSources: async () => page }
+
+  const result = await julesSourcesTool({ env: { JULES_API_KEY: 'k' }, client })
+  assert.equal(result.sources[0].defaultBranch, 'main')
+  assert.deepEqual(result.sources[0].branches, ['develop', 'main'])
 })
 
 test('julesSourcesTool falls back to parsing owner/repo out of the resource name when githubRepo is absent', async () => {
@@ -238,7 +273,9 @@ test('julesSourcesTool falls back to parsing owner/repo out of the resource name
   const client = { listSources: async () => page }
 
   const result = await julesSourcesTool({ env: { JULES_API_KEY: 'k' }, client })
-  assert.deepEqual(result.sources, [{ name: 'sources/github/acme/widgets', owner: 'acme', repo: 'widgets' }])
+  assert.deepEqual(result.sources, [
+    { name: 'sources/github/acme/widgets', owner: 'acme', repo: 'widgets', defaultBranch: null, branches: [] },
+  ])
 })
 
 test('julesSourcesTool falls back per-field when githubRepo is present but incomplete', async () => {
@@ -246,15 +283,26 @@ test('julesSourcesTool falls back per-field when githubRepo is present but incom
   const client = { listSources: async () => page }
 
   const result = await julesSourcesTool({ env: { JULES_API_KEY: 'k' }, client })
-  assert.deepEqual(result.sources, [{ name: 'sources/github/acme/widgets', owner: 'acme', repo: 'widgets' }])
+  assert.deepEqual(result.sources, [
+    { name: 'sources/github/acme/widgets', owner: 'acme', repo: 'widgets', defaultBranch: null, branches: [] },
+  ])
 })
 
 test('julesSourcesTool prefers explicit githubRepo fields over the parsed name when both are present', async () => {
-  const page = { sources: [{ name: 'sources/github/acme/widgets', githubRepo: { owner: 'other-owner', repo: 'other-repo' } }] }
+  const page = {
+    sources: [
+      {
+        name: 'sources/github/acme/widgets',
+        githubRepo: { owner: 'other-owner', repo: 'other-repo', defaultBranch: { displayName: 'trunk' }, branches: [{ displayName: 'trunk' }] },
+      },
+    ],
+  }
   const client = { listSources: async () => page }
 
   const result = await julesSourcesTool({ env: { JULES_API_KEY: 'k' }, client })
-  assert.deepEqual(result.sources, [{ name: 'sources/github/acme/widgets', owner: 'other-owner', repo: 'other-repo' }])
+  assert.deepEqual(result.sources, [
+    { name: 'sources/github/acme/widgets', owner: 'other-owner', repo: 'other-repo', defaultBranch: 'trunk', branches: ['trunk'] },
+  ])
 })
 
 test('julesSourcesTool re-throws any other client error unchanged', async () => {

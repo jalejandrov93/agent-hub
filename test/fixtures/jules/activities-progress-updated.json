@@ -3,9 +3,8 @@
     {
       "name": "sessions/sess-running-1/activities/a5",
       "id": "a5",
-      "originator": "system",
-      "description": "Progress update",
-      "createTime": "2026-09-15T10:02:30Z",
+      "createTime": "2025-05-21T13:30:30Z",
+      "originator": "agent",
       "progressUpdated": {
         "title": "Running tests",
         "description": "Executing node --test"

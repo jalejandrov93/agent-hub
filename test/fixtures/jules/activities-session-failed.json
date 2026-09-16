@@ -3,9 +3,8 @@
     {
       "name": "sessions/sess-failed-1/activities/a7",
       "id": "a7",
-      "originator": "system",
-      "description": "Session failed",
-      "createTime": "2026-09-15T11:03:00Z",
+      "createTime": "2025-05-21T14:03:00Z",
+      "originator": "agent",
       "sessionFailed": { "reason": "Tests failed after 3 attempts" }
     }
   ],

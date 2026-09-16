@@ -35,8 +35,7 @@ function isPlainObject(value) {
 
 /**
  * The Jules alpha API nests outputs differently depending on the endpoint, so
- * accept either an array or a single object and probe the three url keys seen
- * in the wild (pullRequest.url, pullRequest.uri, url).
+ * accept either an array or a single object.
  */
 function outputItems(outputs) {
   if (Array.isArray(outputs)) return outputs
@@ -44,13 +43,25 @@ function outputItems(outputs) {
   return []
 }
 
+/**
+ * A real session output wraps its result in `changeSet.gitPatch`; a pull
+ * request has only ever been observed behind automationMode AUTO_CREATE_PR,
+ * so probe it defensively (and inside the change set) but never require it.
+ */
+function urlFromValue(value) {
+  if (!isPlainObject(value)) return null
+  const candidates = [value.pullRequest?.url, value.pullRequest?.uri, value.url]
+  for (const candidate of candidates) {
+    if (typeof candidate === 'string' && candidate.length > 0) return candidate
+  }
+  return null
+}
+
 function firstOutputUrl(outputs) {
   for (const item of outputItems(outputs)) {
     if (!isPlainObject(item)) continue
-    const candidates = [item.pullRequest?.url, item.pullRequest?.uri, item.url]
-    for (const candidate of candidates) {
-      if (typeof candidate === 'string' && candidate.length > 0) return candidate
-    }
+    const url = urlFromValue(item) ?? urlFromValue(item.changeSet)
+    if (url) return url
   }
   return null
 }
@@ -68,6 +79,8 @@ function firstOutputBranch(outputs) {
     (item) => item.pullRequest?.head?.ref,
     (item) => item.pullRequest?.branch,
     (item) => item.branch,
+    (item) => item.changeSet?.branch,
+    (item) => item.changeSet?.pullRequest?.headRef,
   ]
   for (const probe of probes) {
     for (const item of items) {
@@ -78,8 +91,59 @@ function firstOutputBranch(outputs) {
   return null
 }
 
+/**
+ * Map a wire change set (`{ source, gitPatch: { unidiffPatch, baseCommitId,
+ * suggestedCommitMessage } }`) to the flat shape callers rely on. A missing
+ * gitPatch still yields the four stable keys, all null.
+ */
+function normalizeChangeSet(changeSet) {
+  const gitPatch = isPlainObject(changeSet?.gitPatch) ? changeSet.gitPatch : {}
+  return {
+    source: typeof changeSet?.source === 'string' ? changeSet.source : null,
+    baseCommitId: typeof gitPatch.baseCommitId === 'string' ? gitPatch.baseCommitId : null,
+    unifiedDiff: typeof gitPatch.unidiffPatch === 'string' ? gitPatch.unidiffPatch : null,
+    suggestedCommitMessage: typeof gitPatch.suggestedCommitMessage === 'string' ? gitPatch.suggestedCommitMessage : null,
+  }
+}
+
+/**
+ * A change set lives in an activity's OPTIONAL `artifacts` array, not on the
+ * activity itself. The last one wins, matching "the result of this activity".
+ */
+function changeSetFromArtifacts(artifacts) {
+  if (!Array.isArray(artifacts)) return null
+  let found = null
+  for (const artifact of artifacts) {
+    if (isPlainObject(artifact?.changeSet)) found = normalizeChangeSet(artifact.changeSet)
+  }
+  return found
+}
+
+function artifactUrl(artifact) {
+  return urlFromValue(artifact) ?? urlFromValue(artifact.changeSet)
+}
+
+/** The session-level result: the last outputs[].changeSet, mapped flat, or null. */
+export function changeSetFromSession(session) {
+  let found = null
+  for (const item of outputItems(session?.outputs)) {
+    if (isPlainObject(item?.changeSet)) found = normalizeChangeSet(item.changeSet)
+  }
+  return found
+}
+
+/**
+ * `agentMessaged` carries `agentMessage`; `userMessaged` was not observed in
+ * the real API, so its `userMessage` is ASSUMED by symmetry with agentMessaged
+ * and `message` is accepted as a fallback. The old `message`-only read never
+ * matched a real payload.
+ */
 function messageOf(container) {
-  return typeof container?.message === 'string' ? container.message : ''
+  const candidates = [container?.agentMessage, container?.userMessage, container?.message]
+  for (const candidate of candidates) {
+    if (typeof candidate === 'string') return candidate
+  }
+  return ''
 }
 
 function countDiffLines(diff) {
@@ -89,23 +153,55 @@ function countDiffLines(diff) {
   return diff.replace(/\n$/, '').split('\n').length
 }
 
+/**
+ * Real suggested commit messages are full multi-paragraph bodies (one observed
+ * session returned ~2 KB), so only the subject line belongs in a streamed log
+ * line. The full message still reaches the caller through summary.changeSet.
+ */
+function commitSubject(message) {
+  const subject = String(message).split('\n', 1)[0].trim()
+  return subject.length > 120 ? subject.slice(0, 117) + '…' : subject
+}
+
 function changeSetLineFor(changeSet) {
   if (!isPlainObject(changeSet)) return null
   const message =
-    typeof changeSet.suggestedCommitMessage === 'string' && changeSet.suggestedCommitMessage.length > 0
-      ? changeSet.suggestedCommitMessage
+    typeof changeSet.suggestedCommitMessage === 'string' && changeSet.suggestedCommitMessage.trim().length > 0
+      ? commitSubject(changeSet.suggestedCommitMessage)
       : '(no commit message)'
   return `[jules] change set: ${message} (${countDiffLines(changeSet.unifiedDiff)} diff lines)`
 }
 
+function bashOutputLine(bashOutput) {
+  if (!isPlainObject(bashOutput)) return null
+  const command = typeof bashOutput.command === 'string' ? bashOutput.command.trim() : ''
+  const output = typeof bashOutput.output === 'string' ? bashOutput.output.replace(/\s+/g, ' ').trim() : ''
+  if (command && output) return `[jules] bash: ${command} — ${output}`
+  if (command) return `[jules] bash: ${command}`
+  if (output) return `[jules] bash output: ${output}`
+  return null
+}
+
+// Every activity carries these envelope keys plus exactly one type key. An
+// unrecognised type still gets one honest line instead of disappearing.
+const ACTIVITY_ENVELOPE_KEYS = new Set(['name', 'id', 'createTime', 'originator', 'artifacts'])
+
+function unknownTypeKey(activity) {
+  for (const key of Object.keys(activity)) {
+    if (!ACTIVITY_ENVELOPE_KEYS.has(key)) return key
+  }
+  return null
+}
+
 /**
- * The activity envelope is alpha and its field names are only partly
- * documented, so the type is detected by which key is present and an unknown
- * shape degrades to its `description` instead of throwing.
+ * The activity envelope is alpha. The type is detected by which key is present;
+ * plan steps live at `planGenerated.plan.steps`, and an unknown shape degrades
+ * to its type key name rather than throwing or vanishing.
  */
 function linesForActivity(activity) {
   if (activity.planGenerated != null) {
-    const steps = Array.isArray(activity.planGenerated.steps) ? activity.planGenerated.steps : []
+    const plan = activity.planGenerated.plan
+    const steps = Array.isArray(plan?.steps) ? plan.steps : []
     const lines = [`[jules] plan generated: ${steps.length} step(s)`]
     steps.forEach((step, index) => {
       lines.push(`[jules]   ${index + 1}. ${step?.title ?? ''}`)
@@ -120,20 +216,35 @@ function linesForActivity(activity) {
     const suffix = typeof description === 'string' && description.length > 0 ? ` — ${description}` : ''
     return [`[jules] progress: ${title}${suffix}`]
   }
-  if (activity.sessionCompleted != null) {
-    const lines = ['[jules] session completed']
-    const url = firstOutputUrl(activity.sessionCompleted.outputs)
-    if (url) lines.push(`[jules] pull request: ${url}`)
-    return lines
-  }
+  // sessionCompleted is empty in the real API — the outputs live in artifacts,
+  // which activityLines renders right after this line.
+  if (activity.sessionCompleted != null) return ['[jules] session completed']
   if (activity.sessionFailed != null) {
     const reason = activity.sessionFailed.reason
     return [typeof reason === 'string' && reason.length > 0 ? `[jules] session failed: ${reason}` : '[jules] session failed']
   }
-  if (typeof activity.description === 'string' && activity.description.length > 0) {
-    return [`[jules] ${activity.description}`]
-  }
+  const typeKey = unknownTypeKey(activity)
+  if (typeKey) return [`[jules] unknown activity: ${typeKey}`]
   return []
+}
+
+function artifactLines(artifacts) {
+  if (!Array.isArray(artifacts)) return []
+  const lines = []
+  for (const artifact of artifacts) {
+    if (!isPlainObject(artifact)) continue
+    if (isPlainObject(artifact.changeSet)) {
+      const line = changeSetLineFor(normalizeChangeSet(artifact.changeSet))
+      if (line) lines.push(line)
+    }
+    if (artifact.bashOutput != null) {
+      const line = bashOutputLine(artifact.bashOutput)
+      if (line) lines.push(line)
+    }
+    const url = artifactUrl(artifact)
+    if (url) lines.push(`[jules] pull request: ${url}`)
+  }
+  return lines
 }
 
 export function activityLines(activities) {
@@ -142,8 +253,7 @@ export function activityLines(activities) {
   for (const activity of activities) {
     if (!isPlainObject(activity)) continue
     lines.push(...linesForActivity(activity))
-    const changeSetLine = changeSetLineFor(activity.changeSet)
-    if (changeSetLine) lines.push(changeSetLine)
+    lines.push(...artifactLines(activity.artifacts))
   }
   return lines
 }
@@ -164,7 +274,14 @@ export function summarizeActivities(activities) {
   for (const activity of activities) {
     if (!isPlainObject(activity)) continue
 
-    if (isPlainObject(activity.changeSet)) summary.changeSet = activity.changeSet
+    const changeSet = changeSetFromArtifacts(activity.artifacts)
+    if (changeSet) summary.changeSet = changeSet
+
+    for (const artifact of Array.isArray(activity.artifacts) ? activity.artifacts : []) {
+      if (!isPlainObject(artifact)) continue
+      const url = artifactUrl(artifact)
+      if (url && summary.prUrl === null) summary.prUrl = url
+    }
 
     if (activity.agentMessaged != null) {
       const message = messageOf(activity.agentMessaged)
@@ -173,8 +290,6 @@ export function summarizeActivities(activities) {
 
     if (activity.sessionCompleted != null) {
       summary.completed = true
-      const url = firstOutputUrl(activity.sessionCompleted.outputs)
-      if (url && summary.prUrl === null) summary.prUrl = url
     }
 
     if (activity.sessionFailed != null) {
@@ -220,8 +335,19 @@ export function buildResponseText({ session, summary } = {}) {
   const prUrl = summary?.prUrl ?? prUrlFromSession(session)
   if (prUrl) sections.push(`Pull request: ${prUrl}`)
 
-  const commitMessage = summary?.changeSet?.suggestedCommitMessage
-  if (typeof commitMessage === 'string' && commitMessage.length > 0) sections.push(`Change set: ${commitMessage}`)
+  // A change set with no pull request is a normal success: Jules produced a
+  // patch. Name the suggested commit message and the base it applies to so the
+  // response is not nearly empty.
+  const changeSet = summary?.changeSet ?? changeSetFromSession(session)
+  if (changeSet) {
+    const message =
+      typeof changeSet.suggestedCommitMessage === 'string' && changeSet.suggestedCommitMessage.length > 0
+        ? changeSet.suggestedCommitMessage
+        : '(no commit message)'
+    const base =
+      typeof changeSet.baseCommitId === 'string' && changeSet.baseCommitId.length > 0 ? ` (base ${changeSet.baseCommitId})` : ''
+    sections.push(`Change set: ${message}${base}`)
+  }
 
   if (typeof summary?.lastAgentMessage === 'string' && summary.lastAgentMessage.length > 0) {
     sections.push(summary.lastAgentMessage)

@@ -3,10 +3,9 @@
     {
       "name": "sessions/sess-running-1/activities/a2",
       "id": "a2",
+      "createTime": "2025-05-21T13:29:00Z",
       "originator": "user",
-      "description": "Plan approved by the user",
-      "createTime": "2026-09-15T10:01:00Z",
-      "planApproved": {}
+      "planApproved": { "planId": "p1" }
     }
   ],
   "nextPageToken": null

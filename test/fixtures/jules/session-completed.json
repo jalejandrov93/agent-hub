@@ -1,22 +1,21 @@
 {
   "name": "sessions/sess-completed-1",
   "id": "sess-completed-1",
-  "state": "COMPLETED",
-  "url": "https://jules.google.com/session/sess-completed-1",
+  "title": "Fix off-by-one in paginate()",
   "prompt": "Fix the off-by-one in paginate()",
-  "sourceContext": {
-    "source": "sources/github/acme/widgets",
-    "githubRepoContext": { "startingBranch": "main" }
-  },
+  "state": "COMPLETED",
+  "createTime": "2025-05-21T13:28:11.920976531Z",
+  "url": "https://jules.google.com/session/sess-completed-1",
   "outputs": [
     {
-      "pullRequest": {
-        "url": "https://github.com/acme/widgets/pull/42",
-        "uri": "https://api.github.com/repos/acme/widgets/pulls/42",
-        "title": "Fix off-by-one in paginate()"
+      "changeSet": {
+        "source": "sources/github/acme/widgets",
+        "gitPatch": {
+          "unidiffPatch": "diff --git a/src/paginate.mjs b/src/paginate.mjs\n+const limit = Math.max(0, limit)\n",
+          "baseCommitId": "abc123def456",
+          "suggestedCommitMessage": "Optimize queries"
+        }
       }
     }
-  ],
-  "createTime": "2026-09-15T10:00:00Z",
-  "updateTime": "2026-09-15T10:09:00Z"
+  ]
 }

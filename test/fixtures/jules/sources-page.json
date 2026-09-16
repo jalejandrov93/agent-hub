@@ -3,12 +3,24 @@
     {
       "name": "sources/github/acme/widgets",
       "id": "github/acme/widgets",
-      "githubRepo": { "owner": "acme", "repo": "widgets", "defaultBranch": "main" }
+      "githubRepo": {
+        "owner": "acme",
+        "repo": "widgets",
+        "isPrivate": true,
+        "defaultBranch": { "displayName": "main" },
+        "branches": [{ "displayName": "develop" }, { "displayName": "main" }]
+      }
     },
     {
       "name": "sources/github/acme/gadgets",
       "id": "github/acme/gadgets",
-      "githubRepo": { "owner": "acme", "repo": "gadgets", "defaultBranch": "develop" }
+      "githubRepo": {
+        "owner": "acme",
+        "repo": "gadgets",
+        "isPrivate": false,
+        "defaultBranch": { "displayName": "develop" },
+        "branches": [{ "displayName": "develop" }]
+      }
     }
   ],
   "nextPageToken": "tok-2"

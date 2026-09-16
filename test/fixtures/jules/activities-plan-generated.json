@@ -3,15 +3,17 @@
     {
       "name": "sessions/sess-running-1/activities/a1",
       "id": "a1",
+      "createTime": "2025-05-21T13:28:30Z",
       "originator": "agent",
-      "description": "Jules produced a plan",
-      "createTime": "2026-09-15T10:00:30Z",
       "planGenerated": {
-        "steps": [
-          { "title": "Inspect the repository" },
-          { "title": "Implement the change" },
-          { "title": "Run the test suite" }
-        ]
+        "plan": {
+          "id": "p1",
+          "steps": [
+            { "id": "s1", "title": "Inspect the repository", "description": "Read the paginate module" },
+            { "id": "s2", "title": "Implement the change", "description": "Clamp the limit" },
+            { "id": "s3", "title": "Run the test suite", "description": "node --test" }
+          ]
+        }
       }
     }
   ],

@@ -3,10 +3,9 @@
     {
       "name": "sessions/sess-running-1/activities/a4",
       "id": "a4",
+      "createTime": "2025-05-21T13:30:00Z",
       "originator": "agent",
-      "description": "Agent replied",
-      "createTime": "2026-09-15T10:02:00Z",
-      "agentMessaged": { "message": "I updated the parser and added a regression test" }
+      "agentMessaged": { "agentMessage": "I updated the parser and added a regression test" }
     }
   ],
   "nextPageToken": null

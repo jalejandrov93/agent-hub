@@ -1,14 +1,10 @@
 {
   "name": "sessions/sess-failed-1",
   "id": "sess-failed-1",
-  "state": "FAILED",
-  "url": "https://jules.google.com/session/sess-failed-1",
+  "title": "Migrate the build to ESM",
   "prompt": "Migrate the build to ESM",
-  "sourceContext": {
-    "source": "sources/github/acme/widgets",
-    "githubRepoContext": { "startingBranch": "main" }
-  },
-  "outputs": [],
-  "createTime": "2026-09-15T11:00:00Z",
-  "updateTime": "2026-09-15T11:03:00Z"
+  "state": "FAILED",
+  "createTime": "2025-05-21T14:00:00Z",
+  "url": "https://jules.google.com/session/sess-failed-1",
+  "outputs": []
 }

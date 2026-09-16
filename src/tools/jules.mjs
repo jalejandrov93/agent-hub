@@ -157,10 +157,17 @@ export async function julesSourcesTool({ env = process.env, client = defaultClie
   return {
     sources: sources.map((s) => {
       const fallback = ownerRepoFromName(s?.name)
+      const githubRepo = s?.githubRepo
+      const defaultBranchName = githubRepo?.defaultBranch?.displayName
       return {
         name: s?.name ?? null,
-        owner: s?.githubRepo?.owner ?? fallback.owner,
-        repo: s?.githubRepo?.repo ?? fallback.repo,
+        owner: githubRepo?.owner ?? fallback.owner,
+        repo: githubRepo?.repo ?? fallback.repo,
+        defaultBranch:
+          typeof defaultBranchName === 'string' && defaultBranchName.length > 0 ? defaultBranchName : null,
+        branches: Array.isArray(githubRepo?.branches)
+          ? githubRepo.branches.map((branch) => branch?.displayName).filter((name) => typeof name === 'string' && name.length > 0)
+          : [],
       }
     }),
   }

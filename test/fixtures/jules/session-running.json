@@ -1,13 +1,10 @@
 {
   "name": "sessions/sess-running-1",
   "id": "sess-running-1",
-  "state": "IN_PROGRESS",
-  "url": "https://jules.google.com/session/sess-running-1",
+  "title": "Add a unit test for the parser",
   "prompt": "Add a unit test for the parser",
-  "sourceContext": {
-    "source": "sources/github/acme/widgets",
-    "githubRepoContext": { "startingBranch": "main" }
-  },
-  "createTime": "2026-09-15T10:00:00Z",
-  "updateTime": "2026-09-15T10:02:00Z"
+  "state": "IN_PROGRESS",
+  "createTime": "2025-05-21T13:28:11.920976531Z",
+  "url": "https://jules.google.com/session/sess-running-1",
+  "outputs": []
 }

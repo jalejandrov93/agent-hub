@@ -3,10 +3,9 @@
     {
       "name": "sessions/sess-running-1/activities/a3",
       "id": "a3",
+      "createTime": "2025-05-21T13:29:30Z",
       "originator": "user",
-      "description": "User sent a message",
-      "createTime": "2026-09-15T10:01:30Z",
-      "userMessaged": { "message": "Please also add a regression test" }
+      "userMessaged": { "userMessage": "Please also add a regression test" }
     }
   ],
   "nextPageToken": null

@@ -25,6 +25,7 @@ import {
   Learning,
   JulesCheckResponse,
   JulesSessionsResponse,
+  JulesSourcesResponse,
 } from './schemas.mjs'
 
 const VERSION = '2.1.0'
@@ -40,11 +41,6 @@ const log = (...args) => console.error('[agent-hub]', ...args)
 // rely on.
 const AgentsStatusResponse = z.object({ agents: z.array(AgentStatusRow) }).passthrough()
 const LearningProposeResponse = z.object({ learning: Learning, note: z.string() }).passthrough()
-const JulesSourcesResponse = z
-  .object({
-    sources: z.array(z.object({ name: z.string().nullable(), owner: z.string().nullable(), repo: z.string().nullable() }).passthrough()),
-  })
-  .passthrough()
 
 const ok = (payload, structuredContent) => ({
   content: [{ type: 'text', text: JSON.stringify(payload, null, 2) }],

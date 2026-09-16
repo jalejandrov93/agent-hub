@@ -379,3 +379,21 @@ export const JulesSessionRow = z
   .passthrough()
 
 export const JulesSessionsResponse = z.object({ sessions: z.array(JulesSessionRow) }).passthrough()
+
+/**
+ * One row from jules_sources: a GitHub repo connected to the Jules account.
+ * `defaultBranch` and `branches` come from githubRepo.defaultBranch.displayName
+ * and githubRepo.branches[].displayName — what a caller needs to pick a
+ * startingBranch for jules_delegate.
+ */
+export const JulesSourceRow = z
+  .object({
+    name: nullableString,
+    owner: nullableString,
+    repo: nullableString,
+    defaultBranch: nullableString,
+    branches: z.array(z.string()),
+  })
+  .passthrough()
+
+export const JulesSourcesResponse = z.object({ sources: z.array(JulesSourceRow) }).passthrough()

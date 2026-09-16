@@ -14,6 +14,7 @@ import {
   sessionState,
   prUrlFromSession,
   branchFromSession,
+  changeSetFromSession,
   sessionUrl,
   buildResponseText,
   classifyError,
@@ -23,6 +24,9 @@ import { createSession } from '../../src/cloud/jules/client.mjs'
 const FIXTURES = path.join(path.dirname(fileURLToPath(import.meta.url)), '..', 'fixtures', 'jules')
 const readJson = (name) => JSON.parse(fs.readFileSync(path.join(FIXTURES, name), 'utf8'))
 const activitiesOf = (name) => readJson(name).activities
+const changeSetArtifactOf = (name) => readJson(name).activities[0].artifacts[0].changeSet
+
+const PAGINATE_DIFF = 'diff --git a/src/paginate.mjs b/src/paginate.mjs\n+const limit = Math.max(0, limit)\n'
 
 test('exposes the jules provider identity', () => {
   assert.equal(id, 'jules')
@@ -93,7 +97,7 @@ test('buildSessionRequest is the createSession argument set: spread into createS
   })
 })
 
-test('activityLines renders planGenerated with a header and one numbered line per step', () => {
+test('activityLines reads planGenerated steps from planGenerated.plan.steps', () => {
   assert.deepEqual(activityLines(activitiesOf('activities-plan-generated.json')), [
     '[jules] plan generated: 3 step(s)',
     '[jules]   1. Inspect the repository',
@@ -102,8 +106,9 @@ test('activityLines renders planGenerated with a header and one numbered line pe
   ])
 })
 
-test('activityLines renders a planGenerated with no steps as 0 step(s) and no step lines', () => {
+test('activityLines renders a planGenerated with no plan as 0 step(s) and no step lines', () => {
   assert.deepEqual(activityLines([{ planGenerated: {} }]), ['[jules] plan generated: 0 step(s)'])
+  assert.deepEqual(activityLines([{ planGenerated: { plan: {} } }]), ['[jules] plan generated: 0 step(s)'])
 })
 
 test('activityLines renders planApproved, userMessaged and agentMessaged', () => {
@@ -116,6 +121,11 @@ test('activityLines renders planApproved, userMessaged and agentMessaged', () =>
   ])
 })
 
+test('activityLines reads agentMessaged from agentMessage, not the nonexistent message field', () => {
+  assert.deepEqual(activityLines([{ agentMessaged: { agentMessage: 'real field' } }]), ['[jules] agent: real field'])
+  assert.deepEqual(activityLines([{ agentMessaged: {} }]), ['[jules] agent: '])
+})
+
 test('activityLines renders progressUpdated with an em-dash description', () => {
   assert.deepEqual(activityLines(activitiesOf('activities-progress-updated.json')), [
     '[jules] progress: Running tests — Executing node --test',
@@ -123,8 +133,18 @@ test('activityLines renders progressUpdated with an em-dash description', () => 
   assert.deepEqual(activityLines([{ progressUpdated: { title: 'Planning' } }]), ['[jules] progress: Planning'])
 })
 
-test('activityLines renders sessionCompleted and its pull request url', () => {
+test('activityLines renders an empty sessionCompleted and its change set artifact', () => {
   assert.deepEqual(activityLines(activitiesOf('activities-session-completed.json')), [
+    '[jules] session completed',
+    '[jules] change set: Optimize queries (2 diff lines)',
+  ])
+})
+
+test('activityLines renders a pull request url found in a sessionCompleted artifact', () => {
+  const activities = [
+    { sessionCompleted: {}, artifacts: [{ pullRequest: { url: 'https://github.com/acme/widgets/pull/42' } }] },
+  ]
+  assert.deepEqual(activityLines(activities), [
     '[jules] session completed',
     '[jules] pull request: https://github.com/acme/widgets/pull/42',
   ])
@@ -137,25 +157,35 @@ test('activityLines renders sessionFailed with and without a reason', () => {
   assert.deepEqual(activityLines([{ sessionFailed: {} }]), ['[jules] session failed'])
 })
 
-test('activityLines appends a change set line after the activity line, counting diff lines', () => {
+test('activityLines reads the change set out of the artifacts array, counting diff lines', () => {
   assert.deepEqual(activityLines(activitiesOf('activities-change-set.json')), [
     '[jules] agent: Draft change set ready',
-    '[jules] change set: Fix off-by-one in paginate() (6 diff lines)',
+    '[jules] change set: Fix off-by-one in paginate() (2 diff lines)',
   ])
 })
 
-test('activityLines uses "(no commit message)" and 0 diff lines for a sparse change set', () => {
-  assert.deepEqual(activityLines([{ changeSet: {} }]), ['[jules] change set: (no commit message) (0 diff lines)'])
+test('activityLines renders a bashOutput artifact as one honest line', () => {
+  assert.deepEqual(activityLines(activitiesOf('activities-bash-output.json')), [
+    '[jules] progress: Running tests — Executing node --test',
+    '[jules] bash: node --test — pass 579',
+  ])
 })
 
-test('activityLines falls back to description when no known type key matches', () => {
+test('activityLines uses "(no commit message)" and 0 diff lines for a sparse change set artifact', () => {
+  assert.deepEqual(activityLines([{ artifacts: [{ changeSet: {} }] }]), [
+    '[jules] change set: (no commit message) (0 diff lines)',
+  ])
+})
+
+test('activityLines falls back to the unknown type key name when no known type matches', () => {
   assert.deepEqual(activityLines(activitiesOf('activities-unknown.json')), [
-    '[jules] Something happened that this client does not model yet',
+    '[jules] unknown activity: someNewActivity',
   ])
 })
 
 test('activityLines never throws on malformed entries and skips them silently', () => {
-  assert.deepEqual(activityLines([null, 42, 'x', [], { description: '' }, { noType: true }]), [])
+  assert.deepEqual(activityLines([null, 42, 'x', [], {}]), [])
+  assert.deepEqual(activityLines([{ artifacts: [null, 7, {}] }]), [])
 })
 
 test('activityLines returns [] for a non-array argument', () => {
@@ -175,7 +205,7 @@ test('summarizeActivities returns the documented defaults when nothing matches',
   })
 })
 
-test('summarizeActivities collects prUrl, the last change set, the last agent message and completion', () => {
+test('summarizeActivities collects the last change set from artifacts, the last agent message and completion', () => {
   const activities = [
     ...activitiesOf('activities-plan-generated.json'),
     ...activitiesOf('activities-agent-messaged.json'),
@@ -183,13 +213,27 @@ test('summarizeActivities collects prUrl, the last change set, the last agent me
     ...activitiesOf('activities-session-completed.json'),
   ]
   const summary = summarizeActivities(activities)
-  assert.equal(summary.prUrl, 'https://github.com/acme/widgets/pull/42')
-  assert.deepEqual(summary.changeSet, readJson('activities-change-set.json').activities[0].changeSet)
+  const artifact = changeSetArtifactOf('activities-session-completed.json')
+  assert.equal(summary.prUrl, null)
+  assert.deepEqual(summary.changeSet, {
+    source: artifact.source,
+    baseCommitId: artifact.gitPatch.baseCommitId,
+    unifiedDiff: artifact.gitPatch.unidiffPatch,
+    suggestedCommitMessage: artifact.gitPatch.suggestedCommitMessage,
+  })
   assert.equal(summary.lastAgentMessage, 'Draft change set ready')
   assert.equal(summary.completed, true)
   assert.equal(summary.failed, false)
   assert.equal(summary.failureMessage, null)
   assert.equal(summary.lines.length, 9)
+})
+
+test('summarizeActivities picks a pull request url out of the activity artifacts', () => {
+  const summary = summarizeActivities([
+    { sessionCompleted: {}, artifacts: [{ pullRequest: { url: 'https://github.com/acme/widgets/pull/42' } }] },
+  ])
+  assert.equal(summary.prUrl, 'https://github.com/acme/widgets/pull/42')
+  assert.equal(summary.completed, true)
 })
 
 test('summarizeActivities flags failure and keeps the reason', () => {
@@ -212,13 +256,43 @@ test('sessionState reads session.state and defaults to UNKNOWN', () => {
   assert.equal(sessionState(null), 'UNKNOWN')
 })
 
-test('prUrlFromSession finds the first url across array or single-object outputs', () => {
-  assert.equal(prUrlFromSession(readJson('session-completed.json')), 'https://github.com/acme/widgets/pull/42')
-  assert.equal(prUrlFromSession({ outputs: { pullRequest: { uri: 'https://x/pull/1' } } }), 'https://x/pull/1')
-  assert.equal(prUrlFromSession({ outputs: [{ url: 'https://x/plain' }] }), 'https://x/plain')
+test('changeSetFromSession maps the last outputs[].changeSet to the stable flat shape', () => {
+  assert.deepEqual(changeSetFromSession(readJson('session-completed.json')), {
+    source: 'sources/github/acme/widgets',
+    baseCommitId: 'abc123def456',
+    unifiedDiff: PAGINATE_DIFF,
+    suggestedCommitMessage: 'Optimize queries',
+  })
+  const twoOutputs = {
+    outputs: [
+      { changeSet: { source: 'sources/github/acme/first', gitPatch: { baseCommitId: 'first' } } },
+      { changeSet: { source: 'sources/github/acme/second', gitPatch: { baseCommitId: 'second' } } },
+    ],
+  }
+  assert.equal(changeSetFromSession(twoOutputs).baseCommitId, 'second')
 })
 
-test('prUrlFromSession returns null and never throws when outputs are missing or malformed', () => {
+test('changeSetFromSession returns null with no change set and normalises a sparse one', () => {
+  assert.equal(changeSetFromSession({}), null)
+  assert.equal(changeSetFromSession(null), null)
+  assert.equal(changeSetFromSession({ outputs: [] }), null)
+  assert.equal(changeSetFromSession({ outputs: [{ pullRequest: { url: 'https://x/pull/1' } }] }), null)
+  assert.deepEqual(changeSetFromSession({ outputs: [{ changeSet: {} }] }), {
+    source: null,
+    baseCommitId: null,
+    unifiedDiff: null,
+    suggestedCommitMessage: null,
+  })
+})
+
+test('prUrlFromSession finds the first url across array or single-object outputs', () => {
+  assert.equal(prUrlFromSession({ outputs: { pullRequest: { uri: 'https://x/pull/1' } } }), 'https://x/pull/1')
+  assert.equal(prUrlFromSession({ outputs: [{ url: 'https://x/plain' }] }), 'https://x/plain')
+  assert.equal(prUrlFromSession({ outputs: [{ changeSet: { pullRequest: { url: 'https://x/pr/2' } } }] }), 'https://x/pr/2')
+})
+
+test('prUrlFromSession returns null for a real change-set-only session and when outputs are missing or malformed', () => {
+  assert.equal(prUrlFromSession(readJson('session-completed.json')), null)
   assert.equal(prUrlFromSession({}), null)
   assert.equal(prUrlFromSession(null), null)
   assert.equal(prUrlFromSession({ outputs: 'nope' }), null)
@@ -232,6 +306,10 @@ test('branchFromSession probes each output shape in the documented order', () =>
   assert.equal(branchFromSession({ outputs: [{ branch: 'jules/output-branch' }] }), 'jules/output-branch')
   assert.equal(branchFromSession({ branch: 'jules/session-branch' }), 'jules/session-branch')
   assert.equal(branchFromSession({ workingBranch: 'jules/working-branch' }), 'jules/working-branch')
+})
+
+test('branchFromSession also probes a branch nested in an outputs[].changeSet', () => {
+  assert.equal(branchFromSession({ outputs: [{ changeSet: { branch: 'jules/change-set' } }] }), 'jules/change-set')
 })
 
 test('branchFromSession prefers an earlier probe over a later one when both are present', () => {
@@ -266,24 +344,35 @@ test('sessionUrl returns the web url only when it is a non-empty string', () => 
 test('buildResponseText renders the full section order with blank-line separators and no trailing newline', () => {
   const session = readJson('session-completed.json')
   const summary = {
-    lines: [],
-    prUrl: null,
-    changeSet: { baseCommitId: 'x', unifiedDiff: '', suggestedCommitMessage: 'Fix off-by-one in paginate()' },
+    ...summarizeActivities(activitiesOf('activities-session-completed.json')),
+    prUrl: 'https://github.com/acme/widgets/pull/42',
     lastAgentMessage: 'Done, tests pass',
-    completed: true,
-    failed: false,
-    failureMessage: null,
   }
   const expected = [
     'Jules session sess-completed-1 (COMPLETED)',
     'Pull request: https://github.com/acme/widgets/pull/42',
-    'Change set: Fix off-by-one in paginate()',
+    'Change set: Optimize queries (base abc123def456)',
     'Done, tests pass',
     'Session URL: https://jules.google.com/session/sess-completed-1',
   ].join('\n\n')
   const text = buildResponseText({ session, summary })
   assert.equal(text, expected)
   assert.equal(text.endsWith('\n'), false)
+})
+
+test('buildResponseText names the change set message and base commit when Jules produced a patch and no PR', () => {
+  const session = readJson('session-completed.json')
+  const summary = summarizeActivities(activitiesOf('activities-session-completed.json'))
+  const text = buildResponseText({ session, summary })
+  assert.ok(!text.includes('Pull request:'), 'a change set alone is not a pull request')
+  assert.ok(text.includes('Change set: Optimize queries (base abc123def456)'))
+  assert.ok(text.includes('Session URL: https://jules.google.com/session/sess-completed-1'))
+})
+
+test('buildResponseText falls back to the session outputs change set when the summary carries none', () => {
+  const session = readJson('session-completed.json')
+  const text = buildResponseText({ session, summary: summarizeActivities([]) })
+  assert.ok(text.includes('Change set: Optimize queries (base abc123def456)'))
 })
 
 test('buildResponseText degrades to a bare header when everything else is missing', () => {
