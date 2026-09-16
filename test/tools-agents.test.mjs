@@ -72,3 +72,25 @@ test('agentsStatusTool surfaces the real binPath/cliVersion once discovery.json 
   assert.equal(agyRow.binPath, '/home/u/.local/bin/agy')
   assert.equal(agyRow.cliVersion, '1.2.1')
 })
+
+test('agentsStatusTool with refresh:true does not await the network — quota reads cached mode, a refresh only starts a background fetch', async () => {
+  const home = tmpHome()
+  const { agentsStatusTool } = await fresh(home)
+  const runner = fakeRunner([
+    ['--version', { stdout: 'v', stderr: '', code: 0 }],
+    [/models|help config/, { stdout: 'gemini-3.8-flash-low\tlabel\n', stderr: '', code: 0 }],
+  ])
+
+  const originalFetch = global.fetch
+  global.fetch = () => new Promise(() => {}) // never resolves
+
+  try {
+    const before = Date.now()
+    const rows = await agentsStatusTool({ cwd: '/tmp', refresh: true, env: { AGENT_HUB_HOME: home }, commandRunner: runner })
+    const elapsed = Date.now() - before
+    assert.ok(elapsed < 1000, `agentsStatusTool({refresh:true}) must not await the network, took ${elapsed}ms`)
+    assert.ok(rows.length > 0)
+  } finally {
+    global.fetch = originalFetch
+  }
+})

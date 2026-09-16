@@ -67,13 +67,13 @@ export function quotaFor({ agent, model }, usageByProvider) {
 
   if (!provider) return null
 
-  if (usageByProvider.reachable === false) {
-    return { quotaUnavailableReason: 'codexbar_unreachable' }
-  }
-
   const usageData = usageByProvider[provider]
   if (!usageData) {
      return { quotaUnavailableReason: 'no_data' }
+  }
+  if (usageData.pending) {
+     // cached mode, nothing cached yet: a background refresh has started.
+     return { quotaUnavailableReason: 'quota_pending' }
   }
   if (usageData.error) {
      return { quotaUnavailableReason: usageData.error }
@@ -136,7 +136,7 @@ export function quotaFor({ agent, model }, usageByProvider) {
     nextResetAt = new Date(Math.min(...exhaustedResetsAt)).toISOString()
   }
 
-  return {
+  const result = {
     provider,
     windows,
     exhausted,
@@ -144,4 +144,12 @@ export function quotaFor({ agent, model }, usageByProvider) {
     dataConfidence: entry.usage.dataConfidence || 'exact',
     fetchedAt: entry.usage.updatedAt || new Date().toISOString()
   }
+
+  // Cached-mode fetchUsage() stamps these onto the CodexBar response itself;
+  // carry them through so a caller can tell a fresh cache hit from a stale
+  // one still being refreshed in the background.
+  if (usageData.stale !== undefined) result.stale = usageData.stale
+  if (usageData.cachedAt !== undefined) result.cachedAt = usageData.cachedAt
+
+  return result
 }

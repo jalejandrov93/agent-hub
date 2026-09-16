@@ -13,7 +13,7 @@ import { agentsQuotaTool } from './tools/agents.mjs'
 import { resumeRemoteJobs } from './cloud/runner.mjs'
 import { metricsTool } from './tools/insights.mjs'
 import { learningProposeTool } from './tools/learnings.mjs'
-import { scheduleStartupDiscovery } from './startup.mjs'
+import { scheduleStartupDiscovery, scheduleQuotaWarmup } from './startup.mjs'
 import {
   TASK_TYPES,
   LEARNING_TEXT_MAX,
@@ -87,9 +87,11 @@ export function buildServer() {
       title: 'Agent quota usage',
       description:
         'Quota state of each delegation pair, read from a local CodexBar server: every window that limits it, with used percent ' +
-        'and reset time, and exhausted:true when one is used up. INFORMATION ONLY: quota never chooses, skips or reorders an ' +
-        'agent, and route() is unaffected by it. Check it before delegating and tell the user when a chosen agent is exhausted, ' +
-        'with its reset time; the human decides whether to use it anyway. A null quota carries a reason (CodexBar unreachable, not metered).',
+        'and reset time, and exhausted:true when one is used up. This tool waits for a live reading (up to 45s on a cold CodexBar ' +
+        'probe) so its data is always fresh; route() and agents_status instead show whatever is already cached (stale:true/cachedAt ' +
+        'when it is), and never wait on the network. INFORMATION ONLY: quota never chooses, skips or reorders an agent, and route() ' +
+        'is unaffected by it. Check it before delegating and tell the user when a chosen agent is exhausted, with its reset time; ' +
+        'the human decides whether to use it anyway. A null quota carries a reason (CodexBar unreachable, not metered).',
       inputSchema: { refresh: z.boolean().optional().describe('Bypass the 5-minute cache and fetch live.') },
       outputSchema: AgentsQuotaResponseWrapper,
       annotations: { readOnlyHint: true, openWorldHint: true, idempotentHint: true },
@@ -627,6 +629,12 @@ async function main() {
   // Fire-and-forget: never awaited, so a slow/missing CLI never delays the
   // stdio handshake below. See src/startup.mjs for the non-blocking wiring.
   scheduleStartupDiscovery()
+
+  // Fire-and-forget, same reasoning: warms the quota cache live so the first
+  // cached-mode route()/agents_status of this session isn't stuck reporting
+  // every provider `pending`. A cold/unreachable CodexBar can never delay or
+  // crash the stdio handshake below.
+  scheduleQuotaWarmup()
 
   // Deliberately NOT startScheduler(): this MCP server is a per-session stdio
   // process, and the dashboard already runs the scheduler as the one

@@ -3,7 +3,7 @@ import assert from 'node:assert/strict'
 import fs from 'node:fs'
 import path from 'node:path'
 import os from 'node:os'
-import { scheduleStartupDiscovery } from '../src/startup.mjs'
+import { scheduleStartupDiscovery, scheduleQuotaWarmup } from '../src/startup.mjs'
 
 function tmpHome() {
   return fs.mkdtempSync(path.join(os.tmpdir(), 'agent-hub-startup-'))
@@ -92,4 +92,56 @@ test('scheduleStartupDiscovery is a no-op when AGENT_HUB_DISABLE_STARTUP_DISCOVE
 
   assert.equal(fs.existsSync(path.join(home, 'discovery.json')), false)
   assert.equal(runner.calls.length, 0)
+})
+
+test('scheduleQuotaWarmup returns immediately without awaiting the quota fetch (never blocks the caller)', () => {
+  const env = { AGENT_HUB_HOME: tmpHome() }
+  const fetchUsageFn = () => new Promise(() => {}) // never resolves
+  const before = Date.now()
+  scheduleQuotaWarmup({ env, fetchUsageFn })
+  const elapsed = Date.now() - before
+  assert.ok(elapsed < 50, `scheduleQuotaWarmup must return synchronously, took ${elapsed}ms`)
+})
+
+test('scheduleQuotaWarmup fetches live usage for every provider named by DELEGATION_MAP, in the background', async () => {
+  const env = { AGENT_HUB_HOME: tmpHome() }
+  let seenArgs = null
+  const fetchUsageFn = async (args) => {
+    seenArgs = args
+    return {}
+  }
+
+  scheduleQuotaWarmup({ env, fetchUsageFn })
+  const appeared = await waitFor(() => seenArgs !== null)
+
+  assert.ok(appeared, 'scheduleQuotaWarmup should call fetchUsageFn shortly after being scheduled')
+  assert.equal(seenArgs.mode, 'live')
+  assert.ok(seenArgs.providers.length > 0)
+  assert.equal(seenArgs.env, env)
+})
+
+test('scheduleQuotaWarmup never throws or crashes startup when the quota fetch rejects', async () => {
+  const env = { AGENT_HUB_HOME: tmpHome() }
+  let called = false
+  const fetchUsageFn = async () => {
+    called = true
+    throw new Error('CodexBar unreachable')
+  }
+
+  assert.doesNotThrow(() => scheduleQuotaWarmup({ env, fetchUsageFn }))
+  await waitFor(() => called)
+})
+
+test('scheduleQuotaWarmup is a no-op when AGENT_HUB_DISABLE_STARTUP_DISCOVERY=1', async () => {
+  const env = { AGENT_HUB_HOME: tmpHome(), AGENT_HUB_DISABLE_STARTUP_DISCOVERY: '1' }
+  let called = false
+  const fetchUsageFn = async () => {
+    called = true
+    return {}
+  }
+
+  scheduleQuotaWarmup({ env, fetchUsageFn })
+  await new Promise((r) => setTimeout(r, 100))
+
+  assert.equal(called, false)
 })

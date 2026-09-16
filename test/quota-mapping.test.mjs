@@ -64,3 +64,34 @@ test('exhausted when >= 100 on known window', () => {
   assert.equal(result.nextResetAt, '2026-10-01T00:00:00.000Z')
 })
 
+test('a pending provider (cached mode, nothing cached yet) reports quota_pending', () => {
+  const usage = { copilot: { pending: true } }
+  const result = quotaFor({ agent: 'copilot', model: 'auto' }, usage)
+  assert.deepEqual(result, { quotaUnavailableReason: 'quota_pending' })
+})
+
+test('stale and cachedAt on a cached-mode entry pass through to the quota object', () => {
+  const usage = {
+    copilot: Object.assign(
+      [{ usage: { primary: { usedPercent: 42, resetsAt: '2026-10-01T00:00:00Z' } } }],
+      { stale: true, cachedAt: '2026-09-16T12:00:00.000Z' }
+    ),
+  }
+  const result = quotaFor({ agent: 'copilot', model: 'auto' }, usage)
+  assert.equal(result.stale, true)
+  assert.equal(result.cachedAt, '2026-09-16T12:00:00.000Z')
+})
+
+test('a fresh (non-cached-mode) entry with no stale/cachedAt does not add those fields', () => {
+  const usage = { copilot: [{ usage: { primary: { usedPercent: 5 } } }] }
+  const result = quotaFor({ agent: 'copilot', model: 'auto' }, usage)
+  assert.equal('stale' in result, false)
+  assert.equal('cachedAt' in result, false)
+})
+
+test('an error code from fetchUsage passes through unchanged', () => {
+  const usage = { copilot: { error: 'codexbar_timeout' } }
+  const result = quotaFor({ agent: 'copilot', model: 'auto' }, usage)
+  assert.deepEqual(result, { quotaUnavailableReason: 'codexbar_timeout' })
+})
+

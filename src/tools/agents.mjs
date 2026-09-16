@@ -42,7 +42,9 @@ export async function agentsStatusTool({ refresh = false, cwd = process.cwd(), e
     const p = getProvider(pair.agent, pair.model)
     if (p) providers.add(p)
   }
-  const usageByProvider = await fetchUsage({ providers: [...providers], refresh, env })
+  // 'cached' mode never awaits the network; refresh:true only starts a
+  // background refresh instead of blocking this call on a cold CodexBar.
+  const usageByProvider = await fetchUsage({ providers: [...providers], refresh, env, mode: 'cached' })
 
   return results.map((r) => ({
     agent: r.agent,
@@ -94,7 +96,10 @@ export async function agentsQuotaTool({
     if (p) providers.add(p)
   }
 
-  const usageByProvider = await fetchUsageFn({ providers: [...providers], refresh, env })
+  // 'live' mode: this is the tool a human calls to get a fresh reading, so
+  // it awaits the network (up to fetchUsage's 45s live timeout) instead of
+  // returning stale/pending data.
+  const usageByProvider = await fetchUsageFn({ providers: [...providers], refresh, env, mode: 'live' })
 
   return pairs.map((p) => ({
     agent: p.agent,

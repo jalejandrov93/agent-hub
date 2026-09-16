@@ -199,14 +199,31 @@ export async function route({ taskType, mode, includeCatalog = false, env = proc
     if (p) providers.add(p)
   }
 
-  const usageByProvider = await fetchUsage({ providers: [...providers], env })
-  
-  for (const c of toAnnotate) {
-    const q = quotaFor(c, usageByProvider)
-    if (q) c.quota = q
+  // Quota is informational only (never chooses/skips/reorders a candidate),
+  // so it must never slow a delegation: 'cached' mode reads whatever is
+  // already in the quota cache and never awaits the network.
+  const usageByProvider = await fetchUsage({ providers: [...providers], env, mode: 'cached' })
+
+  // Annotate fresh copies, never DELEGATION_MAP's own candidate objects: `chain`
+  // (and therefore `primary`/`fallbacks`) are the same shared, module-level
+  // objects on every call, so mutating them in place with `.quota = q` let one
+  // route() call's quota data leak into another's result through that shared
+  // reference — most visible once quota could differ from call to call (SWR
+  // cache: pending vs. cached vs. stale) instead of always being refetched.
+  const quotaByCandidate = new Map(toAnnotate.map((c) => [c, quotaFor(c, usageByProvider)]))
+  const annotate = (c) => {
+    const q = quotaByCandidate.get(c)
+    return q ? { ...c, quota: q } : { ...c }
   }
 
-  return { primary, fallbacks, skipped, discovery, reason: entry.why, appliedProposal }
+  return {
+    primary: annotate(primary),
+    fallbacks: fallbacks.map(annotate),
+    skipped,
+    discovery,
+    reason: entry.why,
+    appliedProposal,
+  }
 }
 
 export function knownTaskTypes() {

@@ -1,5 +1,8 @@
 import { runDiscovery, pruneCacheForMap } from './discovery.mjs'
 import { runCommand } from './process.mjs'
+import { defaultPairs } from './tools/agents.mjs'
+import { getProvider } from './quota/mapping.mjs'
+import { fetchUsage } from './quota/codexbar.mjs'
 
 /**
  * Fire CLI discovery + cache pruning in the background right after startup.
@@ -20,6 +23,33 @@ export function scheduleStartupDiscovery({ env = process.env, commandRunner = ru
     pruneCacheForMap(env)
     runDiscovery({ env, commandRunner }).catch((error) => {
       console.error('[agent-hub] startup discovery failed:', error?.message ?? error)
+    })
+  })
+}
+
+/**
+ * Warm CodexBar's quota cache once at startup, live (awaiting the network),
+ * so the first cached-mode route()/agents_status of a session already has
+ * data instead of returning `pending` for every provider. Fire-and-forget,
+ * same as scheduleStartupDiscovery above: never awaited by main(), so a
+ * cold or unreachable CodexBar can never delay or crash the stdio handshake.
+ *
+ * Shares AGENT_HUB_DISABLE_STARTUP_DISCOVERY=1 with scheduleStartupDiscovery
+ * — the same escape hatch that keeps test/server.test.mjs from spawning real
+ * CLI/network side effects also keeps it from hitting a real CodexBar.
+ */
+export function scheduleQuotaWarmup({ env = process.env, fetchUsageFn = fetchUsage } = {}) {
+  if (env.AGENT_HUB_DISABLE_STARTUP_DISCOVERY === '1') return
+
+  setImmediate(() => {
+    const providers = new Set()
+    for (const pair of defaultPairs()) {
+      const p = getProvider(pair.agent, pair.model)
+      if (p) providers.add(p)
+    }
+    if (providers.size === 0) return
+    fetchUsageFn({ providers: [...providers], mode: 'live', env }).catch((error) => {
+      console.error('[agent-hub] quota warmup failed:', error?.message ?? error)
     })
   })
 }

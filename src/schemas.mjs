@@ -129,6 +129,11 @@ export const QuotaInfo = z
     fetchedAt: z.string().optional(),
     note: nullableString,
     quotaUnavailableReason: nullableString,
+    // Present only for a quota read served from the cache (route()/agents_status,
+    // which read quota in 'cached' mode and never await the network): whether
+    // the cache entry is past its 5-minute TTL, and when it was cached.
+    stale: z.boolean().optional(),
+    cachedAt: z.string().optional(),
   })
   .passthrough()
 
