@@ -1,0 +1,18 @@
+{
+  "activities": [
+    {
+      "name": "sessions/sess-running-1/activities/a8",
+      "id": "a8",
+      "originator": "agent",
+      "description": "Produced a change set",
+      "createTime": "2026-09-15T10:05:00Z",
+      "agentMessaged": { "message": "Draft change set ready" },
+      "changeSet": {
+        "baseCommitId": "abc123def456",
+        "unifiedDiff": "diff --git a/src/parse.mjs b/src/parse.mjs\nindex 111..222 100644\n--- a/src/parse.mjs\n+++ b/src/parse.mjs\n@@ -1,3 +1,4 @@\n+const x = 1\n",
+        "suggestedCommitMessage": "Fix off-by-one in paginate()"
+      }
+    }
+  ],
+  "nextPageToken": null
+}

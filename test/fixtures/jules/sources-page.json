@@ -1,0 +1,15 @@
+{
+  "sources": [
+    {
+      "name": "sources/github/acme/widgets",
+      "id": "github/acme/widgets",
+      "githubRepo": { "owner": "acme", "repo": "widgets", "defaultBranch": "main" }
+    },
+    {
+      "name": "sources/github/acme/gadgets",
+      "id": "github/acme/gadgets",
+      "githubRepo": { "owner": "acme", "repo": "gadgets", "defaultBranch": "develop" }
+    }
+  ],
+  "nextPageToken": "tok-2"
+}

@@ -1,0 +1,13 @@
+{
+  "activities": [
+    {
+      "name": "sessions/sess-running-1/activities/a3",
+      "id": "a3",
+      "originator": "user",
+      "description": "User sent a message",
+      "createTime": "2026-09-15T10:01:30Z",
+      "userMessaged": { "message": "Please also add a regression test" }
+    }
+  ],
+  "nextPageToken": null
+}

@@ -1,0 +1,12 @@
+{
+  "activities": [
+    {
+      "name": "sessions/sess-running-1/activities/a9",
+      "id": "a9",
+      "originator": "system",
+      "description": "Something happened that this client does not model yet",
+      "createTime": "2026-09-15T10:06:00Z"
+    }
+  ],
+  "nextPageToken": null
+}

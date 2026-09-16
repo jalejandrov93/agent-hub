@@ -1,0 +1,19 @@
+{
+  "activities": [
+    {
+      "name": "sessions/sess-running-1/activities/a1",
+      "id": "a1",
+      "originator": "agent",
+      "description": "Jules produced a plan",
+      "createTime": "2026-09-15T10:00:30Z",
+      "planGenerated": {
+        "steps": [
+          { "title": "Inspect the repository" },
+          { "title": "Implement the change" },
+          { "title": "Run the test suite" }
+        ]
+      }
+    }
+  ],
+  "nextPageToken": null
+}

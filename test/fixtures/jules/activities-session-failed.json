@@ -1,0 +1,13 @@
+{
+  "activities": [
+    {
+      "name": "sessions/sess-failed-1/activities/a7",
+      "id": "a7",
+      "originator": "system",
+      "description": "Session failed",
+      "createTime": "2026-09-15T11:03:00Z",
+      "sessionFailed": { "reason": "Tests failed after 3 attempts" }
+    }
+  ],
+  "nextPageToken": null
+}

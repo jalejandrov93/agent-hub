@@ -1,0 +1,13 @@
+{
+  "activities": [
+    {
+      "name": "sessions/sess-running-1/activities/a2",
+      "id": "a2",
+      "originator": "user",
+      "description": "Plan approved by the user",
+      "createTime": "2026-09-15T10:01:00Z",
+      "planApproved": {}
+    }
+  ],
+  "nextPageToken": null
+}

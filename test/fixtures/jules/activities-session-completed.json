@@ -1,0 +1,17 @@
+{
+  "activities": [
+    {
+      "name": "sessions/sess-completed-1/activities/a6",
+      "id": "a6",
+      "originator": "system",
+      "description": "Session finished",
+      "createTime": "2026-09-15T10:09:00Z",
+      "sessionCompleted": {
+        "outputs": [
+          { "pullRequest": { "url": "https://github.com/acme/widgets/pull/42" } }
+        ]
+      }
+    }
+  ],
+  "nextPageToken": null
+}
