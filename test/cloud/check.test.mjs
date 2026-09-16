@@ -7,6 +7,13 @@ import { checkRemoteSession } from '../../src/cloud/check.mjs'
 import { createAccount } from '../../src/accounts.mjs'
 import * as julesAdapter from '../../src/cloud/jules/adapter.mjs'
 
+// Every env handed to code under test gets its own throwaway AGENT_HUB_HOME.
+// Without one, stateHome() falls back to the REAL ~/.local/share/agent-hub:
+// these tests then read the user's actual accounts.json — real API keys — and
+// passed only while that file happened not to exist.
+const isolated = (env) => ({ AGENT_HUB_HOME: fs.mkdtempSync(path.join(os.tmpdir(), 'agent-hub-isolated-')), ...env })
+
+
 function fakeClient({ session = {}, activities = [] } = {}) {
   const calls = { getSession: [], listActivities: [] }
   return {
@@ -74,14 +81,14 @@ function completedSession(overrides = {}) {
 
 test('checkRemoteSession throws a clear error naming JULES_API_KEY when it is missing', async () => {
   await assert.rejects(
-    () => checkRemoteSession({ sessionId: 'sess-1', env: {}, client: fakeClient(), adapter: julesAdapter }),
+    () => checkRemoteSession({ sessionId: 'sess-1', env: isolated({}), client: fakeClient(), adapter: julesAdapter }),
     /JULES_API_KEY/
   )
 })
 
 test('checkRemoteSession throws when neither a jobId nor a sessionId is given', async () => {
   await assert.rejects(
-    () => checkRemoteSession({ env: { JULES_API_KEY: 'k' }, client: fakeClient(), adapter: julesAdapter }),
+    () => checkRemoteSession({ env: isolated({ JULES_API_KEY: 'k' }), client: fakeClient(), adapter: julesAdapter }),
     /jobId or a sessionId/
   )
 })
@@ -92,7 +99,7 @@ test('checkRemoteSession throws when the named job has no recorded Jules session
     () =>
       checkRemoteSession({
         jobId: 'j1',
-        env: { JULES_API_KEY: 'k' },
+        env: isolated({ JULES_API_KEY: 'k' }),
         client: fakeClient(),
         adapter: julesAdapter,
         readResultFn: store.readResultFn,
@@ -110,7 +117,7 @@ test('a bare sessionId does ONE getSession and ONE listActivities, maps the fiel
   let updates = 0
   const result = await checkRemoteSession({
     sessionId: 'sess-1',
-    env: { JULES_API_KEY: 'k' },
+    env: isolated({ JULES_API_KEY: 'k' }),
     client,
     adapter: julesAdapter,
     listJobsFn: () => [],
@@ -146,7 +153,7 @@ test('a bare sessionId resolves the local job by matching remote.sessionId and f
   const finishCalls = []
   const result = await checkRemoteSession({
     sessionId: 'sess-1',
-    env: { JULES_API_KEY: 'k' },
+    env: isolated({ JULES_API_KEY: 'k' }),
     client,
     adapter: julesAdapter,
     listJobsFn: () => [
@@ -178,7 +185,7 @@ test('with a jobId, checkRemoteSession merges the fresh state/prUrl/branch into 
   })
   const result = await checkRemoteSession({
     jobId: 'j1',
-    env: { JULES_API_KEY: 'k' },
+    env: isolated({ JULES_API_KEY: 'k' }),
     client,
     adapter: julesAdapter,
     readResultFn: store.readResultFn,
@@ -208,7 +215,7 @@ test('with a jobId, a known branch or prUrl is never overwritten with null', asy
   })
   await checkRemoteSession({
     jobId: 'j1',
-    env: { JULES_API_KEY: 'k' },
+    env: isolated({ JULES_API_KEY: 'k' }),
     client,
     adapter: julesAdapter,
     readResultFn: store.readResultFn,
@@ -225,7 +232,7 @@ test('a terminal session on a still-running job is finalized through finishRemot
   const finishCalls = []
   const result = await checkRemoteSession({
     jobId: 'j1',
-    env: { JULES_API_KEY: 'k' },
+    env: isolated({ JULES_API_KEY: 'k' }),
     client,
     adapter: julesAdapter,
     readResultFn: store.readResultFn,
@@ -249,7 +256,7 @@ test('a terminal FAILED session finalizes the job with outcome failed', async ()
   const finishCalls = []
   await checkRemoteSession({
     jobId: 'j1',
-    env: { JULES_API_KEY: 'k' },
+    env: isolated({ JULES_API_KEY: 'k' }),
     client,
     adapter: julesAdapter,
     readResultFn: store.readResultFn,
@@ -268,7 +275,7 @@ test('a terminal session whose local job already finished is not finalized again
   const finishCalls = []
   const result = await checkRemoteSession({
     jobId: 'j1',
-    env: { JULES_API_KEY: 'k' },
+    env: isolated({ JULES_API_KEY: 'k' }),
     client,
     adapter: julesAdapter,
     readResultFn: store.readResultFn,
@@ -284,7 +291,7 @@ test('checkRemoteSession never throws on an odd or empty session shape', async (
   const client = fakeClient({ session: {}, activities: undefined })
   const result = await checkRemoteSession({
     sessionId: 'sess-odd',
-    env: { JULES_API_KEY: 'k' },
+    env: isolated({ JULES_API_KEY: 'k' }),
     client,
     adapter: julesAdapter,
     listJobsFn: () => [],
@@ -314,7 +321,7 @@ test('checkRemoteSession drains every activity page so lastMessage is the newest
   })
   const result = await checkRemoteSession({
     sessionId: 'sess-1',
-    env: { JULES_API_KEY: 'k' },
+    env: isolated({ JULES_API_KEY: 'k' }),
     client,
     adapter: julesAdapter,
     listJobsFn: () => [],
@@ -332,7 +339,7 @@ test('checkRemoteSession stops after 10 pages when nextPageToken never changes',
   })
   const result = await checkRemoteSession({
     sessionId: 'sess-1',
-    env: { JULES_API_KEY: 'k' },
+    env: isolated({ JULES_API_KEY: 'k' }),
     client,
     adapter: julesAdapter,
     listJobsFn: () => [],
@@ -346,7 +353,7 @@ test('checkRemoteSession forwards activityPageSize to listActivities', async () 
   const client = fakeClient({ session: { state: 'IN_PROGRESS' } })
   await checkRemoteSession({
     sessionId: 'sess-1',
-    env: { JULES_API_KEY: 'k' },
+    env: isolated({ JULES_API_KEY: 'k' }),
     client,
     adapter: julesAdapter,
     listJobsFn: () => [],
@@ -389,7 +396,7 @@ test('checkRemoteSession falls back to env.JULES_API_KEY for a job with no accou
 
   await checkRemoteSession({
     jobId: 'j1',
-    env: { JULES_API_KEY: 'key-env' },
+    env: isolated({ JULES_API_KEY: 'key-env' }),
     client,
     adapter: julesAdapter,
     readResultFn: store.readResultFn,
@@ -421,7 +428,7 @@ test('checkRemoteSession recovers a remote job wrongly marked orphaned and final
   const finished = []
   const result = await checkRemoteSession({
     jobId: 'j1',
-    env: { JULES_API_KEY: 'k' },
+    env: isolated({ JULES_API_KEY: 'k' }),
     client: fakeClient({ session: completedSession(), activities: [] }),
     adapter: julesAdapter,
     readResultFn: store.readResultFn,
@@ -442,7 +449,7 @@ test('checkRemoteSession reopens a wrongly orphaned remote job as running while 
   const finished = []
   const result = await checkRemoteSession({
     jobId: 'j1',
-    env: { JULES_API_KEY: 'k' },
+    env: isolated({ JULES_API_KEY: 'k' }),
     client: fakeClient({ session: completedSession({ state: 'IN_PROGRESS', outputs: [] }), activities: [] }),
     adapter: julesAdapter,
     readResultFn: store.readResultFn,
@@ -463,7 +470,7 @@ test('checkRemoteSession never reopens a remote job that failed for a real reaso
   const finished = []
   const result = await checkRemoteSession({
     jobId: 'j1',
-    env: { JULES_API_KEY: 'k' },
+    env: isolated({ JULES_API_KEY: 'k' }),
     client: fakeClient({ session: completedSession(), activities: [] }),
     adapter: julesAdapter,
     readResultFn: store.readResultFn,

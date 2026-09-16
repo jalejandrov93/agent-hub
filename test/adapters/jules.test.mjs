@@ -171,9 +171,11 @@ test('activityLines renders a bashOutput artifact as one honest line', () => {
   ])
 })
 
-test('activityLines uses "(no commit message)" and 0 diff lines for a sparse change set artifact', () => {
+// A change set with no commit message is an intermediate snapshot, as the live
+// API showed, so even a sparse one renders as work in progress without throwing.
+test('activityLines renders a sparse change set with no commit message as work in progress', () => {
   assert.deepEqual(activityLines([{ artifacts: [{ changeSet: {} }] }]), [
-    '[jules] change set: (no commit message) (0 diff lines)',
+    '[jules] working: 0 diff lines so far',
   ])
 })
 
@@ -428,4 +430,43 @@ test('classifyError falls back to crash for any other API error', () => {
   const error = classifyError({ apiError: { status: 500 } })
   assert.equal(error.kind, 'crash')
   assert.equal(error.retriable, false)
+})
+
+// Real shape, captured from a live in-progress session: 83 of 91 progressUpdated
+// activities were an empty `progressUpdated: {}` whose only payload was an
+// intermediate change set — a cumulative diff snapshot with NO commit message
+// (only the final change set carries one). Rendered naively, that produced 83
+// blank "progress:" lines and 91 near-identical "change set" lines.
+function snapshot(id, diffLines) {
+  const unidiffPatch = Array.from({ length: diffLines }, (_, i) => `+line ${i}`).join('\n')
+  return {
+    name: `sessions/s1/activities/${id}`,
+    id,
+    createTime: '2026-09-16T12:00:00Z',
+    originator: 'agent',
+    progressUpdated: {},
+    artifacts: [{ changeSet: { source: 'sources/github/acme/widgets', gitPatch: { unidiffPatch, baseCommitId: 'abc123' } } }],
+  }
+}
+
+test('activityLines emits no blank progress line for an empty progressUpdated', () => {
+  const lines = activityLines([snapshot('a1', 3)])
+  assert.equal(lines.some((line) => /^\[jules\] progress:\s*$/.test(line)), false)
+})
+
+test('activityLines reports an intermediate diff snapshot as work in progress, not as a change set', () => {
+  const lines = activityLines([snapshot('a1', 3)])
+  assert.deepEqual(lines, ['[jules] working: 3 diff lines so far'])
+})
+
+test('activityLines collapses consecutive snapshots whose diff size did not change', () => {
+  const lines = activityLines([snapshot('a1', 3), snapshot('a2', 3), snapshot('a3', 5), snapshot('a4', 5)])
+  assert.deepEqual(lines, ['[jules] working: 3 diff lines so far', '[jules] working: 5 diff lines so far'])
+})
+
+test('activityLines still reports the final change set, which carries a commit message, as a change set', () => {
+  const final = snapshot('a9', 4)
+  final.artifacts[0].changeSet.gitPatch.suggestedCommitMessage = 'feat: add the cloud view\n\nBody text.'
+  const lines = activityLines([final])
+  assert.deepEqual(lines, ['[jules] change set: feat: add the cloud view (4 diff lines)'])
 })

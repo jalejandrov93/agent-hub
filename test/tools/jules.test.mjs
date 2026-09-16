@@ -9,6 +9,13 @@ import { createAccount } from '../../src/accounts.mjs'
 import { createSchedule, updateSchedule } from '../../src/schedules.mjs'
 import { refreshSources } from '../../src/cloud/sources.mjs'
 
+// Every env handed to code under test gets its own throwaway AGENT_HUB_HOME.
+// Without one, stateHome() falls back to the REAL ~/.local/share/agent-hub:
+// these tests then read the user's actual accounts.json — real API keys — and
+// passed only while that file happened not to exist.
+const isolated = (env) => ({ AGENT_HUB_HOME: fs.mkdtempSync(path.join(os.tmpdir(), 'agent-hub-isolated-')), ...env })
+
+
 const FIXTURES = path.join(path.dirname(fileURLToPath(import.meta.url)), '..', 'fixtures', 'jules')
 const readJson = (name) => JSON.parse(fs.readFileSync(path.join(FIXTURES, name), 'utf8'))
 const tmpHome = () => fs.mkdtempSync(path.join(os.tmpdir(), 'agent-hub-tools-jules-'))
@@ -38,7 +45,7 @@ test('julesDelegateTool forwards to startRemoteJobFn and returns {jobId, status,
     automationMode: 'AUTO_CREATE_PR',
     timeoutS: 1200,
     taskType: 'implementation-with-repo-rules',
-    env: { JULES_API_KEY: 'k' },
+    env: isolated({ JULES_API_KEY: 'k' }),
     startRemoteJobFn,
   })
 
@@ -87,7 +94,7 @@ test('julesCheckTool forwards jobId/sessionId/env/client to checkRemoteSessionFn
   const result = await julesCheckTool({
     jobId: 'j1',
     sessionId: 's1',
-    env: { JULES_API_KEY: 'k' },
+    env: isolated({ JULES_API_KEY: 'k' }),
     client,
     checkRemoteSessionFn,
   })
@@ -101,7 +108,7 @@ test('julesCheckTool forwards jobId/sessionId/env/client to checkRemoteSessionFn
 
 test('julesSessionsTool throws a clean message when JULES_API_KEY is missing', async () => {
   await assert.rejects(
-    () => julesSessionsTool({ env: {}, client: { listSessions: async () => ({}) } }),
+    () => julesSessionsTool({ env: isolated({}), client: { listSessions: async () => ({}) } }),
     /JULES_API_KEY is missing or rejected/
   )
 })
@@ -113,7 +120,7 @@ test('julesSessionsTool maps a 401/403 JulesApiError to a clean message', async 
       throw apiError
     },
   }
-  await assert.rejects(() => julesSessionsTool({ env: { JULES_API_KEY: 'bad' }, client }), /JULES_API_KEY is missing or rejected/)
+  await assert.rejects(() => julesSessionsTool({ env: isolated({ JULES_API_KEY: 'bad' }), client }), /JULES_API_KEY is missing or rejected/)
 })
 
 test('julesSessionsTool returns sessions newest first with the matching local jobId or null', async () => {
@@ -140,7 +147,7 @@ test('julesSessionsTool returns sessions newest first with the matching local jo
   }
   const listJobsFn = () => [{ jobId: 'j-new', remote: { sessionId: 's-new' } }]
 
-  const result = await julesSessionsTool({ env: { JULES_API_KEY: 'k' }, client, listJobsFn, limit: 20 })
+  const result = await julesSessionsTool({ env: isolated({ JULES_API_KEY: 'k' }), client, listJobsFn, limit: 20 })
 
   assert.equal(captured.apiKey, 'k')
   assert.equal(captured.pageSize, 20)
@@ -168,7 +175,7 @@ test('julesSessionsTool caps the result at limit after sorting newest first', as
     createTime: `2026-09-0${n}T00:00:00Z`,
   }))
   const client = { listSessions: async () => ({ sessions }) }
-  const result = await julesSessionsTool({ env: { JULES_API_KEY: 'k' }, client, listJobsFn: () => [], limit: 2 })
+  const result = await julesSessionsTool({ env: isolated({ JULES_API_KEY: 'k' }), client, listJobsFn: () => [], limit: 2 })
   assert.deepEqual(result.sessions.map((s) => s.sessionId), ['s-3', 's-2'])
 })
 
@@ -180,7 +187,7 @@ test('julesSessionsTool filters by state when given', async () => {
     ],
   }
   const client = { listSessions: async () => page }
-  const result = await julesSessionsTool({ env: { JULES_API_KEY: 'k' }, client, listJobsFn: () => [], state: 'COMPLETED' })
+  const result = await julesSessionsTool({ env: isolated({ JULES_API_KEY: 'k' }), client, listJobsFn: () => [], state: 'COMPLETED' })
   assert.deepEqual(result.sessions.map((s) => s.sessionId), ['s-done'])
 })
 
@@ -189,7 +196,7 @@ test('julesSessionsTool still returns sessions when there is no local job histor
   const listJobsFn = () => {
     throw new Error('runs dir unreadable')
   }
-  const result = await julesSessionsTool({ env: { JULES_API_KEY: 'k' }, client, listJobsFn })
+  const result = await julesSessionsTool({ env: isolated({ JULES_API_KEY: 'k' }), client, listJobsFn })
   assert.deepEqual(result.sessions, [
     {
       sessionId: 's1',
@@ -205,7 +212,7 @@ test('julesSessionsTool still returns sessions when there is no local job histor
 })
 
 test('julesSourcesTool throws a clean message when JULES_API_KEY is missing', async () => {
-  await assert.rejects(() => julesSourcesTool({ env: {}, client: { listSources: async () => ({ sources: [] }) } }), /JULES_API_KEY is missing or rejected/)
+  await assert.rejects(() => julesSourcesTool({ env: isolated({}), client: { listSources: async () => ({ sources: [] }) } }), /JULES_API_KEY is missing or rejected/)
 })
 
 test('julesSourcesTool maps a 401/403 JulesApiError to a clean message', async () => {
@@ -215,7 +222,7 @@ test('julesSourcesTool maps a 401/403 JulesApiError to a clean message', async (
       throw apiError
     },
   }
-  await assert.rejects(() => julesSourcesTool({ env: { JULES_API_KEY: 'bad' }, client }), /JULES_API_KEY is missing or rejected/)
+  await assert.rejects(() => julesSourcesTool({ env: isolated({ JULES_API_KEY: 'bad' }), client }), /JULES_API_KEY is missing or rejected/)
 })
 
 test('julesSourcesTool returns owner/repo plus defaultBranch and branches from the connected GitHub repos', async () => {
@@ -254,7 +261,7 @@ test('julesSourcesTool returns owner/repo plus defaultBranch and branches from t
     },
   }
 
-  const result = await julesSourcesTool({ env: { JULES_API_KEY: 'k' }, client })
+  const result = await julesSourcesTool({ env: isolated({ JULES_API_KEY: 'k' }), client })
   assert.deepEqual(result, {
     sources: [
       { name: 'sources/github/acme/widgets', owner: 'acme', repo: 'widgets', defaultBranch: 'main', branches: ['develop', 'main'] },
@@ -268,7 +275,7 @@ test('julesSourcesTool reads the real githubRepo defaultBranch.displayName and b
   const page = readJson('sources-page.json')
   const client = { listSources: async () => page }
 
-  const result = await julesSourcesTool({ env: { JULES_API_KEY: 'k' }, client })
+  const result = await julesSourcesTool({ env: isolated({ JULES_API_KEY: 'k' }), client })
   assert.equal(result.sources[0].defaultBranch, 'main')
   assert.deepEqual(result.sources[0].branches, ['develop', 'main'])
 })
@@ -277,7 +284,7 @@ test('julesSourcesTool falls back to parsing owner/repo out of the resource name
   const page = { sources: [{ name: 'sources/github/acme/widgets', id: 'github/acme/widgets' }] }
   const client = { listSources: async () => page }
 
-  const result = await julesSourcesTool({ env: { JULES_API_KEY: 'k' }, client })
+  const result = await julesSourcesTool({ env: isolated({ JULES_API_KEY: 'k' }), client })
   assert.deepEqual(result.sources, [
     { name: 'sources/github/acme/widgets', owner: 'acme', repo: 'widgets', defaultBranch: null, branches: [] },
   ])
@@ -287,7 +294,7 @@ test('julesSourcesTool falls back per-field when githubRepo is present but incom
   const page = { sources: [{ name: 'sources/github/acme/widgets', githubRepo: { owner: 'acme' } }] }
   const client = { listSources: async () => page }
 
-  const result = await julesSourcesTool({ env: { JULES_API_KEY: 'k' }, client })
+  const result = await julesSourcesTool({ env: isolated({ JULES_API_KEY: 'k' }), client })
   assert.deepEqual(result.sources, [
     { name: 'sources/github/acme/widgets', owner: 'acme', repo: 'widgets', defaultBranch: null, branches: [] },
   ])
@@ -304,7 +311,7 @@ test('julesSourcesTool prefers explicit githubRepo fields over the parsed name w
   }
   const client = { listSources: async () => page }
 
-  const result = await julesSourcesTool({ env: { JULES_API_KEY: 'k' }, client })
+  const result = await julesSourcesTool({ env: isolated({ JULES_API_KEY: 'k' }), client })
   assert.deepEqual(result.sources, [
     { name: 'sources/github/acme/widgets', owner: 'other-owner', repo: 'other-repo', defaultBranch: 'trunk', branches: ['trunk'] },
   ])
@@ -317,7 +324,7 @@ test('julesSourcesTool re-throws any other client error unchanged', async () => 
       throw apiError
     },
   }
-  await assert.rejects(() => julesSourcesTool({ env: { JULES_API_KEY: 'k' }, client }), /500/)
+  await assert.rejects(() => julesSourcesTool({ env: isolated({ JULES_API_KEY: 'k' }), client }), /500/)
 })
 
 test('julesDelegateTool forwards an explicit account to startRemoteJobFn', async () => {
@@ -326,7 +333,7 @@ test('julesDelegateTool forwards an explicit account to startRemoteJobFn', async
     captured = args
     return { job: { jobId: 'j-1', status: 'queued', errorKind: null }, done: Promise.resolve() }
   }
-  await julesDelegateTool({ task: 't', cwd: '/repo', account: 'acct-x', env: { JULES_API_KEY: 'k' }, startRemoteJobFn })
+  await julesDelegateTool({ task: 't', cwd: '/repo', account: 'acct-x', env: isolated({ JULES_API_KEY: 'k' }), startRemoteJobFn })
   assert.equal(captured.account, 'acct-x')
 })
 

@@ -213,7 +213,14 @@ function linesForActivity(activity) {
   if (activity.agentMessaged != null) return [`[jules] agent: ${messageOf(activity.agentMessaged)}`]
   if (activity.progressUpdated != null) {
     const { title = '', description } = activity.progressUpdated
-    const suffix = typeof description === 'string' && description.length > 0 ? ` — ${description}` : ''
+    const hasTitle = typeof title === 'string' && title.length > 0
+    const hasDescription = typeof description === 'string' && description.length > 0
+    // Observed live: most progressUpdated activities are an empty {} whose only
+    // payload is a diff snapshot in `artifacts` (83 of 91 in one session). They
+    // say nothing on their own, so they get no line — the snapshot speaks for
+    // itself through artifactLines.
+    if (!hasTitle && !hasDescription) return []
+    const suffix = hasDescription ? ` — ${description}` : ''
     return [`[jules] progress: ${title}${suffix}`]
   }
   // sessionCompleted is empty in the real API — the outputs live in artifacts,
@@ -228,14 +235,33 @@ function linesForActivity(activity) {
   return []
 }
 
-function artifactLines(artifacts) {
+/**
+ * `tracker` carries the size of the last diff snapshot reported, across the
+ * activities of one activityLines call. While a session runs, Jules attaches a
+ * CUMULATIVE diff snapshot to almost every step — without a commit message,
+ * which only the final change set gets. Reported one by one that is dozens of
+ * near-identical lines, so a snapshot is reported as work in progress, and only
+ * when its size changed. A change set that does carry a commit message is the
+ * finished result and is always reported as a change set.
+ */
+function artifactLines(artifacts, tracker = { lastSnapshotLines: null }) {
   if (!Array.isArray(artifacts)) return []
   const lines = []
   for (const artifact of artifacts) {
     if (!isPlainObject(artifact)) continue
     if (isPlainObject(artifact.changeSet)) {
-      const line = changeSetLineFor(normalizeChangeSet(artifact.changeSet))
-      if (line) lines.push(line)
+      const changeSet = normalizeChangeSet(artifact.changeSet)
+      const message = changeSet?.suggestedCommitMessage
+      if (typeof message === 'string' && message.trim().length > 0) {
+        const line = changeSetLineFor(changeSet)
+        if (line) lines.push(line)
+      } else {
+        const size = countDiffLines(changeSet?.unifiedDiff)
+        if (size !== tracker.lastSnapshotLines) {
+          lines.push(`[jules] working: ${size} diff lines so far`)
+          tracker.lastSnapshotLines = size
+        }
+      }
     }
     if (artifact.bashOutput != null) {
       const line = bashOutputLine(artifact.bashOutput)
@@ -250,10 +276,11 @@ function artifactLines(artifacts) {
 export function activityLines(activities) {
   if (!Array.isArray(activities)) return []
   const lines = []
+  const tracker = { lastSnapshotLines: null }
   for (const activity of activities) {
     if (!isPlainObject(activity)) continue
     lines.push(...linesForActivity(activity))
-    lines.push(...artifactLines(activity.artifacts))
+    lines.push(...artifactLines(activity.artifacts, tracker))
   }
   return lines
 }
