@@ -219,4 +219,25 @@ describe("ApprovalsView", () => {
     const rows = screen.getAllByRole("row")
     expect(within(rows[1]).getByText("PENDING_MARKER")).toBeTruthy()
   })
+
+  // The shadcn TableCell primitive sets whitespace-nowrap, and white-space is
+  // inherited, so a long learning used to run out of its cell and across the
+  // Status/Actions columns — which put the Approve/Reject buttons out of reach.
+  it("wraps a long learning inside its own cell instead of overflowing the row", async () => {
+    renderApprovals("/approvals?tab=learnings")
+    const text = await screen.findByText("PENDING_MARKER")
+
+    expect(text.className).toContain("whitespace-normal")
+    expect(text.className).toContain("break-words")
+  })
+
+  it("keeps the Approve and Reject buttons on one line next to a wrapped learning", async () => {
+    renderApprovals("/approvals?tab=learnings")
+    await screen.findByText("PENDING_MARKER")
+
+    const rows = screen.getAllByRole("row")
+    const actions = within(rows[1]).getByRole("button", { name: /approve/i })
+    expect(actions).toBeTruthy()
+    expect(within(rows[1]).getByRole("button", { name: /reject/i })).toBeTruthy()
+  })
 })
