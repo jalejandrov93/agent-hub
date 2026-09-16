@@ -2,6 +2,8 @@ import { readCache, circuitBreakerOpen } from './preflight.mjs'
 import { readDiscovery } from './discovery.mjs'
 import { readOverrides, overrideKey } from './overrides.mjs'
 import { acceptedOrderFor } from './proposals.mjs'
+import { fetchUsage } from './quota/codexbar.mjs'
+import { quotaFor, getProvider } from './quota/mapping.mjs'
 
 /**
  * The delegation map from the plan, expressed as ordered candidate chains.
@@ -185,6 +187,21 @@ export async function route({ taskType, mode, includeCatalog = false, env = proc
   }
 
   const [primary, ...fallbacks] = survivors
+
+  const providers = new Set()
+  const toAnnotate = [primary, ...fallbacks]
+  for (const c of toAnnotate) {
+    const p = getProvider(c.agent, c.model)
+    if (p) providers.add(p)
+  }
+
+  const usageByProvider = await fetchUsage({ providers: [...providers], env })
+  
+  for (const c of toAnnotate) {
+    const q = quotaFor(c, usageByProvider)
+    if (q) c.quota = q
+  }
+
   return { primary, fallbacks, skipped, discovery, reason: entry.why, appliedProposal }
 }
 

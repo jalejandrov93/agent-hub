@@ -10,7 +10,7 @@ import { paths, DEFAULT_TIMEOUTS_S, CIRCUIT_BREAKER, PREFLIGHT_TTL_MS, WRITE_ALL
 import { runDiscovery, readDiscovery, resolveAgentCli, KNOWN_AGENTS, pruneCacheForMap } from './discovery.mjs'
 import { readOverrides, setOverride, clearOverride, overrideKey } from './overrides.mjs'
 import { DELEGATION_MAP } from './router.mjs'
-import { defaultPairs } from './tools/agents.mjs'
+import { defaultPairs, agentsQuotaTool } from './tools/agents.mjs'
 import { runCommand } from './process.mjs'
 import { computeMetrics } from './metrics.mjs'
 import { listProposals, refreshProposals, decideProposal } from './proposals.mjs'
@@ -426,6 +426,13 @@ export function createServer({ env = process.env, commandRunner = runCommand, di
 
     if (url.pathname === '/api/config' && req.method === 'GET') {
       sendJson(res, 200, buildConfig({ env }))
+      return
+    }
+
+    if (url.pathname === '/api/quota' && req.method === 'GET') {
+      agentsQuotaTool({ env })
+        .then((payload) => sendJson(res, 200, { agents: payload }))
+        .catch((error) => sendError(res, error))
       return
     }
 

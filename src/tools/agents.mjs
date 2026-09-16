@@ -3,6 +3,8 @@ import { route as routeFn, DELEGATION_MAP, knownTaskTypes } from '../router.mjs'
 import { MODEL_REGISTRY } from '../config.mjs'
 import { readDiscovery } from '../discovery.mjs'
 import { runCommand } from '../process.mjs'
+import { fetchUsage } from '../quota/codexbar.mjs'
+import { quotaFor, getProvider } from '../quota/mapping.mjs'
 
 /**
  * The default set of agent+model pairs agents_status checks: every distinct
@@ -34,6 +36,14 @@ export async function agentsStatusTool({ refresh = false, cwd = process.cwd(), e
   // timeline too; a plain cache-served call stays silent.
   const results = await runAgentsStatus({ agents: pairs, cwd, env, refresh, commandRunner, announce: refresh })
   const discovery = readDiscovery(env)
+
+  const providers = new Set()
+  for (const pair of pairs) {
+    const p = getProvider(pair.agent, pair.model)
+    if (p) providers.add(p)
+  }
+  const usageByProvider = await fetchUsage({ providers: [...providers], refresh, env })
+
   return results.map((r) => ({
     agent: r.agent,
     model: r.model,
@@ -48,6 +58,7 @@ export async function agentsStatusTool({ refresh = false, cwd = process.cwd(), e
     // exists for this agent.
     binPath: discovery[r.agent]?.binPath ?? null,
     cliVersion: discovery[r.agent]?.version ?? null,
+    quota: quotaFor({ agent: r.agent, model: r.model }, usageByProvider),
   }))
 }
 
@@ -57,3 +68,26 @@ export async function routeTool({ taskType, mode, includeCatalog = false, env = 
 }
 
 export { knownTaskTypes }
+
+export async function agentsQuotaTool({ refresh = false, env = process.env } = {}) {
+  const pairs = defaultPairs()
+  // Add codex if present
+  const discovery = readDiscovery(env)
+  if (discovery['codex']) {
+    pairs.push({ agent: 'codex', model: 'default' })
+  }
+
+  const providers = new Set()
+  for (const pair of pairs) {
+    const p = getProvider(pair.agent, pair.model)
+    if (p) providers.add(p)
+  }
+
+  const usageByProvider = await fetchUsage({ providers: [...providers], refresh, env })
+
+  return pairs.map((p) => ({
+    agent: p.agent,
+    model: p.model,
+    quota: quotaFor(p, usageByProvider),
+  }))
+}

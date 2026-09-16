@@ -12,6 +12,10 @@ import type {
   ConfigResponse,
   MetricsResponse,
   MetricsRow,
+  QuotaWindow,
+  QuotaInfo,
+  AgentQuotaRow,
+  AgentsQuotaResponse,
   BreakerState,
   Override,
   Proposal,
@@ -27,6 +31,10 @@ export type ConfigResponseT = z.infer<typeof ConfigResponse>
 export type MetricsResponseT = z.infer<typeof MetricsResponse>
 export type MetricsRowT = z.infer<typeof MetricsRow>
 export type BreakerStateT = z.infer<typeof BreakerState>
+export type QuotaWindowT = z.infer<typeof QuotaWindow>
+export type QuotaInfoT = z.infer<typeof QuotaInfo>
+export type AgentQuotaRowT = z.infer<typeof AgentQuotaRow>
+export type AgentsQuotaResponseT = z.infer<typeof AgentsQuotaResponse>
 export type OverrideT = z.infer<typeof Override>
 export type ProposalT = z.infer<typeof Proposal>
 export type LearningT = z.infer<typeof Learning>
@@ -41,6 +49,7 @@ export type DerivedState = {
   proposals?: ProposalT[]
   learnings?: LearningT[]
   lastSeenTimelineTs?: string | null
+  quota?: AgentQuotaRowT[]
 }
 
 export type Connection = "connecting" | "live" | "reconnecting" | "offline"
