@@ -396,4 +396,47 @@ export const JulesSourceRow = z
   })
   .passthrough()
 
-export const JulesSourcesResponse = z.object({ sources: z.array(JulesSourceRow) }).passthrough()
+export const JulesSourcesResponse = z
+  .object({
+    sources: z.array(JulesSourceRow),
+    // Present only when the read was scoped to a configured account. A
+    // noSourceAccess row means /sources refused this account (401) — it is NOT
+    // a rejected key, so `note` explains the web-UI connection step.
+    accountId: nullableString,
+    noSourceAccess: z.boolean().optional(),
+    note: nullableString,
+  })
+  .passthrough()
+
+/** Rolling quota usage for one account, computed from local job history. */
+export const JulesAccountUsage = z
+  .object({ running: z.number().int().nonnegative(), last24h: z.number().int().nonnegative() })
+  .passthrough()
+
+/**
+ * A MASKED Jules account: keyPresent/keyLast4 replace the raw apiKey, which
+ * never leaves src/accounts.mjs. `usage` and `sourcesStatus` are joined in by
+ * jules_accounts from job history and the per-account /sources cache.
+ */
+export const JulesAccountRow = z
+  .object({
+    id: z.string(),
+    label: nullableString,
+    enabled: z.boolean(),
+    priority: z.number(),
+    dailyLimit: z.number(),
+    concurrentLimit: z.number(),
+    lastUsedAt: nullableString,
+    createdAt: z.string(),
+    updatedAt: z.string(),
+    keyPresent: z.boolean(),
+    keyLast4: nullableString,
+    usage: JulesAccountUsage.optional(),
+    sourcesStatus: nullableString,
+    sourcesFetchedAt: nullableString,
+  })
+  .passthrough()
+
+export const JulesAccountsResponse = z
+  .object({ policy: z.string(), accounts: z.array(JulesAccountRow) })
+  .passthrough()

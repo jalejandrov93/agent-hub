@@ -40,6 +40,7 @@ test('the server boots over stdio and exposes the full tool set', async () => {
         'job_result',
         'job_status',
         'job_wait',
+        'jules_accounts',
         'jules_check',
         'jules_delegate',
         'jules_sessions',
@@ -190,6 +191,33 @@ test('job_cancel is marked destructive', async () => {
     const { tools } = await client.listTools()
     const jobCancel = tools.find((t) => t.name === 'job_cancel')
     assert.equal(jobCancel.annotations?.destructiveHint, true)
+  } finally {
+    await close()
+  }
+})
+
+test('jules_accounts is registered read-only with no required input', async () => {
+  const { client, close } = await connect()
+  try {
+    const { tools } = await client.listTools()
+    const tool = tools.find((t) => t.name === 'jules_accounts')
+    assert.ok(tool, 'jules_accounts must be registered')
+    assert.deepEqual(tool.inputSchema.required ?? [], [])
+    assert.equal(tool.annotations?.readOnlyHint, true)
+  } finally {
+    await close()
+  }
+})
+
+test('jules_delegate and jules_sources accept an optional account', async () => {
+  const { client, close } = await connect()
+  try {
+    const { tools } = await client.listTools()
+    for (const name of ['jules_delegate', 'jules_sources']) {
+      const tool = tools.find((t) => t.name === name)
+      assert.ok(tool.inputSchema.properties.account, `${name} should accept an "account" input`)
+      assert.ok(!(tool.inputSchema.required ?? []).includes('account'), `${name} account must be optional`)
+    }
   } finally {
     await close()
   }

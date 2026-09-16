@@ -5,10 +5,21 @@ import { resolveEffectiveTimeoutS as defaultResolveEffectiveTimeoutS } from '../
 import { selectLearnings as defaultSelectLearnings, augmentTask as defaultAugmentTask } from '../learnings.mjs'
 import { inferSourceFromCwd as defaultInferSourceFromCwd } from './gitContext.mjs'
 import { pollUntilTerminal as defaultPollUntilTerminal } from './poller.mjs'
+import {
+  listAccounts as defaultListAccounts,
+  getAccountSecret as defaultGetAccountSecret,
+  usageFor as defaultUsageFor,
+  markAccountUsed as defaultMarkAccountUsed,
+} from '../accounts.mjs'
+import { selectAccount as defaultSelectAccount } from './selectAccount.mjs'
+import { readSourcesCache as defaultReadSourcesCache } from './sources.mjs'
 import * as defaultClient from './jules/client.mjs'
 import * as defaultAdapter from './jules/adapter.mjs'
 
 const TERMINAL_STATUSES = new Set(['succeeded', 'failed', 'canceled'])
+
+/** At most this many accounts are tried when one is exhausted by a 429. */
+const MAX_ACCOUNT_ATTEMPTS = 3
 
 function summarize(text, max = 300) {
   if (!text) return ''
@@ -104,6 +115,58 @@ export function finishRemoteJob({
 }
 
 /**
+ * Resolve one account+key for a delegation. When accounts.json has no accounts
+ * at all, fall back to env.JULES_API_KEY as an implicit account id 'env' so an
+ * existing single-key setup keeps working untouched. `exclude` holds the ids
+ * already tried by the 429 failover, so the next call picks a fresh account.
+ */
+function selectCredential({
+  explicitAccount,
+  source,
+  exclude,
+  env,
+  listAccountsFn,
+  selectAccountFn,
+  getAccountSecretFn,
+  usageForFn,
+  readSourcesCacheFn,
+}) {
+  if (listAccountsFn(env).length === 0) {
+    const apiKey = env.JULES_API_KEY
+    return apiKey ? { accountId: 'env', apiKey } : { accountId: null, apiKey: null, reason: 'no_accounts' }
+  }
+
+  const listFiltered = (targetEnv) => listAccountsFn(targetEnv).filter((account) => !exclude.includes(account.id))
+  const selection = selectAccountFn({
+    source,
+    preferredAccountId: explicitAccount ?? null,
+    env,
+    listAccountsFn: listFiltered,
+    usageForFn,
+    readSourcesCacheFn,
+  })
+  if (!selection.accountId) return { accountId: null, apiKey: null, reason: selection.reason }
+
+  const apiKey = getAccountSecretFn(selection.accountId, env)
+  if (!apiKey) return { accountId: null, apiKey: null, reason: `account not found: ${selection.accountId}` }
+  return { accountId: selection.accountId, apiKey }
+}
+
+/**
+ * The key a resumed/polled job must use: its own account when it has one,
+ * otherwise the env key. A job started from the implicit 'env' account has
+ * accountId 'env', which is not stored in accounts.json, so it also falls back.
+ */
+function keyForJob(job, env, getAccountSecretFn) {
+  const accountId = job?.remote?.accountId
+  if (accountId && accountId !== 'env') {
+    const secret = getAccountSecretFn(accountId, env)
+    if (secret) return secret
+  }
+  return env.JULES_API_KEY ?? null
+}
+
+/**
  * Start a job on the Jules remote agent. Unlike startJob (jobrunner.mjs) this
  * never spawns a local process, never touches the write-mode worktree gate,
  * lock, or read-mode snapshot — a Jules session edits a branch on GitHub via
@@ -127,6 +190,7 @@ export function startRemoteJob({
   taskType = null,
   turnDepth = 0,
   parentJobId,
+  account,
   env = process.env,
   client = defaultClient,
   adapter = defaultAdapter,
@@ -139,6 +203,12 @@ export function startRemoteJob({
   resolveEffectiveTimeoutSFn = defaultResolveEffectiveTimeoutS,
   selectLearningsFn = defaultSelectLearnings,
   augmentTaskFn = defaultAugmentTask,
+  listAccountsFn = defaultListAccounts,
+  getAccountSecretFn = defaultGetAccountSecret,
+  selectAccountFn = defaultSelectAccount,
+  usageForFn = defaultUsageFor,
+  readSourcesCacheFn = defaultReadSourcesCache,
+  markAccountUsedFn = defaultMarkAccountUsed,
 }) {
   // Mirrors startJob: only a root turn gets curated learnings prepended. A
   // Jules job never resumes via a local sessionId (job_reply talks to the
@@ -191,8 +261,9 @@ export function startRemoteJob({
     appendEventFn({ kind: 'job.failed', agent, model, cwd, title, jobId: job.jobId, errorKind, taskType, summary: summarize(message) }, { env })
   }
 
-  const apiKey = env.JULES_API_KEY
-  if (!apiKey || apiKey.length === 0) {
+  const configuredAccounts = listAccountsFn(env)
+  const hasEnvKey = typeof env.JULES_API_KEY === 'string' && env.JULES_API_KEY.length > 0
+  if (configuredAccounts.length === 0 && !hasEnvKey) {
     fail('auth', 'JULES_API_KEY is not set — export it in the environment to delegate to Jules.')
     return { job: readResultFn(job.jobId, env), done: Promise.resolve() }
   }
@@ -214,22 +285,79 @@ export function startRemoteJob({
       }
       const resolvedStartingBranch = startingBranch ?? inferredBranch ?? null
 
-      let session
-      try {
-        const sessionArgs = adapter.buildSessionRequest({
-          prompt: effectiveTask,
+      // Account selection happens here (not before createJob) because the source
+      // hint is only known once cwd inference has run. A 429 does not fail the
+      // job: it moves on to the next eligible account, up to MAX_ACCOUNT_ATTEMPTS.
+      const attempted = []
+      let apiKey = null
+      let accountId = null
+      let session = null
+
+      for (let attempt = 0; attempt < MAX_ACCOUNT_ATTEMPTS; attempt++) {
+        const credential = selectCredential({
+          explicitAccount: attempt === 0 ? account : null,
           source: resolvedSource,
-          startingBranch: resolvedStartingBranch,
-          title,
-          requirePlanApproval,
-          automationMode,
+          exclude: attempted,
+          env,
+          listAccountsFn,
+          selectAccountFn,
+          getAccountSecretFn,
+          usageForFn,
+          readSourcesCacheFn,
         })
-        session = await client.createSession({ ...sessionArgs, apiKey })
-      } catch (error) {
-        const status = error?.status
-        const errorKind = status === 429 ? 'quota' : status === 401 || status === 403 ? 'auth' : 'crash'
-        fail(errorKind, String(error?.message ?? error))
+
+        if (!credential.apiKey) {
+          if (attempted.length > 0) {
+            fail('quota', `Jules API quota exhausted (429) after trying ${attempted.length} account(s): ${attempted.join(', ')}`)
+          } else {
+            fail('quota', `no Jules account available: ${credential.reason}`)
+          }
+          return
+        }
+
+        attempted.push(credential.accountId)
+        try {
+          const sessionArgs = adapter.buildSessionRequest({
+            prompt: effectiveTask,
+            source: resolvedSource,
+            startingBranch: resolvedStartingBranch,
+            title,
+            requirePlanApproval,
+            automationMode,
+          })
+          session = await client.createSession({ ...sessionArgs, apiKey: credential.apiKey })
+        } catch (error) {
+          const status = error?.status
+          if (status === 429 && attempted.length < MAX_ACCOUNT_ATTEMPTS) continue
+          if (status === 429) {
+            fail('quota', `Jules API quota exhausted (429) after trying ${attempted.length} account(s): ${attempted.join(', ')}`)
+            return
+          }
+          const errorKind = status === 401 || status === 403 ? 'auth' : 'crash'
+          fail(errorKind, String(error?.message ?? error))
+          return
+        }
+
+        apiKey = credential.apiKey
+        accountId = credential.accountId
+        break
+      }
+
+      if (!session) {
+        // The loop only exits without a session via a `return` above; this is a
+        // defensive guard so a future edit can never fall through to polling.
+        fail('quota', `Jules API quota exhausted (429) after trying ${attempted.length} account(s): ${attempted.join(', ')}`)
         return
+      }
+
+      // Only a configured account has a record to stamp; the implicit 'env'
+      // account is not stored anywhere.
+      if (accountId && accountId !== 'env') {
+        try {
+          markAccountUsedFn(accountId, env)
+        } catch {
+          // best-effort: a failed stamp must never fail an otherwise-started job
+        }
       }
 
       const sessionId = sessionIdOf(session)
@@ -239,6 +367,7 @@ export function startRemoteJob({
           status: 'running',
           remote: {
             provider: 'jules',
+            accountId,
             sessionId,
             sessionUrl: adapter.sessionUrl(session),
             source: resolvedSource,
@@ -304,6 +433,7 @@ export function resumeRemoteJobs({
   pollFn = defaultPollUntilTerminal,
   nowFn = Date.now,
   finalTickTimeoutMs = 60000,
+  getAccountSecretFn = defaultGetAccountSecret,
 } = {}) {
   const resumed = []
   const failed = []
@@ -317,13 +447,17 @@ export function resumeRemoteJobs({
   }
 
   const candidates = jobs.filter((job) => job?.status === 'running' && job?.remote?.sessionId)
-  const apiKey = env.JULES_API_KEY
 
   for (const job of candidates) {
     if (resumingRemoteJobs.has(job.jobId)) {
       skipped.push(job.jobId)
       continue
     }
+
+    // A resumed job keeps polling with the account that started it, so two
+    // accounts' sessions never get crossed; the env key is only the fallback
+    // for jobs that predate accounts (or were started from env.JULES_API_KEY).
+    const apiKey = keyForJob(job, env, getAccountSecretFn)
 
     if (!apiKey || apiKey.length === 0) {
       // Without a key the session can never be polled again: finish it as a

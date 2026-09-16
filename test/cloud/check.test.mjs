@@ -1,6 +1,10 @@
 import { test } from 'node:test'
 import assert from 'node:assert/strict'
+import fs from 'node:fs'
+import path from 'node:path'
+import os from 'node:os'
 import { checkRemoteSession } from '../../src/cloud/check.mjs'
+import { createAccount } from '../../src/accounts.mjs'
 import * as julesAdapter from '../../src/cloud/jules/adapter.mjs'
 
 function fakeClient({ session = {}, activities = [] } = {}) {
@@ -349,4 +353,48 @@ test('checkRemoteSession forwards activityPageSize to listActivities', async () 
   assert.equal(client.calls.listActivities[0].pageSize, 25)
   assert.equal(client.calls.listActivities[0].apiKey, 'k')
   assert.equal(client.calls.listActivities[0].sessionId, 'sess-1')
+})
+
+test('checkRemoteSession reads the key for the job\'s OWN remote.accountId, so a resumed session keeps its account', async () => {
+  const home = fs.mkdtempSync(path.join(os.tmpdir(), 'agent-hub-check-'))
+  const env = { AGENT_HUB_HOME: home }
+  const account = createAccount({ label: 'a', apiKey: 'key-aaa' }, env)
+
+  const client = fakeClient({ session: completedSession(), activities: [] })
+  const store = memoryStore({
+    jobId: 'j1',
+    status: 'running',
+    remote: { provider: 'jules', accountId: account.id, sessionId: 'sess-1' },
+  })
+
+  await checkRemoteSession({
+    jobId: 'j1',
+    env,
+    client,
+    adapter: julesAdapter,
+    readResultFn: store.readResultFn,
+    updateResultFn: store.updateResultFn,
+    appendEventFn: () => {},
+    finishRemoteJobFn: () => {},
+  })
+
+  assert.equal(client.calls.getSession[0].apiKey, 'key-aaa')
+})
+
+test('checkRemoteSession falls back to env.JULES_API_KEY for a job with no accountId', async () => {
+  const client = fakeClient({ session: completedSession(), activities: [] })
+  const store = memoryStore({ jobId: 'j1', status: 'running', remote: { provider: 'jules', sessionId: 'sess-1' } })
+
+  await checkRemoteSession({
+    jobId: 'j1',
+    env: { JULES_API_KEY: 'key-env' },
+    client,
+    adapter: julesAdapter,
+    readResultFn: store.readResultFn,
+    updateResultFn: store.updateResultFn,
+    appendEventFn: () => {},
+    finishRemoteJobFn: () => {},
+  })
+
+  assert.equal(client.calls.getSession[0].apiKey, 'key-env')
 })

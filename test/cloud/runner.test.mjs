@@ -6,6 +6,7 @@ import os from 'node:os'
 import { fileURLToPath } from 'node:url'
 import { startRemoteJob, finishRemoteJob, resumeRemoteJobs } from '../../src/cloud/runner.mjs'
 import { createJob, readResult, updateResult, responsePath } from '../../src/jobstore.mjs'
+import { createAccount, setPolicy, listAccounts } from '../../src/accounts.mjs'
 import * as julesAdapter from '../../src/cloud/jules/adapter.mjs'
 
 function tmpHome() {
@@ -516,4 +517,157 @@ test('resumeRemoteJobs ignores local running jobs and remote jobs that are not r
   assert.deepEqual(res.failed, [])
   assert.deepEqual(res.skipped, [])
   assert.equal(pollCalls, 0)
+})
+
+// --- multi-account selection, env fallback and 429 failover ---
+
+function accountsEnv() {
+  return { AGENT_HUB_HOME: tmpHome() }
+}
+
+test('with no accounts configured, startRemoteJob falls back to env.JULES_API_KEY as the implicit account "env"', async () => {
+  const env = { AGENT_HUB_HOME: tmpHome(), JULES_API_KEY: 'key-env' }
+  let captured = null
+  const client = {
+    createSession: async (args) => {
+      captured = args
+      return { id: 's1', state: 'QUEUED' }
+    },
+  }
+  const pollFn = async () => ({ outcome: 'completed', state: 'COMPLETED', summary: {}, session: {}, apiError: null })
+
+  const { job, done } = startRemoteJob({ task: 't', cwd: '/repo', source: 'sources/github/acme/widgets', env, client, adapter: julesAdapter, pollFn })
+  await done
+
+  assert.equal(captured.apiKey, 'key-env')
+  assert.equal(readResult(job.jobId, env).remote.accountId, 'env')
+})
+
+test('with accounts configured the job uses a stored account key and persists remote.accountId', async () => {
+  const env = accountsEnv()
+  const account = createAccount({ label: 'pro', apiKey: 'key-aaa' }, env)
+  let captured = null
+  const client = {
+    createSession: async (args) => {
+      captured = args
+      return { id: 's1', state: 'QUEUED' }
+    },
+  }
+  const pollFn = async () => ({ outcome: 'completed', state: 'COMPLETED', summary: {}, session: {}, apiError: null })
+
+  const { job, done } = startRemoteJob({ task: 't', cwd: '/repo', source: 'sources/github/acme/widgets', env, client, adapter: julesAdapter, pollFn })
+  await done
+
+  assert.equal(captured.apiKey, 'key-aaa')
+  const result = readResult(job.jobId, env)
+  assert.equal(result.remote.accountId, account.id)
+  assert.ok(listAccounts(env)[0].lastUsedAt, 'markAccountUsed must stamp the account that ran the job')
+})
+
+test('an explicit account id wins over the policy', async () => {
+  const env = accountsEnv()
+  createAccount({ label: 'a', apiKey: 'key-aaa' }, env)
+  const b = createAccount({ label: 'b', apiKey: 'key-bbb' }, env)
+  let captured = null
+  const client = {
+    createSession: async (args) => {
+      captured = args
+      return { id: 's1', state: 'QUEUED' }
+    },
+  }
+  const pollFn = async () => ({ outcome: 'completed', state: 'COMPLETED', summary: {}, session: {}, apiError: null })
+
+  const { done } = startRemoteJob({ task: 't', cwd: '/repo', source: 'sources/github/acme/widgets', account: b.id, env, client, adapter: julesAdapter, pollFn })
+  await done
+
+  assert.equal(captured.apiKey, 'key-bbb')
+})
+
+test('a 429 from createSession fails over to the next eligible account instead of failing the job', async () => {
+  const env = accountsEnv()
+  createAccount({ label: 'a', apiKey: 'key-aaa' }, env)
+  const b = createAccount({ label: 'b', apiKey: 'key-bbb' }, env)
+  setPolicy('priority', env)
+
+  const tried = []
+  const client = {
+    createSession: async (args) => {
+      tried.push(args.apiKey)
+      if (args.apiKey === 'key-aaa') throw Object.assign(new Error('Jules API responded 429'), { status: 429 })
+      return { id: 's1', state: 'QUEUED' }
+    },
+  }
+  const pollFn = async () => ({ outcome: 'completed', state: 'COMPLETED', summary: {}, session: {}, apiError: null })
+
+  const { job, done } = startRemoteJob({ task: 't', cwd: '/repo', source: 'sources/github/acme/widgets', env, client, adapter: julesAdapter, pollFn })
+  await done
+
+  assert.deepEqual(tried, ['key-aaa', 'key-bbb'], 'the exhausted account is retried with the next one')
+  const result = readResult(job.jobId, env)
+  assert.equal(result.status, 'succeeded')
+  assert.equal(result.remote.accountId, b.id)
+})
+
+test('when every account 429s, the job fails with errorKind quota naming how many accounts were tried', async () => {
+  const env = accountsEnv()
+  createAccount({ label: 'a', apiKey: 'key-aaa' }, env)
+  createAccount({ label: 'b', apiKey: 'key-bbb' }, env)
+  createAccount({ label: 'c', apiKey: 'key-ccc' }, env)
+  setPolicy('priority', env)
+
+  let calls = 0
+  const client = {
+    createSession: async () => {
+      calls++
+      throw Object.assign(new Error('Jules API responded 429'), { status: 429 })
+    },
+  }
+  const pollFn = async () => ({ outcome: 'completed', state: 'COMPLETED', summary: {}, session: {}, apiError: null })
+
+  const { job, done } = startRemoteJob({ task: 't', cwd: '/repo', source: 'sources/github/acme/widgets', env, client, adapter: julesAdapter, pollFn })
+  await done
+
+  const result = readResult(job.jobId, env)
+  assert.equal(calls, 3, 'at most three accounts are tried in total')
+  assert.equal(result.status, 'failed')
+  assert.equal(result.errorKind, 'quota')
+  assert.match(result.error, /3 account/)
+})
+
+test('a non-429 createSession failure is not retried on another account', async () => {
+  const env = accountsEnv()
+  createAccount({ label: 'a', apiKey: 'key-aaa' }, env)
+  createAccount({ label: 'b', apiKey: 'key-bbb' }, env)
+  setPolicy('priority', env)
+
+  let calls = 0
+  const client = {
+    createSession: async () => {
+      calls++
+      throw Object.assign(new Error('Jules API responded 401'), { status: 401 })
+    },
+  }
+  const { job, done } = startRemoteJob({ task: 't', cwd: '/repo', source: 'sources/github/acme/widgets', env, client, adapter: julesAdapter, pollFn: async () => ({}) })
+  await done
+
+  assert.equal(calls, 1, 'an auth failure is the account\'s problem, not a quota failover trigger')
+  assert.equal(readResult(job.jobId, env).errorKind, 'auth')
+})
+
+test('resumeRemoteJobs polls a job with the key of its OWN remote.accountId, not the env key', async () => {
+  const env = accountsEnv()
+  const account = createAccount({ label: 'a', apiKey: 'key-aaa' }, env)
+  const job = createJob({ agent: 'jules', model: 'jules', task: 't', cwd: '/repo', title: 't', mode: 'write', timeoutS: 100, env })
+  updateResult(job.jobId, { status: 'running', remote: { provider: 'jules', accountId: account.id, sessionId: 'sess-9', state: 'IN_PROGRESS' } }, env)
+
+  let pollArgs = null
+  const pollFn = async (args) => {
+    pollArgs = args
+    return { outcome: 'completed', state: 'COMPLETED', summary: {}, session: {}, apiError: null }
+  }
+
+  const res = resumeRemoteJobs({ env, client: {}, adapter: julesAdapter, pollFn })
+  assert.deepEqual(res.resumed, [job.jobId])
+  await waitFor(() => readResult(job.jobId, env).status === 'succeeded')
+  assert.equal(pollArgs.apiKey, 'key-aaa')
 })

@@ -1,6 +1,13 @@
 import { startRemoteJob as defaultStartRemoteJob } from '../cloud/runner.mjs'
 import { checkRemoteSession as defaultCheckRemoteSession } from '../cloud/check.mjs'
 import { listJobs as defaultListJobs } from '../jobstore.mjs'
+import {
+  listAccounts as defaultListAccounts,
+  getAccountSecret as defaultGetAccountSecret,
+  usageFor as defaultUsageFor,
+  readPolicy as defaultReadPolicy,
+} from '../accounts.mjs'
+import { readSourcesCache as defaultReadSourcesCache } from '../cloud/sources.mjs'
 import * as defaultClient from '../cloud/jules/client.mjs'
 import * as defaultAdapter from '../cloud/jules/adapter.mjs'
 import { TASK_TYPES } from '../schemas.mjs'
@@ -29,6 +36,7 @@ export async function julesDelegateTool({
   automationMode,
   timeoutS,
   taskType,
+  account,
   env = process.env,
   startRemoteJobFn = defaultStartRemoteJob,
 }) {
@@ -49,6 +57,7 @@ export async function julesDelegateTool({
     automationMode,
     timeoutS,
     taskType,
+    account,
     turnDepth: 0,
     env,
   })
@@ -134,11 +143,43 @@ function ownerRepoFromName(name) {
 }
 
 /**
- * List the GitHub repos connected to the configured Jules account. Sources
- * are connected in the Jules web UI — there is no API to add one.
+ * List the GitHub repos connected to a Jules account. Sources are connected in
+ * the Jules web UI — there is no API to add one.
+ *
+ * With no `account` and no accounts configured this behaves exactly as before
+ * (env.JULES_API_KEY). With accounts configured it defaults to the
+ * highest-priority enabled account. A 401/403 from /sources is reported as
+ * "this account has no source access", never as a rejected key: a valid,
+ * usable key was observed being refused by /sources while /sessions worked.
  */
-export async function julesSourcesTool({ env = process.env, client = defaultClient, fetchImpl } = {}) {
-  const apiKey = env.JULES_API_KEY
+export async function julesSourcesTool({
+  account,
+  env = process.env,
+  client = defaultClient,
+  fetchImpl,
+  listAccountsFn = defaultListAccounts,
+  getAccountSecretFn = defaultGetAccountSecret,
+} = {}) {
+  const accounts = listAccountsFn(env)
+  let accountId = null
+  let apiKey = null
+
+  if (account) {
+    apiKey = getAccountSecretFn(account, env)
+    if (!apiKey) throw new Error(`account not found: ${account}`)
+    accountId = account
+  } else if (accounts.length > 0) {
+    const enabled = accounts
+      .filter((candidate) => candidate.enabled !== false)
+      .sort((a, b) => (a.priority ?? 0) - (b.priority ?? 0))
+    const first = enabled[0]
+    if (first) {
+      accountId = first.id
+      apiKey = getAccountSecretFn(first.id, env)
+    }
+  }
+
+  if (!apiKey) apiKey = env.JULES_API_KEY
   if (!apiKey) {
     throw new Error('JULES_API_KEY is missing or rejected')
   }
@@ -148,13 +189,23 @@ export async function julesSourcesTool({ env = process.env, client = defaultClie
     page = await client.listSources({ apiKey, fetchImpl })
   } catch (error) {
     if (error?.status === 401 || error?.status === 403) {
+      if (accountId) {
+        return {
+          sources: [],
+          accountId,
+          noSourceAccess: true,
+          note:
+            `Account ${accountId} has no source access: the Jules API refused /sources with ${error.status}. ` +
+            'This is not a credential failure — repositories are connected in the Jules web UI (jules.google.com).',
+        }
+      }
       throw new Error('JULES_API_KEY is missing or rejected')
     }
     throw error
   }
 
   const sources = Array.isArray(page?.sources) ? page.sources : []
-  return {
+  const result = {
     sources: sources.map((s) => {
       const fallback = ownerRepoFromName(s?.name)
       const githubRepo = s?.githubRepo
@@ -170,5 +221,32 @@ export async function julesSourcesTool({ env = process.env, client = defaultClie
           : [],
       }
     }),
+  }
+  if (accountId) result.accountId = accountId
+  return result
+}
+
+/**
+ * Read-only view of the configured accounts for the dashboard/MCP: masked
+ * accounts (never the raw key) with their live quota usage and last /sources
+ * cache status. Creating/editing accounts belongs to the dashboard, so there is
+ * deliberately no write tool here.
+ */
+export function julesAccountsTool({
+  env = process.env,
+  listAccountsFn = defaultListAccounts,
+  usageForFn = defaultUsageFor,
+  readSourcesCacheFn = defaultReadSourcesCache,
+  readPolicyFn = defaultReadPolicy,
+} = {}) {
+  const cache = readSourcesCacheFn(env)
+  return {
+    policy: readPolicyFn(env),
+    accounts: listAccountsFn(env).map((account) => ({
+      ...account,
+      usage: usageForFn(account.id, env),
+      sourcesStatus: cache[account.id]?.status ?? null,
+      sourcesFetchedAt: cache[account.id]?.fetchedAt ?? null,
+    })),
   }
 }

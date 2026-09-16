@@ -2,11 +2,15 @@ import { test } from 'node:test'
 import assert from 'node:assert/strict'
 import fs from 'node:fs'
 import path from 'node:path'
+import os from 'node:os'
 import { fileURLToPath } from 'node:url'
-import { julesDelegateTool, julesSourcesTool, julesCheckTool, julesSessionsTool } from '../../src/tools/jules.mjs'
+import { julesDelegateTool, julesSourcesTool, julesCheckTool, julesSessionsTool, julesAccountsTool } from '../../src/tools/jules.mjs'
+import { createAccount } from '../../src/accounts.mjs'
+import { refreshSources } from '../../src/cloud/sources.mjs'
 
 const FIXTURES = path.join(path.dirname(fileURLToPath(import.meta.url)), '..', 'fixtures', 'jules')
 const readJson = (name) => JSON.parse(fs.readFileSync(path.join(FIXTURES, name), 'utf8'))
+const tmpHome = () => fs.mkdtempSync(path.join(os.tmpdir(), 'agent-hub-tools-jules-'))
 
 test('julesDelegateTool requires either cwd or source', async () => {
   await assert.rejects(() => julesDelegateTool({ task: 't' }), /requires either cwd .* or .* source/i)
@@ -313,4 +317,86 @@ test('julesSourcesTool re-throws any other client error unchanged', async () => 
     },
   }
   await assert.rejects(() => julesSourcesTool({ env: { JULES_API_KEY: 'k' }, client }), /500/)
+})
+
+test('julesDelegateTool forwards an explicit account to startRemoteJobFn', async () => {
+  let captured = null
+  const startRemoteJobFn = (args) => {
+    captured = args
+    return { job: { jobId: 'j-1', status: 'queued', errorKind: null }, done: Promise.resolve() }
+  }
+  await julesDelegateTool({ task: 't', cwd: '/repo', account: 'acct-x', env: { JULES_API_KEY: 'k' }, startRemoteJobFn })
+  assert.equal(captured.account, 'acct-x')
+})
+
+test('julesSourcesTool with an explicit account reads that account\'s stored key', async () => {
+  const env = { AGENT_HUB_HOME: tmpHome() }
+  const account = createAccount({ label: 'a', apiKey: 'key-aaa' }, env)
+  let captured = null
+  const client = {
+    listSources: async (args) => {
+      captured = args
+      return {
+        sources: [
+          {
+            name: 'sources/github/acme/widgets',
+            githubRepo: { owner: 'acme', repo: 'widgets', defaultBranch: { displayName: 'main' }, branches: [{ displayName: 'main' }] },
+          },
+        ],
+      }
+    },
+  }
+
+  const result = await julesSourcesTool({ account: account.id, env, client })
+  assert.equal(captured.apiKey, 'key-aaa')
+  assert.equal(result.sources[0].defaultBranch, 'main')
+  assert.deepEqual(result.sources[0].branches, ['main'])
+})
+
+test('julesSourcesTool reports no source access for an account whose /sources 401s — never "key rejected"', async () => {
+  const env = { AGENT_HUB_HOME: tmpHome() }
+  const account = createAccount({ label: 'b', apiKey: 'key-bbb' }, env)
+  const apiError = Object.assign(new Error('Jules API responded 401'), { status: 401 })
+  const client = {
+    listSources: async () => {
+      throw apiError
+    },
+  }
+
+  const result = await julesSourcesTool({ account: account.id, env, client })
+  assert.equal(result.accountId, account.id)
+  assert.equal(result.noSourceAccess, true)
+  assert.deepEqual(result.sources, [])
+  assert.match(result.note, /no source access/i)
+  assert.match(result.note, /web UI/i)
+  assert.ok(!/rejected/i.test(result.note), 'a 401 on /sources is not a rejected key')
+})
+
+test('julesSourcesTool with an unknown account id throws account not found', async () => {
+  await assert.rejects(
+    () => julesSourcesTool({ account: 'nope', env: { AGENT_HUB_HOME: tmpHome() }, client: { listSources: async () => ({ sources: [] }) } }),
+    /account not found: nope/
+  )
+})
+
+test('julesAccountsTool returns masked accounts with usage and source-cache status', async () => {
+  const env = { AGENT_HUB_HOME: tmpHome() }
+  const account = createAccount({ label: 'pro', apiKey: 'key-aaa' }, env)
+  await refreshSources({
+    accountId: account.id,
+    env,
+    client: { listSources: async () => ({ sources: [{ name: 'sources/github/acme/widgets' }] }) },
+    apiKey: 'key-aaa',
+  })
+
+  const result = julesAccountsTool({ env })
+  assert.equal(result.policy, 'round_robin')
+  assert.equal(result.accounts.length, 1)
+  const row = result.accounts[0]
+  assert.equal(row.id, account.id)
+  assert.equal(row.apiKey, undefined)
+  assert.equal(row.keyPresent, true)
+  assert.deepEqual(row.usage, { running: 0, last24h: 0 })
+  assert.equal(row.sourcesStatus, 'ok')
+  assert.ok(!JSON.stringify(result).includes('key-aaa'), 'the raw key must never appear in jules_accounts output')
 })

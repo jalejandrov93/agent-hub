@@ -23,6 +23,8 @@ import {
   RemoteInfo,
   JulesCheckResponse,
   JulesSessionsResponse,
+  JulesSourcesResponse,
+  JulesAccountsResponse,
 } from '../src/schemas.mjs'
 import { DELEGATION_MAP } from '../src/router.mjs'
 import { VALID_KINDS } from '../src/eventlog.mjs'
@@ -157,6 +159,35 @@ test('JobRecord accepts an optional remote block for a Jules job, and is unaffec
 
   const localJob = JobRecord.parse(base)
   assert.equal(localJob.remote, undefined)
+})
+
+test('jules_accounts and jules_sources account-aware schemas parse', () => {
+  const parsed = JulesAccountsResponse.parse({
+    policy: 'round_robin',
+    accounts: [
+      {
+        id: 'acct-1',
+        label: 'pro',
+        enabled: true,
+        priority: 0,
+        dailyLimit: 100,
+        concurrentLimit: 15,
+        lastUsedAt: null,
+        createdAt: '2026-09-15T00:00:00Z',
+        updatedAt: '2026-09-15T00:00:00Z',
+        keyPresent: true,
+        keyLast4: '-aaa',
+        usage: { running: 1, last24h: 3 },
+        sourcesStatus: 'ok',
+        sourcesFetchedAt: '2026-09-15T00:00:00Z',
+      },
+    ],
+  })
+  assert.equal(parsed.accounts[0].keyPresent, true)
+  assert.equal(parsed.accounts[0].usage.last24h, 3)
+
+  JulesSourcesResponse.parse({ sources: [], accountId: 'acct-1', noSourceAccess: true, note: 'no source access' })
+  JulesSourcesResponse.parse({ sources: [] })
 })
 
 test('tool response schemas accept current outputs', () => {

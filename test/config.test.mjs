@@ -51,3 +51,9 @@ test('paths() exposes discoveryFile and overridesFile under the state home', () 
   assert.equal(p.discoveryFile, '/tmp/fake-home/discovery.json')
   assert.equal(p.overridesFile, '/tmp/fake-home/overrides.json')
 })
+
+test('paths() exposes accountsFile and sourcesCacheFile under the state home', () => {
+  const p = paths({ AGENT_HUB_HOME: '/tmp/fake-home' })
+  assert.equal(p.accountsFile, '/tmp/fake-home/accounts.json')
+  assert.equal(p.sourcesCacheFile, '/tmp/fake-home/sources-cache.json')
+})
