@@ -485,3 +485,21 @@ test('checkRemoteSession never reopens a remote job that failed for a real reaso
   assert.equal(store.record.status, 'failed')
   assert.equal(store.record.errorKind, 'auth')
 })
+
+// A remote 'timeout' is a verdict about THIS process's local deadline, never
+// about the session — observed for real on two healthy Jules sessions.
+test('checkRemoteSession also recovers a remote job wrongly failed as timeout while its session is still running', async () => {
+  const store = memoryStore({ ...orphanedJob(), errorKind: 'timeout', error: 'Local deadline elapsed while the Jules session is still running remotely.' })
+  const result = await checkRemoteSession({
+    jobId: 'j1',
+    env: isolated({ JULES_API_KEY: 'k' }),
+    client: fakeClient({ session: completedSession({ state: 'IN_PROGRESS', outputs: [] }), activities: [] }),
+    adapter: julesAdapter,
+    readResultFn: store.readResultFn,
+    updateResultFn: store.updateResultFn,
+    appendEventFn: () => {},
+    finishRemoteJobFn: () => {},
+  })
+  assert.equal(result.recovered, true)
+  assert.equal(store.record.status, 'running')
+})

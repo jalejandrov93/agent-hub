@@ -266,30 +266,54 @@ test('a failed outcome (session FAILED) maps through adapter.classifyError to er
   assert.match(result.error, /Tests failed/)
 })
 
-test('a timeout outcome maps to errorKind timeout via adapter.classifyError({timedOut:true})', async () => {
+// THE INVARIANT: a remote job becomes terminal only from the remote session's
+// own state. Anything this process concludes on its own — a local deadline, a
+// rejected key, a run of transient API errors, a crash in the poller — can
+// stop the polling, but it can never make the job failed. Violating this
+// failed three healthy Jules sessions on one day, three different ways
+// (orphaned, auth, timeout), while every one kept running on Google's side.
+async function startWith(pollFn) {
   const env = { AGENT_HUB_HOME: tmpHome(), JULES_API_KEY: 'key-1' }
   const client = { createSession: async () => ({ name: 'sessions/sess-1', id: 'sess-1', state: 'IN_PROGRESS' }) }
-  const pollFn = async () => ({ outcome: 'timeout', state: null, summary: null, session: null, apiError: null })
-
-  const { job, done } = startRemoteJob({ task: 't', cwd: '/repo', source: 'sources/github/acme/widgets', env, client, adapter: julesAdapter, pollFn })
+  const events = []
+  const { job, done } = startRemoteJob({
+    task: 't', cwd: '/repo', source: 'sources/github/acme/widgets', env, client, adapter: julesAdapter, pollFn,
+    appendEventFn: (e) => events.push(e),
+  })
   await done
+  return { result: readResult(job.jobId, env), events }
+}
 
-  assert.equal(readResult(job.jobId, env).errorKind, 'timeout')
+function assertDetached({ result, events }, reason) {
+  assert.equal(result.status, 'running')
+  assert.equal(result.errorKind ?? null, null)
+  assert.equal(result.remote.pollingStoppedReason, reason)
+  assert.match(String(result.remote.pollingStoppedAt), /^\d{4}-\d{2}-\d{2}T/)
+  assert.equal(events.some((e) => e.kind === 'job.failed'), false)
+}
+
+test('a local deadline stops polling but leaves the job running, because the session may still be working', async () => {
+  const outcome = await startWith(async () => ({ outcome: 'timeout', state: null, summary: null, session: null, apiError: null }))
+  assertDetached(outcome, 'local_deadline')
 })
 
-test('a rejected pollFn finishes the job as crash instead of leaving it running forever', async () => {
-  const env = { AGENT_HUB_HOME: tmpHome(), JULES_API_KEY: 'key-1' }
-  const client = { createSession: async () => ({ name: 'sessions/sess-1', id: 'sess-1', state: 'IN_PROGRESS' }) }
-  const pollFn = async () => {
+test('a rejected key during polling stops polling but does not fail a session that is still running', async () => {
+  const apiError = Object.assign(new Error('Jules API responded 401'), { status: 401 })
+  const outcome = await startWith(async () => ({ outcome: 'failed', state: null, summary: null, session: null, apiError }))
+  assertDetached(outcome, 'auth')
+})
+
+test('an exhausted budget of transient API errors stops polling but does not fail the job', async () => {
+  const apiError = Object.assign(new Error('Jules API responded 503'), { status: 503 })
+  const outcome = await startWith(async () => ({ outcome: 'failed', state: null, summary: null, session: null, apiError }))
+  assertDetached(outcome, 'api_errors')
+})
+
+test('a crash in the poller after the session exists stops polling but does not fail the job', async () => {
+  const outcome = await startWith(async () => {
     throw new Error('boom')
-  }
-
-  const { job, done } = startRemoteJob({ task: 't', cwd: '/repo', source: 'sources/github/acme/widgets', env, client, adapter: julesAdapter, pollFn })
-  await done
-
-  const result = readResult(job.jobId, env)
-  assert.equal(result.status, 'failed')
-  assert.equal(result.errorKind, 'crash')
+  })
+  assertDetached(outcome, 'poller_error')
 })
 
 test('the job record is created with mode:"write" and the effective timeout drives pollFn.timeoutMs', async () => {
@@ -440,7 +464,10 @@ test('resumeRemoteJobs, when the deadline already elapsed, still polls once and 
   await waitFor(() => readResult(job.jobId, env).status === 'succeeded')
 })
 
-test('resumeRemoteJobs, when the deadline already elapsed and the session is still IN_PROGRESS, finalizes as timeout with still-running-remotely wording', async () => {
+// Observed for real: two Jules sessions created at 05:24 passed their 6-hour
+// local deadline at 11:24 while working normally, and the next MCP startup
+// failed both as timeout even though the final read showed them IN_PROGRESS.
+test('resumeRemoteJobs, when the deadline already elapsed and the session is still IN_PROGRESS, leaves the job running with polling stopped', async () => {
   const env = { AGENT_HUB_HOME: tmpHome(), JULES_API_KEY: 'key-1' }
   const job = createJob({ agent: 'jules', model: 'jules', task: 't', cwd: '/repo', title: 't', mode: 'write', timeoutS: 10, env })
   updateResult(job.jobId, { status: 'running', remote: { provider: 'jules', sessionId: 'sess-r', state: 'IN_PROGRESS' } }, env)
@@ -454,20 +481,19 @@ test('resumeRemoteJobs, when the deadline already elapsed and the session is sti
   const res = resumeRemoteJobs({ env, client: {}, adapter: julesAdapter, pollFn, nowFn: () => Date.now() + 20000, finalTickTimeoutMs: 500 })
 
   assert.deepEqual(res.resumed, [job.jobId])
-  await waitFor(() => readResult(job.jobId, env).status === 'failed')
+  await waitFor(() => readResult(job.jobId, env).remote?.pollingStoppedReason === 'local_deadline')
   assert.equal(pollArgs.timeoutMs, 500)
 
   const result = readResult(job.jobId, env)
-  assert.equal(result.status, 'failed')
-  assert.equal(result.errorKind, 'timeout')
-  assert.match(result.error, /still running remotely/)
-  assert.equal(result.remote.state, null)
-  assert.equal(result.remote.lastKnownState, 'IN_PROGRESS')
+  assert.equal(result.status, 'running')
+  assert.equal(result.errorKind ?? null, null)
+  // Nothing says the session stopped, so its last known state stays live.
+  assert.equal(result.remote.state, 'IN_PROGRESS')
 
-  // The in-process guard must be released once the background finalize settles.
-  updateResult(job.jobId, { status: 'running', remote: { provider: 'jules', sessionId: 'sess-r', state: 'IN_PROGRESS' } }, env)
+  // The in-process guard must be released once the background work settles,
+  // and a later resume that sees the session finish must finalize it for real.
   const again = resumeRemoteJobs({ env, client: {}, adapter: julesAdapter, pollFn: async () => ({ outcome: 'completed', state: 'COMPLETED', summary: {}, session: {}, apiError: null }), nowFn: () => Date.now() + 20000 })
-  assert.deepEqual(again.resumed, [job.jobId], 'the guard must be released after a timeout finalize')
+  assert.deepEqual(again.resumed, [job.jobId], 'the guard must be released after polling stops')
   await waitFor(() => readResult(job.jobId, env).status === 'succeeded')
 })
 

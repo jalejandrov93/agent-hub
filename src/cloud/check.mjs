@@ -144,7 +144,9 @@ export async function checkRemoteSession({
     // It is a misclassification to undo, not an outcome to respect: without
     // this the job could never be finalized and its pull request would be lost.
     // Any other failure kind is real and is left exactly as it is.
-    if (current?.status === 'failed' && current?.errorKind === 'orphaned') {
+    // 'timeout' belongs here for the same reason: for a remote job it only ever
+    // means THIS process's local deadline elapsed, never that the session did.
+    if (current?.status === 'failed' && (current?.errorKind === 'orphaned' || current?.errorKind === 'timeout')) {
       updateResultFn(resolvedJobId, { status: 'running', errorKind: null, error: null }, env)
       recovered = true
     }

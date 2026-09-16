@@ -40,6 +40,19 @@ function sessionIdOf(session) {
 }
 
 /**
+ * Stop tracking a remote session from this process without declaring an
+ * outcome. The job stays running and its last known remote state stays live,
+ * because nothing here knows the session stopped.
+ */
+function stopPolling({ jobId, reason, current, updateResultFn, env }) {
+  updateResultFn(
+    jobId,
+    { remote: { ...(current?.remote ?? {}), pollingStoppedAt: new Date().toISOString(), pollingStoppedReason: reason } },
+    env
+  )
+}
+
+/**
  * Finish a remote job once pollUntilTerminal reaches a terminal outcome.
  * Mirrors finishJob in jobrunner.mjs: bail out when the record is already
  * canceled (cancelJob already finalized it locally — the remote session on
@@ -63,6 +76,24 @@ export function finishRemoteJob({
 }) {
   const current = readResultFn(jobId, env)
   if (current.status === 'canceled') return // cancelJob already finalized this job locally
+
+  // THE INVARIANT: a remote job becomes terminal only from the remote
+  // session's own state. A local deadline, a rejected key or a run of transient
+  // API errors are conclusions about THIS process, not about the session —
+  // violating this failed three healthy Jules sessions on one day, three
+  // different ways, while each kept running on Google's side. Such outcomes
+  // stop the polling and record why; jules_check finalizes the job for real
+  // once the session itself ends.
+  const remoteTerminal = outcome === 'completed' || state === 'COMPLETED' || state === 'FAILED' || summary?.failed === true
+  if (!remoteTerminal) {
+    const reason =
+      outcome === 'timeout' ? 'local_deadline'
+      : apiError?.status === 401 || apiError?.status === 403 ? 'auth'
+      : apiError ? 'api_errors'
+      : 'unknown'
+    stopPolling({ jobId, reason, current, updateResultFn, env })
+    return
+  }
 
   const responseText = adapter.buildResponseText({ session, summary })
   try {
@@ -269,6 +300,10 @@ export function startRemoteJob({
   }
 
   const done = (async () => {
+    // Set once createSession succeeds: from then on the session exists on
+    // Google's side, and a failure in this process no longer says anything
+    // about it.
+    let startedSession = false
     try {
       let resolvedSource = source
       let inferredBranch = null
@@ -361,6 +396,7 @@ export function startRemoteJob({
       }
 
       const sessionId = sessionIdOf(session)
+      startedSession = true
       updateResultFn(
         job.jobId,
         {
@@ -396,11 +432,19 @@ export function startRemoteJob({
 
       finishRemoteJob({ jobId: job.jobId, ...pollResult, adapter, env, readResultFn, updateResultFn, appendEventFn })
     } catch (error) {
-      // A thrown/rejected step anywhere in this chain (most notably a
-      // rejected pollFn) must still resolve `done` as a normal failed job —
-      // startJob callers await `done`, and letting this reject would surface
-      // as an unhandled rejection instead, and leave the record 'running'.
-      fail('crash', String(error?.message ?? error))
+      // `done` must never reject: startJob callers await it, and a rejection
+      // would surface as an unhandled one. Before the session exists this is a
+      // genuine failure to start. After it exists, it is a failure of THIS
+      // poller only, so the job keeps running with polling stopped.
+      if (startedSession) {
+        try {
+          stopPolling({ jobId: job.jobId, reason: 'poller_error', current: readResultFn(job.jobId, env), updateResultFn, env })
+        } catch {
+          // best-effort: the record stays as it was, which is still running
+        }
+      } else {
+        fail('crash', String(error?.message ?? error))
+      }
     }
   })()
 
