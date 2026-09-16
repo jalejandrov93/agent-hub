@@ -31,6 +31,14 @@ and this project adheres to [Semantic Versioning](https://semver.org/).
 - Recurring Jules tasks, run by the dashboard service: interval or daily
   schedules, at most one run in flight per schedule.
 - Dashboard HTTP API for Jules accounts, sources, schedules and cloud sessions.
+- Quota state before delegating, read from a local CodexBar server: a `quota`
+  field on `agents_status` and `route()` results, the `agents_quota` tool,
+  `GET /api/quota` and the Agents view. It is information only — quota data
+  never chooses, skips or reorders an agent, and a test pins that `route()` is
+  unchanged by it.
+- The dashboard's Cloud view for Jules accounts, sources, schedules and
+  sessions, typed from shared response schemas and guarded by a contract test
+  that parses every real Cloud route response.
 - The Codex CLI as a delegation agent: a last fallback for `triage` and
   `mechanical-edit`, built from the real CLI's JSONL output and supporting
   `job_reply` through `codex exec resume`.

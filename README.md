@@ -334,6 +334,30 @@ GitHub App in the web UI. The API can list them (`jules_sources`) but cannot add
 one. `jules_delegate` accepts an explicit `source`, or infers it from `cwd` via
 the `origin` remote.
 
+### Quota state before delegating
+
+agent-hub can show how much of each agent's usage limit is left before you
+delegate, read from a local [CodexBar](https://github.com/steipete/CodexBar)
+server (`codexbar serve`, default `http://127.0.0.1:8787`, override with
+`AGENT_HUB_CODEXBAR_URL`). It appears as a `quota` field on `agents_status`
+rows and on `route()`'s primary and fallbacks, in the `agents_quota` tool, at
+`GET /api/quota`, and in the dashboard's Agents view.
+
+**It never decides anything.** Quota data does not choose, skip, reorder or
+block an agent, and `route()` returns the same chain with or without it — a test
+pins that. An exhausted agent stays in its place; the point is that you see it
+before a job fails, and decide.
+
+Each pair maps to the CodexBar windows that actually limit it. agy splits by
+model family: `gemini-*` models read the Gemini windows, while `claude-*` and
+`gpt-*` models read the shared Claude/GPT windows, which are exhausted
+independently. copilot and codex read their own provider, `opencode-go/*`
+models read OpenCode Go, and the free opencode models and `deepseek/*` are not
+metered by CodexBar. A window CodexBar reports with `usageKnown: false` is shown
+as unknown, never as 0%. Readings are cached for five minutes, requested one
+provider at a time (`/usage?provider=all` probes about 69 providers and is
+slow), and a missing CodexBar never blocks or slows a delegation.
+
 ### Circuit breaker
 
 A per-agent+model breaker opens after `failureThreshold` (2) matching
@@ -421,6 +445,7 @@ read jobs from a disposable worktree when that matters.
 | `job_result` | `{jobId, maxLines?, tailLines?}` | Head of the response (default 20 lines) plus extra `tailLines` from the end (default 10, never repeating a head line) and `fullPath`, `truncated`, `tailTruncated`. |
 | `job_cancel` | `{jobId}` | Kills the whole process group; marks `canceled`. |
 | `job_reply` | `{jobId, message?, mode?, timeoutS?, title?, taskType?, action?}` | Starts a new turn in a **terminal** agy/opencode job's conversation, using its recorded `sessionId`. `mode` and `taskType` default to the parent job's; switching to `write` goes through the same worktree gate + lock as `delegate`. copilot has no session resume and returns `{status:'failed', errorKind:'unsupported'}` without spawning anything. A non-terminal parent gets `errorKind:'not_terminal'`; a parent with no `sessionId` gets `errorKind:'no_session'`. Returns `turnDepth` and, from 5 turns deep, a `warning` to start a fresh `delegate` with a short summary. |
+| `agents_quota` | `{refresh?}` | Each delegation pair's quota state, read from a local [CodexBar](#quota-arc-and-codexbar) server: every applicable window with used percent and reset time, `exhausted`, and a reason when CodexBar is unreachable or the pair is not metered. **Information only** — see [Quota state before delegating](#quota-state-before-delegating). |
 | `agents_metrics` | `{groupBy?: ('agent'\|'model'\|'mode'\|'taskType')[]}` | Success rate, p50/p95 latency, error kinds and tokens per group (default: all four dimensions) from job history. |
 | `jules_delegate` | `{task, cwd?, source?, startingBranch?, title?, requirePlanApproval?, automationMode?, account?, timeoutS?, taskType?}` | Starts a Jules cloud session. Needs `JULES_API_KEY` and either `cwd` (infers the source and branch from the `origin` remote) or an explicit `source`. Returns `{jobId, status:'queued'}`; the job behaves like any other for `job_status`/`job_wait`/`job_result`. The result is a GitHub pull request. |
 | `jules_sources` | `{account?}` | The GitHub repos connected to the Jules account. Connect new ones in the Jules web UI — the API cannot add them. |
