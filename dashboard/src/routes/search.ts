@@ -39,3 +39,8 @@ export const ConfigSearch = z.object({
   section: z.enum(["delegation", "process", "breaker", "overrides", "paths"]).catch("delegation"),
 })
 export type ConfigSearchT = z.infer<typeof ConfigSearch>
+
+export const CloudSearch = z.object({
+  tab: z.enum(["accounts", "sources", "schedules", "sessions"]).catch("accounts"),
+})
+export type CloudSearchT = z.infer<typeof CloudSearch>

@@ -8,6 +8,7 @@ import {
   Activity,
   CheckSquare,
   Settings,
+  Cloud,
   type LucideIcon,
 } from "lucide-react"
 import type { NavBadgeKey } from "./badges"
@@ -22,6 +23,7 @@ export type RouteName =
   | "timeline"
   | "approvals"
   | "config"
+  | "cloud"
 
 export type NavItem = {
   name: RouteName
@@ -55,6 +57,7 @@ export const NAV_GROUPS: NavGroup[] = [
     label: "System",
     items: [
       { name: "approvals", label: "Approvals", path: "/approvals", icon: CheckSquare, badge: "approvals" },
+      { name: "cloud", label: "Cloud", path: "/cloud", icon: Cloud },
       { name: "config", label: "Config", path: "/config", icon: Settings, badge: "config" },
     ],
   },

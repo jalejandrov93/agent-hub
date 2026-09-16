@@ -14,6 +14,7 @@ import { SubagentsView } from "@/views/subagents"
 import { TimelineView } from "@/views/timeline"
 import { ApprovalsView } from "@/views/approvals"
 import { ConfigView } from "@/views/config"
+import { CloudView } from "@/views/cloud"
 import {
   AgentsSearch,
   HistorySearch,
@@ -21,6 +22,7 @@ import {
   TimelineSearch,
   ApprovalsSearch,
   ConfigSearch,
+  CloudSearch,
 } from "./search"
 
 const rootRoute = createRootRoute({ component: AppShell })
@@ -93,6 +95,13 @@ const configRoute = createRoute({
   component: ConfigView,
 })
 
+const cloudRoute = createRoute({
+  getParentRoute: () => rootRoute,
+  path: "/cloud",
+  validateSearch: CloudSearch,
+  component: CloudView,
+})
+
 const routeTree = rootRoute.addChildren([
   indexRoute,
   overviewRoute,
@@ -104,6 +113,7 @@ const routeTree = rootRoute.addChildren([
   timelineRoute,
   approvalsRoute,
   configRoute,
+  cloudRoute,
 ])
 
 export const router = createRouter({
