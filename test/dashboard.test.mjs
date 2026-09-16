@@ -1269,3 +1269,34 @@ test('400 for an invalid policy and an invalid schedule', async () => {
     server.close()
   }
 })
+
+// The route used to re-implement jules_sessions and returned an empty list
+// whenever ?account was absent, so the dashboard showed "no sessions" for a
+// multi-account setup that had several. It now delegates to the tool, which
+// merges every enabled account and tags each session with its accountId.
+test('GET /api/cloud/sessions without ?account merges the sessions of every enabled account', async () => {
+  const env = { AGENT_HUB_HOME: tmpHome() }
+  const { createAccount } = await import('../src/accounts.mjs?t=' + Date.now())
+  const a = createAccount({ label: 'pro-1', apiKey: 'key-aaa' }, env)
+  const b = createAccount({ label: 'pro-2', apiKey: 'key-bbb' }, env)
+
+  const fakeClient = {
+    async listSessions({ apiKey }) {
+      if (apiKey === 'key-aaa') return { sessions: [{ id: 's-a', state: 'COMPLETED', createTime: '2026-09-16T10:00:00Z' }] }
+      if (apiKey === 'key-bbb') return { sessions: [{ id: 's-b', state: 'IN_PROGRESS', createTime: '2026-09-16T11:00:00Z' }] }
+      throw new Error('unexpected key')
+    },
+  }
+
+  const server = createServer({ env, client: fakeClient })
+  const port = await listen(server)
+  try {
+    const res = await get(port, '/api/cloud/sessions')
+    assert.equal(res.status, 200)
+    const body = typeof res.body === 'string' ? JSON.parse(res.body) : res.body
+    assert.deepEqual(body.sessions.map((s) => [s.sessionId, s.accountId]), [['s-b', b.id], ['s-a', a.id]])
+    assert.deepEqual(body.accountErrors, [])
+  } finally {
+    server.close()
+  }
+})

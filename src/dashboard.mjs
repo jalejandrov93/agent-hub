@@ -17,11 +17,12 @@ import { listProposals, refreshProposals, decideProposal } from './proposals.mjs
 import { listLearnings, proposeLearning, decideLearning, deleteLearning } from './learnings.mjs'
 import { jobResultTool } from './tools/jobs.mjs'
 import { startScheduler, runScheduleNow } from './scheduler.mjs'
-import { createAccount, updateAccount, deleteAccount, setPolicy, listAccounts, getAccountSecret } from './accounts.mjs'
+import { createAccount, updateAccount, deleteAccount, setPolicy, listAccounts } from './accounts.mjs'
 import { refreshSources, readSourcesCache } from './cloud/sources.mjs'
 import { createSchedule, updateSchedule, deleteSchedule } from './schedules.mjs'
 import { checkRemoteSession } from './cloud/check.mjs'
 import { julesAccountsTool, julesSchedulesTool, julesSourcesTool, julesSessionsTool } from './tools/jules.mjs'
+import { keyForAccount } from './cloud/credentials.mjs'
 import { stdoutPath } from './jobstore.mjs'
 import * as defaultClient from './cloud/jules/client.mjs'
 import * as defaultAdapter from './cloud/jules/adapter.mjs'
@@ -771,7 +772,7 @@ export function createServer({ env = process.env, commandRunner = runCommand, di
       } catch {
         return sendJson(res, 400, { error: 'invalid URL encoding' })
       }
-      const apiKey = getAccountSecret(id, env)
+      const { apiKey } = keyForAccount({ account: id, env })
       refreshSources({ accountId: id, env, client, apiKey })
         .then((result) => sendJson(res, 200, result))
         .catch((error) => sendError(res, domainError(error)))
@@ -893,60 +894,14 @@ export function createServer({ env = process.env, commandRunner = runCommand, di
     }
 
     if (url.pathname === '/api/cloud/sessions' && req.method === 'GET') {
-      Promise.resolve()
-        .then(async () => {
-          const accountId = url.searchParams.get('account')
-          if (!accountId) return { sessions: [] }
-          const apiKey = getAccountSecret(accountId, env)
-          if (!apiKey) throw new Error('JULES_API_KEY is missing or rejected')
-
-          let page
-          try {
-            page = await client.listSessions({ apiKey, pageSize: 20 })
-          } catch (error) {
-            if (error?.status === 401 || error?.status === 403) throw new Error('JULES_API_KEY is missing or rejected')
-            throw error
-          }
-
-          const jobIdBySession = new Map()
-          try {
-            for (const job of listJobs(env)) {
-              if (job?.remote?.accountId !== accountId) continue
-              const sessionId = job?.remote?.sessionId
-              if (sessionId && !jobIdBySession.has(sessionId)) jobIdBySession.set(sessionId, job.jobId)
-            }
-          } catch {
-            // No local job history
-          }
-
-          const sessions = Array.isArray(page?.sessions) ? page.sessions : []
-          function sessionIdOf(session) {
-            if (typeof session?.id === 'string' && session.id.length > 0) return session.id
-            const name = typeof session?.name === 'string' ? session.name : ''
-            if (name.length > 0) return name.startsWith('sessions/') ? name.slice('sessions/'.length) : name
-            return null
-          }
-
-          return {
-            sessions: sessions
-              .map((session) => {
-                const sId = sessionIdOf(session)
-                return {
-                  sessionId: sId,
-                  title: typeof session?.title === 'string' && session.title.length > 0 ? session.title : null,
-                  state: defaultAdapter.sessionState(session),
-                  prUrl: defaultAdapter.prUrlFromSession(session),
-                  branch: defaultAdapter.branchFromSession(session),
-                  sessionUrl: defaultAdapter.sessionUrl(session),
-                  createTime: typeof session?.createTime === 'string' && session.createTime.length > 0 ? session.createTime : null,
-                  jobId: sId ? jobIdBySession.get(sId) ?? null : null,
-                }
-              })
-              .sort((a, b) => (b.createTime ?? '').localeCompare(a.createTime ?? ''))
-              .slice(0, 20),
-          }
-        })
-        .then((payload) => sendJson(res, 200, payload))
+      // Reuse the jules_sessions tool instead of re-implementing it: it already
+      // merges every enabled account, tags each session with its accountId,
+      // maps local jobs (including legacy 'env' ones) and reports a failing
+      // account in accountErrors without failing the whole call. A copy here
+      // had drifted — it returned an empty list whenever ?account was absent.
+      const account = url.searchParams.get('account') || undefined
+      julesSessionsTool({ account, env, client })
+        .then((result) => sendJson(res, 200, result))
         .catch((error) => sendError(res, domainError(error)))
       return
     }
