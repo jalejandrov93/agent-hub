@@ -203,3 +203,22 @@ test('tool response schemas accept current outputs', () => {
   DelegateResponse.parse({ jobId: null, status: 'failed', errorKind: 'worktree_denied' })
   DelegateResponse.parse({ jobId: 'j', status: 'running', errorKind: null, parentJobId: 'p', turnDepth: 5, warning: 'deep' })
 })
+
+// A Jules job edits a remote GitHub branch and is started from an explicit
+// source, so it legitimately has no local checkout. Requiring cwd made the
+// shared schema reject /api/state as a whole: three such jobs took down every
+// dashboard view that reads the job list, not just their own rows.
+test('JobRecord accepts a remote job with no local cwd', () => {
+  const record = {
+    jobId: '2026-09-16T05-24-33-872Z-c1a5b68e',
+    agent: 'jules',
+    model: 'jules',
+    mode: 'write',
+    status: 'running',
+    createdAt: '2026-09-16T05:24:33.872Z',
+    updatedAt: '2026-09-16T05:24:33.872Z',
+    remote: { provider: 'jules', sessionId: '2644030964203516032' },
+  }
+  assert.equal(JobRecord.safeParse(record).success, true)
+  assert.equal(JobRecord.safeParse({ ...record, cwd: null }).success, true)
+})

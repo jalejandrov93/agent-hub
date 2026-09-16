@@ -75,6 +75,28 @@ describe("JobsView", () => {
     expect(screen.queryByText("failed-task")).toBeNull()
   })
 
+  // A Jules job runs against a GitHub source and has no local checkout. Three
+  // such jobs with no cwd used to fail the shared schema and blank the view.
+  it("renders a remote job that has no local cwd, showing its repository instead", async () => {
+    vi.mocked(api.getState).mockResolvedValue(
+      stateWith([
+        makeJob({
+          jobId: "j-jules",
+          agent: "jules",
+          model: "jules",
+          title: "cloud-task",
+          cwd: undefined,
+          remote: { provider: "jules", sessionId: "2644030964203516032", source: "sources/github/acme/widgets" },
+        }),
+      ])
+    )
+
+    renderView()
+
+    expect(await screen.findByText("cloud-task")).toBeTruthy()
+    expect(screen.getAllByText("acme/widgets").length).toBeGreaterThan(0)
+  })
+
   it("requires confirmation before canceling a job", async () => {
     renderView()
 

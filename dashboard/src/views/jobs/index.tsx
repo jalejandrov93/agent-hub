@@ -24,13 +24,24 @@ const PAGE_HEADER = {
   description: "Queued and in-progress jobs.",
 } as const
 
-function CwdCell({ cwd }: { cwd: string }) {
+/**
+ * Where a job runs. A remote (Jules) job has no local checkout — it works on a
+ * GitHub source — so show that repository rather than an empty cell.
+ */
+function locationOf(job: Job): string {
+  if (job.cwd) return job.cwd
+  const source = job.remote?.source
+  if (source) return source.replace(/^sources\/github\//, "")
+  return "—"
+}
+
+function CwdCell({ location }: { location: string }) {
   return (
     <Tooltip>
       <TooltipTrigger render={<span className="block max-w-[16rem] truncate text-left" />}>
-        {cwd}
+        {location}
       </TooltipTrigger>
-      <TooltipContent className="max-w-md break-all">{cwd}</TooltipContent>
+      <TooltipContent className="max-w-md break-all">{location}</TooltipContent>
     </Tooltip>
   )
 }
@@ -82,7 +93,7 @@ export function JobsView() {
     {
       key: "cwd",
       header: "Working dir",
-      cell: (job) => <CwdCell cwd={job.cwd} />,
+      cell: (job) => <CwdCell location={locationOf(job)} />,
     },
     {
       key: "started",

@@ -82,7 +82,10 @@ export const JobRecord = z
     agent: z.string(),
     model: z.string(),
     title: nullableString,
-    cwd: z.string(),
+    // A remote (Jules) job is started from an explicit GitHub source and never
+    // touches a local checkout, so it has no cwd. Requiring one made a single
+    // such record fail /api/state validation and blank every job-list view.
+    cwd: nullableString,
     mode: z.string(),
     status: JobStatus,
     errorKind: nullableString,
