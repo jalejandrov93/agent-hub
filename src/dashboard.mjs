@@ -16,7 +16,15 @@ import { computeMetrics } from './metrics.mjs'
 import { listProposals, refreshProposals, decideProposal } from './proposals.mjs'
 import { listLearnings, proposeLearning, decideLearning, deleteLearning } from './learnings.mjs'
 import { jobResultTool } from './tools/jobs.mjs'
-import { startScheduler } from './scheduler.mjs'
+import { startScheduler, runScheduleNow } from './scheduler.mjs'
+import { createAccount, updateAccount, deleteAccount, setPolicy, listAccounts, getAccountSecret } from './accounts.mjs'
+import { refreshSources, readSourcesCache } from './cloud/sources.mjs'
+import { createSchedule, updateSchedule, deleteSchedule } from './schedules.mjs'
+import { checkRemoteSession } from './cloud/check.mjs'
+import { julesAccountsTool, julesSchedulesTool, julesSourcesTool, julesSessionsTool } from './tools/jules.mjs'
+import { stdoutPath } from './jobstore.mjs'
+import * as defaultClient from './cloud/jules/client.mjs'
+import * as defaultAdapter from './cloud/jules/adapter.mjs'
 
 const HERE = path.dirname(fileURLToPath(import.meta.url))
 // The Vite-built React app lands here (built by a separate package); this
@@ -357,7 +365,7 @@ function sendError(res, error) {
   sendJson(res, status, { error: message })
 }
 
-export function createServer({ env = process.env, commandRunner = runCommand, distDir = DEFAULT_DIST_DIR } = {}) {
+export function createServer({ env = process.env, commandRunner = runCommand, distDir = DEFAULT_DIST_DIR, client = defaultClient } = {}) {
   const sseClients = new Set()
 
   // Rebuilt whenever index.html's mtime changes, so `npm run build` is
@@ -698,6 +706,282 @@ export function createServer({ env = process.env, commandRunner = runCommand, di
       }
       try {
         sendJson(res, 200, deleteLearning(id, env))
+      } catch (error) {
+        sendError(res, domainError(error))
+      }
+      return
+    }
+
+    if (url.pathname === '/api/accounts' && req.method === 'GET') {
+      sendJson(res, 200, julesAccountsTool({ env, client }))
+      return
+    }
+
+    if (url.pathname === '/api/accounts' && req.method === 'POST') {
+      readJsonBody(req)
+        .then((body) => sendJson(res, 201, createAccount(body, env)))
+        .catch((error) => sendError(res, domainError(error)))
+      return
+    }
+
+    const accountMatch = url.pathname.match(/^\/api\/accounts\/([^/]+)$/)
+    if (accountMatch && req.method === 'PATCH') {
+      let id
+      try {
+        id = decodeURIComponent(accountMatch[1])
+      } catch {
+        return sendJson(res, 400, { error: 'invalid URL encoding' })
+      }
+      readJsonBody(req)
+        .then((body) => sendJson(res, 200, updateAccount(id, body, env)))
+        .catch((error) => sendError(res, domainError(error)))
+      return
+    }
+
+    if (accountMatch && req.method === 'DELETE') {
+      let id
+      try {
+        id = decodeURIComponent(accountMatch[1])
+      } catch {
+        return sendJson(res, 400, { error: 'invalid URL encoding' })
+      }
+      try {
+        sendJson(res, 200, deleteAccount(id, env))
+      } catch (error) {
+        sendError(res, domainError(error))
+      }
+      return
+    }
+
+    if (url.pathname === '/api/accounts/policy' && req.method === 'PUT') {
+      readJsonBody(req)
+        .then((body) => {
+          setPolicy(body.policy, env)
+          sendJson(res, 200, { policy: body.policy })
+        })
+        .catch((error) => sendError(res, domainError(error)))
+      return
+    }
+
+    const refreshSourcesMatch = url.pathname.match(/^\/api\/accounts\/([^/]+)\/refresh-sources$/)
+    if (refreshSourcesMatch && req.method === 'POST') {
+      let id
+      try {
+        id = decodeURIComponent(refreshSourcesMatch[1])
+      } catch {
+        return sendJson(res, 400, { error: 'invalid URL encoding' })
+      }
+      const apiKey = getAccountSecret(id, env)
+      refreshSources({ accountId: id, env, client, apiKey })
+        .then((result) => sendJson(res, 200, result))
+        .catch((error) => sendError(res, domainError(error)))
+      return
+    }
+
+    if (url.pathname === '/api/sources' && req.method === 'GET') {
+      Promise.resolve()
+        .then(async () => {
+          const accounts = listAccounts(env)
+          const cache = readSourcesCache(env)
+          const merged = {}
+
+          for (const account of accounts) {
+            const cached = cache[account.id] || {}
+            const status = cached.status || 'unknown'
+            const sourceNames = Array.isArray(cached.sources) ? cached.sources : []
+
+            for (const name of sourceNames) {
+              if (!merged[name]) {
+                merged[name] = {
+                  accounts: {},
+                  defaultBranch: null,
+                  branches: []
+                }
+              }
+              merged[name].accounts[account.id] = status
+            }
+          }
+
+          // Try to get defaultBranch and branches from julesSourcesTool
+          // For each merged source, we can map to what's available.
+          // The issue description explicitly asked for "the merged cache: per source name, which accounts are known to have it, plus each account's status, defaultBranch and branches."
+          // Wait, the prompt says "the merged cache: per source name, which accounts are known to have it, plus each account's status, defaultBranch and branches."
+          // Which implies the returned payload is an object keyed by source name, or a list of them.
+          // Let's iterate the enabled accounts and call julesSourcesTool to fetch the branches for known repos.
+
+          for (const account of accounts) {
+            if (account.enabled === false) continue
+            try {
+              const result = await julesSourcesTool({ account: account.id, env, client })
+              for (const src of result.sources) {
+                if (merged[src.name]) {
+                  merged[src.name].defaultBranch = src.defaultBranch
+                  merged[src.name].branches = src.branches
+                } else {
+                  merged[src.name] = {
+                    accounts: { [account.id]: 'ok' },
+                    defaultBranch: src.defaultBranch,
+                    branches: src.branches
+                  }
+                }
+              }
+            } catch {
+              // skip if fail to fetch
+            }
+          }
+
+          return merged
+        })
+        .then((payload) => sendJson(res, 200, payload))
+        .catch((error) => sendError(res, domainError(error)))
+      return
+    }
+
+    if (url.pathname === '/api/schedules' && req.method === 'GET') {
+      sendJson(res, 200, julesSchedulesTool({ env }))
+      return
+    }
+
+    if (url.pathname === '/api/schedules' && req.method === 'POST') {
+      readJsonBody(req)
+        .then((body) => sendJson(res, 201, createSchedule(body, env)))
+        .catch((error) => sendError(res, domainError(error)))
+      return
+    }
+
+    const scheduleMatch = url.pathname.match(/^\/api\/schedules\/([^/]+)$/)
+    if (scheduleMatch && req.method === 'PATCH') {
+      let id
+      try {
+        id = decodeURIComponent(scheduleMatch[1])
+      } catch {
+        return sendJson(res, 400, { error: 'invalid URL encoding' })
+      }
+      readJsonBody(req)
+        .then((body) => sendJson(res, 200, updateSchedule(id, body, env)))
+        .catch((error) => sendError(res, domainError(error)))
+      return
+    }
+
+    if (scheduleMatch && req.method === 'DELETE') {
+      let id
+      try {
+        id = decodeURIComponent(scheduleMatch[1])
+      } catch {
+        return sendJson(res, 400, { error: 'invalid URL encoding' })
+      }
+      try {
+        sendJson(res, 200, deleteSchedule(id, env))
+      } catch (error) {
+        sendError(res, domainError(error))
+      }
+      return
+    }
+
+    const runNowMatch = url.pathname.match(/^\/api\/schedules\/([^/]+)\/run-now$/)
+    if (runNowMatch && req.method === 'POST') {
+      let id
+      try {
+        id = decodeURIComponent(runNowMatch[1])
+      } catch {
+        return sendJson(res, 400, { error: 'invalid URL encoding' })
+      }
+      runScheduleNow(id, { env })
+        .then((result) => sendJson(res, 200, result))
+        .catch((error) => sendError(res, domainError(error)))
+      return
+    }
+
+    if (url.pathname === '/api/cloud/sessions' && req.method === 'GET') {
+      Promise.resolve()
+        .then(async () => {
+          const accountId = url.searchParams.get('account')
+          if (!accountId) return { sessions: [] }
+          const apiKey = getAccountSecret(accountId, env)
+          if (!apiKey) throw new Error('JULES_API_KEY is missing or rejected')
+
+          let page
+          try {
+            page = await client.listSessions({ apiKey, pageSize: 20 })
+          } catch (error) {
+            if (error?.status === 401 || error?.status === 403) throw new Error('JULES_API_KEY is missing or rejected')
+            throw error
+          }
+
+          const jobIdBySession = new Map()
+          try {
+            for (const job of listJobs(env)) {
+              if (job?.remote?.accountId !== accountId) continue
+              const sessionId = job?.remote?.sessionId
+              if (sessionId && !jobIdBySession.has(sessionId)) jobIdBySession.set(sessionId, job.jobId)
+            }
+          } catch {
+            // No local job history
+          }
+
+          const sessions = Array.isArray(page?.sessions) ? page.sessions : []
+          function sessionIdOf(session) {
+            if (typeof session?.id === 'string' && session.id.length > 0) return session.id
+            const name = typeof session?.name === 'string' ? session.name : ''
+            if (name.length > 0) return name.startsWith('sessions/') ? name.slice('sessions/'.length) : name
+            return null
+          }
+
+          return {
+            sessions: sessions
+              .map((session) => {
+                const sId = sessionIdOf(session)
+                return {
+                  sessionId: sId,
+                  title: typeof session?.title === 'string' && session.title.length > 0 ? session.title : null,
+                  state: defaultAdapter.sessionState(session),
+                  prUrl: defaultAdapter.prUrlFromSession(session),
+                  branch: defaultAdapter.branchFromSession(session),
+                  sessionUrl: defaultAdapter.sessionUrl(session),
+                  createTime: typeof session?.createTime === 'string' && session.createTime.length > 0 ? session.createTime : null,
+                  jobId: sId ? jobIdBySession.get(sId) ?? null : null,
+                }
+              })
+              .sort((a, b) => (b.createTime ?? '').localeCompare(a.createTime ?? ''))
+              .slice(0, 20),
+          }
+        })
+        .then((payload) => sendJson(res, 200, payload))
+        .catch((error) => sendError(res, domainError(error)))
+      return
+    }
+
+    const checkSessionMatch = url.pathname.match(/^\/api\/cloud\/jobs\/([^/]+)\/check$/)
+    if (checkSessionMatch && req.method === 'POST') {
+      let jobId
+      try {
+        jobId = decodeURIComponent(checkSessionMatch[1])
+      } catch {
+        return sendJson(res, 400, { error: 'invalid URL encoding' })
+      }
+      checkRemoteSession({ jobId, env, client })
+        .then((result) => sendJson(res, 200, result))
+        .catch((error) => sendError(res, domainError(error)))
+      return
+    }
+
+    const jobActivitiesMatch = url.pathname.match(/^\/api\/cloud\/jobs\/([^/]+)\/activities$/)
+    if (jobActivitiesMatch && req.method === 'GET') {
+      let jobId
+      try {
+        jobId = decodeURIComponent(jobActivitiesMatch[1])
+      } catch {
+        return sendJson(res, 400, { error: 'invalid URL encoding' })
+      }
+      try {
+        let text = ''
+        try {
+          text = fs.readFileSync(stdoutPath(jobId, env), 'utf8')
+        } catch {
+          // no log yet
+        }
+        const lines = text.split('\n').filter(Boolean)
+        sendJson(res, 200, { activities: lines })
       } catch (error) {
         sendError(res, domainError(error))
       }
