@@ -583,9 +583,14 @@ async function main() {
   // Fire-and-forget: resumeRemoteJobs returns synchronously and never throws,
   // so a slow/unreachable Jules API can never block or crash the handshake.
   try {
-    const { resumed, failed } = resumeRemoteJobs()
+    const { resumed, failed, unkeyed = [] } = resumeRemoteJobs()
     if (resumed.length > 0 || failed.length > 0) {
       log(`resumed ${resumed.length} remote job(s) on startup; ${failed.length} could not be resumed`)
+    }
+    // Not an error: those sessions keep running remotely. Say how to pick them
+    // up rather than leaving them silently unpolled.
+    if (unkeyed.length > 0) {
+      log(`${unkeyed.length} remote job(s) still running but no Jules key is configured here — add an account, then jules_check to pick them up`)
     }
   } catch (error) {
     log('resumeRemoteJobs failed:', error?.message ?? error)

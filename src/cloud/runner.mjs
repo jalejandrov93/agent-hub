@@ -438,12 +438,14 @@ export function resumeRemoteJobs({
   const resumed = []
   const failed = []
   const skipped = []
+  // Running remote jobs this process holds no key for: left running, not failed.
+  const unkeyed = []
 
   let jobs
   try {
     jobs = listJobsFn(env)
   } catch {
-    return { resumed, failed, skipped }
+    return { resumed, failed, skipped, unkeyed }
   }
 
   const candidates = jobs.filter((job) => job?.status === 'running' && job?.remote?.sessionId)
@@ -460,22 +462,12 @@ export function resumeRemoteJobs({
     const apiKey = keyForJob(job, env, getAccountSecretFn)
 
     if (!apiKey || apiKey.length === 0) {
-      // Without a key the session can never be polled again: finish it as a
-      // failed(auth) job instead of leaving it 'running' with nothing tracking it.
-      try {
-        updateResultFn(
-          job.jobId,
-          { status: 'failed', errorKind: 'auth', error: 'JULES_API_KEY is not set — polling cannot resume without the key.' },
-          env
-        )
-        appendEventFn(
-          { kind: 'job.failed', agent: job.agent, model: job.model, cwd: job.cwd, title: job.title, jobId: job.jobId, errorKind: 'auth', taskType: job.taskType ?? null, summary: 'polling cannot resume without JULES_API_KEY' },
-          { env }
-        )
-      } catch {
-        // best-effort: still report it as failed so the caller knows it was not resumed
-      }
-      failed.push(job.jobId)
+      // No key in THIS process says nothing about the session, which keeps
+      // running on Google's side. Failing the job here destroyed correct state
+      // for real: after a restart with no key configured, three live Jules jobs
+      // were marked failed(auth). Leave the record running and untouched — it
+      // is recoverable, and jules_check finalizes it once a key is configured.
+      unkeyed.push(job.jobId)
       continue
     }
 
@@ -533,5 +525,5 @@ export function resumeRemoteJobs({
     })()
   }
 
-  return { resumed, failed, skipped }
+  return { resumed, failed, skipped, unkeyed }
 }

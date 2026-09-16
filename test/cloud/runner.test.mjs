@@ -378,7 +378,12 @@ test('a canceled job emits no contradicting job.failed event when the poll later
   assert.equal(events.some((e) => e.kind === 'job.failed'), false)
 })
 
-test('resumeRemoteJobs finishes a running remote job as failed(auth) when JULES_API_KEY is absent, and never polls', () => {
+// Observed for real: after a Claude Code restart, the MCP server had no key
+// configured and this path marked three live Jules jobs failed(auth). A missing
+// credential in THIS process says nothing about the session on Google's side,
+// which kept running. Failing the job destroyed correct state; leaving it
+// running lets jules_check finalize it as soon as a key is configured.
+test('resumeRemoteJobs leaves a remote job running when no key is available, and never polls or fails it', () => {
   const env = { AGENT_HUB_HOME: tmpHome() }
   const job = createJob({ agent: 'jules', model: 'jules', task: 't', cwd: '/repo', title: 't', mode: 'write', env })
   updateResult(job.jobId, { status: 'running', remote: { provider: 'jules', sessionId: 'sess-1', state: 'IN_PROGRESS' } }, env)
@@ -388,18 +393,19 @@ test('resumeRemoteJobs finishes a running remote job as failed(auth) when JULES_
     pollCalls++
     return {}
   }
+  const events = []
 
-  const res = resumeRemoteJobs({ env, client: {}, adapter: julesAdapter, pollFn })
+  const res = resumeRemoteJobs({ env, client: {}, adapter: julesAdapter, pollFn, appendEventFn: (e) => events.push(e) })
 
-  assert.deepEqual(res.failed, [job.jobId])
+  assert.deepEqual(res.unkeyed, [job.jobId])
+  assert.deepEqual(res.failed, [])
   assert.deepEqual(res.resumed, [])
-  assert.deepEqual(res.skipped, [])
   assert.equal(pollCalls, 0)
+  assert.equal(events.some((e) => e.kind === 'job.failed'), false)
 
   const result = readResult(job.jobId, env)
-  assert.equal(result.status, 'failed')
-  assert.equal(result.errorKind, 'auth')
-  assert.match(result.error, /JULES_API_KEY/)
+  assert.equal(result.status, 'running')
+  assert.equal(result.errorKind ?? null, null)
 })
 
 test('resumeRemoteJobs, when the deadline already elapsed, still polls once and finalizes a COMPLETED session as succeeded with its prUrl', async () => {
