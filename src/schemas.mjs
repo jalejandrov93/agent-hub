@@ -380,10 +380,20 @@ export const JulesSessionRow = z
     sessionUrl: nullableString,
     createTime: nullableString,
     jobId: nullableString,
+    // Set only when rows were merged from configured accounts: sessions are per
+    // account, so each row says which one it came from.
+    accountId: nullableString,
   })
   .passthrough()
 
-export const JulesSessionsResponse = z.object({ sessions: z.array(JulesSessionRow) }).passthrough()
+export const JulesSessionsResponse = z
+  .object({
+    sessions: z.array(JulesSessionRow),
+    // One entry per account whose query failed while the others succeeded —
+    // partial failure is reported, never swallowed into an empty list.
+    accountErrors: z.array(z.object({ accountId: z.string(), error: z.string() }).passthrough()).optional(),
+  })
+  .passthrough()
 
 /**
  * One row from jules_sources: a GitHub repo connected to the Jules account.

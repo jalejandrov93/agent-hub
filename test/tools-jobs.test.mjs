@@ -4,6 +4,7 @@ import fs from 'node:fs'
 import path from 'node:path'
 import os from 'node:os'
 import { createJob } from '../src/jobstore.mjs'
+import { NO_KEY_MESSAGE } from '../src/cloud/credentials.mjs'
 
 function tmpHome() {
   return fs.mkdtempSync(path.join(os.tmpdir(), 'agent-hub-tools-jobs-'))
@@ -157,7 +158,7 @@ test('job_reply reports turnDepth = parent + 1 and warns once the conversation i
 
 test('job_reply for a jules parent calls client.sendMessage (default action) and spawns nothing, keeping the same jobId', async () => {
   const home = tmpHome()
-  const env = { AGENT_HUB_HOME: home }
+  const env = { AGENT_HUB_HOME: home, JULES_API_KEY: 'key-env' }
   const { updateResult } = await import('../src/jobstore.mjs?t=' + Date.now())
   const { jobReplyTool } = await fresh(home)
 
@@ -185,15 +186,71 @@ test('job_reply for a jules parent calls client.sendMessage (default action) and
   assert.equal(startJobCalls, 0, 'a jules reply must never spawn a new local job')
   assert.equal(sendMessageArgs.sessionId, 'sess-1')
   assert.equal(sendMessageArgs.prompt, 'please also add a changelog entry')
-  assert.equal(sendMessageArgs.apiKey, undefined)
+  assert.equal(sendMessageArgs.apiKey, 'key-env')
   assert.equal(result.jobId, parent.jobId)
   assert.equal(result.status, 'running')
   assert.equal(result.errorKind, null)
 })
 
-test('job_reply for a jules parent defaults to approve_plan when remote.state is AWAITING_PLAN_APPROVAL and no message is given', async () => {
+// The real failure: keys now live in accounts.json and there is no
+// JULES_API_KEY in the environment, but julesReply read env only and sent the
+// request unkeyed — "Jules API responded 401 on /sessions/<id>:sendMessage".
+test('job_reply on a jules job uses the key of the account that started it, with no JULES_API_KEY in env', async () => {
   const home = tmpHome()
   const env = { AGENT_HUB_HOME: home }
+  const { createAccount } = await import('../src/accounts.mjs?t=' + Date.now())
+  const account = createAccount({ label: 'a', apiKey: 'key-aaa' }, env)
+  const { updateResult } = await import('../src/jobstore.mjs?t=' + Date.now())
+  const { jobReplyTool } = await fresh(home)
+
+  const parent = createJob({ agent: 'jules', model: 'jules', task: 't', cwd: '/repo', title: 'p', mode: 'write', env })
+  updateResult(parent.jobId, { status: 'running', remote: { provider: 'jules', accountId: account.id, sessionId: 'sess-acct' } }, env)
+
+  let sendMessageArgs = null
+  const client = {
+    sendMessage: async (args) => {
+      sendMessageArgs = args
+      return {}
+    },
+  }
+
+  const result = await jobReplyTool({ jobId: parent.jobId, message: 'keep going', client, env })
+
+  assert.equal(sendMessageArgs.apiKey, 'key-aaa')
+  assert.equal(sendMessageArgs.sessionId, 'sess-acct')
+  assert.equal(result.errorKind, null)
+})
+
+test('job_reply on a jules job with no key anywhere returns auth and never calls the client', async () => {
+  const home = tmpHome()
+  const env = { AGENT_HUB_HOME: home }
+  const { updateResult } = await import('../src/jobstore.mjs?t=' + Date.now())
+  const { jobReplyTool } = await fresh(home)
+
+  const parent = createJob({ agent: 'jules', model: 'jules', task: 't', cwd: '/repo', title: 'p', mode: 'write', env })
+  updateResult(parent.jobId, { status: 'running', remote: { provider: 'jules', sessionId: 'sess-nokey' } }, env)
+
+  let called = false
+  const client = {
+    sendMessage: async () => {
+      called = true
+    },
+    approvePlan: async () => {
+      called = true
+    },
+  }
+
+  const result = await jobReplyTool({ jobId: parent.jobId, message: 'go', client, env })
+
+  assert.equal(result.status, 'failed')
+  assert.equal(result.errorKind, 'auth')
+  assert.equal(result.error, NO_KEY_MESSAGE)
+  assert.equal(called, false, 'never send a request without a key')
+})
+
+test('job_reply for a jules parent defaults to approve_plan when remote.state is AWAITING_PLAN_APPROVAL and no message is given', async () => {
+  const home = tmpHome()
+  const env = { AGENT_HUB_HOME: home, JULES_API_KEY: 'key-env' }
   const { updateResult } = await import('../src/jobstore.mjs?t=' + Date.now())
   const { jobReplyTool } = await fresh(home)
 
@@ -218,7 +275,7 @@ test('job_reply for a jules parent defaults to approve_plan when remote.state is
 
 test('job_reply for a jules parent honors an explicit action override', async () => {
   const home = tmpHome()
-  const env = { AGENT_HUB_HOME: home }
+  const env = { AGENT_HUB_HOME: home, JULES_API_KEY: 'key-env' }
   const { updateResult } = await import('../src/jobstore.mjs?t=' + Date.now())
   const { jobReplyTool } = await fresh(home)
 
@@ -244,7 +301,7 @@ test('job_reply for a jules parent honors an explicit action override', async ()
 
 test('job_reply accepts a RUNNING jules parent (not just a terminal one) — that is exactly when a reply is useful', async () => {
   const home = tmpHome()
-  const env = { AGENT_HUB_HOME: home }
+  const env = { AGENT_HUB_HOME: home, JULES_API_KEY: 'key-env' }
   const { updateResult } = await import('../src/jobstore.mjs?t=' + Date.now())
   const { jobReplyTool } = await fresh(home)
 
@@ -285,7 +342,7 @@ test('job_reply rejects a jules parent with no remote.sessionId', async () => {
 
 test('job_reply reports a jules client failure as errorKind crash (any other status), carrying the error message through', async () => {
   const home = tmpHome()
-  const env = { AGENT_HUB_HOME: home }
+  const env = { AGENT_HUB_HOME: home, JULES_API_KEY: 'key-env' }
   const { updateResult } = await import('../src/jobstore.mjs?t=' + Date.now())
   const { jobReplyTool } = await fresh(home)
 
@@ -305,7 +362,7 @@ test('job_reply reports a jules client failure as errorKind crash (any other sta
 
 test('job_reply maps a 429 jules client failure to errorKind quota, carrying the error message through', async () => {
   const home = tmpHome()
-  const env = { AGENT_HUB_HOME: home }
+  const env = { AGENT_HUB_HOME: home, JULES_API_KEY: 'key-env' }
   const { updateResult } = await import('../src/jobstore.mjs?t=' + Date.now())
   const { jobReplyTool } = await fresh(home)
 
@@ -325,7 +382,7 @@ test('job_reply maps a 429 jules client failure to errorKind quota, carrying the
 
 test('job_reply maps a 401/403 jules client failure to errorKind auth, carrying the error message through', async () => {
   const home = tmpHome()
-  const env = { AGENT_HUB_HOME: home }
+  const env = { AGENT_HUB_HOME: home, JULES_API_KEY: 'key-env' }
   const { updateResult } = await import('../src/jobstore.mjs?t=' + Date.now())
   const { jobReplyTool } = await fresh(home)
 
@@ -382,7 +439,7 @@ test('job_reply rejects a jules "message" action with no message text, without e
 
 test('job_reply still allows action:"approve_plan" with no message text at all', async () => {
   const home = tmpHome()
-  const env = { AGENT_HUB_HOME: home }
+  const env = { AGENT_HUB_HOME: home, JULES_API_KEY: 'key-env' }
   const { updateResult } = await import('../src/jobstore.mjs?t=' + Date.now())
   const { jobReplyTool } = await fresh(home)
 

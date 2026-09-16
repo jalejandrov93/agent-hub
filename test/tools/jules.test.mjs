@@ -211,6 +211,75 @@ test('julesSessionsTool still returns sessions when there is no local job histor
   ])
 })
 
+// Sessions are per account, so with keys in accounts.json (and no env key) one
+// key only ever showed part of the picture. This is the multi-account merge.
+test('julesSessionsTool with no explicit account merges every enabled account, tags accountId, newest first, and applies limit after merging', async () => {
+  const env = isolated({})
+  const a = createAccount({ label: 'a', apiKey: 'key-aaa' }, env)
+  const b = createAccount({ label: 'b', apiKey: 'key-bbb' }, env)
+
+  const byKey = {
+    'key-aaa': {
+      sessions: [
+        { id: 'a-old', state: 'COMPLETED', createTime: '2026-09-10T00:00:00Z' },
+        { id: 'a-new', state: 'COMPLETED', createTime: '2026-09-14T00:00:00Z' },
+      ],
+    },
+    'key-bbb': { sessions: [{ id: 'b-new', state: 'COMPLETED', createTime: '2026-09-15T00:00:00Z' }] },
+  }
+  const client = { listSessions: async ({ apiKey }) => byKey[apiKey] }
+
+  const result = await julesSessionsTool({ env, client, listJobsFn: () => [], limit: 2 })
+
+  assert.deepEqual(result.sessions.map((s) => s.sessionId), ['b-new', 'a-new'])
+  assert.equal(result.sessions[0].accountId, b.id)
+  assert.equal(result.sessions[1].accountId, a.id)
+  assert.deepEqual(result.accountErrors, [])
+})
+
+test('julesSessionsTool reports one failing account in accountErrors while still returning the other account\'s sessions', async () => {
+  const env = isolated({})
+  const a = createAccount({ label: 'a', apiKey: 'key-aaa' }, env)
+  const b = createAccount({ label: 'b', apiKey: 'key-bbb' }, env)
+
+  const apiError = Object.assign(new Error('Jules API responded 401'), { status: 401 })
+  const client = {
+    listSessions: async ({ apiKey }) => {
+      if (apiKey === 'key-aaa') throw apiError
+      return { sessions: [{ id: 'b-1', state: 'COMPLETED', createTime: '2026-09-15T00:00:00Z' }] }
+    },
+  }
+
+  const result = await julesSessionsTool({ env, client, listJobsFn: () => [] })
+
+  assert.deepEqual(result.sessions.map((s) => s.sessionId), ['b-1'])
+  assert.equal(result.sessions[0].accountId, b.id)
+  assert.equal(result.accountErrors.length, 1)
+  assert.equal(result.accountErrors[0].accountId, a.id)
+  assert.match(result.accountErrors[0].error, /401/)
+})
+
+test('julesSessionsTool with an explicit account queries only that account', async () => {
+  const env = isolated({})
+  createAccount({ label: 'a', apiKey: 'key-aaa' }, env)
+  const b = createAccount({ label: 'b', apiKey: 'key-bbb' }, env)
+
+  const calls = []
+  const client = {
+    listSessions: async ({ apiKey }) => {
+      calls.push(apiKey)
+      return { sessions: [{ id: 'b-1', state: 'COMPLETED', createTime: '2026-09-15T00:00:00Z' }] }
+    },
+  }
+
+  const result = await julesSessionsTool({ env, client, listJobsFn: () => [], account: b.id })
+
+  assert.deepEqual(calls, ['key-bbb'])
+  assert.deepEqual(result.sessions.map((s) => s.sessionId), ['b-1'])
+  assert.equal(result.sessions[0].accountId, b.id)
+})
+
+
 test('julesSourcesTool throws a clean message when JULES_API_KEY is missing', async () => {
   await assert.rejects(() => julesSourcesTool({ env: isolated({}), client: { listSources: async () => ({ sources: [] }) } }), /JULES_API_KEY is missing or rejected/)
 })

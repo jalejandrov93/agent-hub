@@ -250,7 +250,7 @@ export function buildServer() {
         automationMode: z.string().optional().default('AUTO_CREATE_PR').describe('Jules automationMode, e.g. AUTO_CREATE_PR.'),
         timeoutS: z.number().int().positive().optional(),
         taskType: taskTypeArg,
-        account: z.string().min(1).optional().describe('Jules account id to use (see jules_accounts). Defaults to the configured selection policy; falls back to env.JULES_API_KEY when no accounts exist.'),
+        account: z.string().min(1).optional().describe('Jules account id to use (see jules_accounts). Defaults to the configured selection policy; falls back to the JULES_API_KEY environment variable when no accounts exist.'),
       },
       outputSchema: DelegateResponse,
       annotations: { readOnlyHint: false, openWorldHint: true },
@@ -267,10 +267,10 @@ export function buildServer() {
       description:
         'List the GitHub repositories connected to a Jules account. Repos are connected in the Jules web UI (jules.google.com) and ' +
         'cannot be added through this API — use the returned source name with jules_delegate. Pass account to choose a configured ' +
-        'account (see jules_accounts); with none configured this reads env.JULES_API_KEY. An account whose /sources call is refused ' +
+        'account (see jules_accounts); with none configured this reads the JULES_API_KEY environment variable. An account whose /sources call is refused ' +
         'reports noSourceAccess (it has no source access), which is NOT a rejected key.',
       inputSchema: {
-        account: z.string().min(1).optional().describe('Jules account id to read (see jules_accounts). Defaults to the highest-priority enabled account, or env.JULES_API_KEY when none are configured.'),
+        account: z.string().min(1).optional().describe('Jules account id to read (see jules_accounts). Defaults to the highest-priority enabled account, or the JULES_API_KEY environment variable when none are configured.'),
       },
       outputSchema: JulesSourcesResponse,
       annotations: { readOnlyHint: true, openWorldHint: true, idempotentHint: true },
@@ -338,15 +338,19 @@ export function buildServer() {
         'List the account\'s Jules sessions straight from the Jules API, newest first, WITHOUT any local polling or job history — this is ' +
         'how you find out what a session did while the machine was off or after a reboot. Each row carries the session state, PR ' +
         'url and working branch, plus jobId: the local job that started it, or null when this machine has no record (a reinstall, ' +
-        'or a session started elsewhere). Recovery path: find the session here, then jules_check to finalize its local job.',
+        'or a session started elsewhere). Sessions belong to one account, so with several configured this queries every enabled ' +
+        'account in parallel and merges the rows (each tagged accountId); pass account to read just one, and accountErrors reports ' +
+        'any account whose query failed without failing the call. Recovery path: find the session here, then jules_check to finalize ' +
+        'its local job.',
       inputSchema: {
         limit: z.number().int().positive().max(100).optional().default(20).describe('Maximum number of sessions to return, newest first.'),
         state: z.string().min(1).optional().describe('Only return sessions in this state, e.g. COMPLETED.'),
+        account: z.string().min(1).optional().describe('Jules account id to read (see jules_accounts). Defaults to every enabled account that has a key, or the JULES_API_KEY environment variable when none are configured.'),
       },
       outputSchema: JulesSessionsResponse,
       annotations: { readOnlyHint: true, openWorldHint: true, idempotentHint: true },
     },
-    guard(({ limit, state }) => julesSessionsTool({ limit, state }))
+    guard(({ limit, state, account }) => julesSessionsTool({ limit, state, account }))
   )
 
   server.registerTool(

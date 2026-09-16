@@ -1,7 +1,8 @@
 import { listJobs as defaultListJobs, readResult as defaultReadResult, updateResult as defaultUpdateResult } from '../jobstore.mjs'
-import { getAccountSecret as defaultGetAccountSecret } from '../accounts.mjs'
+import { listAccounts as defaultListAccounts, getAccountSecret as defaultGetAccountSecret } from '../accounts.mjs'
 import { appendEvent as defaultAppendEvent } from '../eventlog.mjs'
 import { finishRemoteJob as defaultFinishRemoteJob } from './runner.mjs'
+import { keyForJob, keyForAccount, NO_KEY_MESSAGE } from './credentials.mjs'
 import * as defaultClient from './jules/client.mjs'
 import * as defaultAdapter from './jules/adapter.mjs'
 
@@ -58,6 +59,7 @@ export async function checkRemoteSession({
   appendEventFn = defaultAppendEvent,
   finishRemoteJobFn = defaultFinishRemoteJob,
   getAccountSecretFn = defaultGetAccountSecret,
+  listAccountsFn = defaultListAccounts,
   activityPageSize = 100,
 } = {}) {
   if (!jobId && !sessionId) {
@@ -66,14 +68,14 @@ export async function checkRemoteSession({
 
   let resolvedJobId = jobId ?? null
   let resolvedSessionId = sessionId ?? null
-  let resolvedAccountId = null
+  let resolvedJob = null
 
   if (jobId) {
     const record = readResultFn(jobId, env)
     const recorded = record?.remote?.sessionId
     if (!recorded) throw new Error(`job ${jobId} has no Jules session recorded`)
     resolvedSessionId = sessionId ?? recorded
-    resolvedAccountId = record?.remote?.accountId ?? null
+    resolvedJob = record
   } else {
     // A bare sessionId is not a jobId, but this machine may still hold the job
     // that started it — look it up so the caller gets a jobId to finalize and,
@@ -87,17 +89,18 @@ export async function checkRemoteSession({
     const match = Array.isArray(jobs) ? jobs.find((job) => job?.remote?.sessionId === resolvedSessionId) : null
     if (match) {
       resolvedJobId = match.jobId
-      resolvedAccountId = match.remote?.accountId ?? null
+      resolvedJob = match
     }
   }
 
-  // Poll with the account that started the session; only a job with no recorded
-  // account (or the implicit 'env' account) falls back to env.JULES_API_KEY.
-  let apiKey = null
-  if (resolvedAccountId && resolvedAccountId !== 'env') apiKey = getAccountSecretFn(resolvedAccountId, env)
-  if (!apiKey || apiKey.length === 0) apiKey = env.JULES_API_KEY
+  // Poll with the account that started the session (keyForJob); a bare session
+  // this machine has no record of uses the account selection policy
+  // (keyForAccount). Both live in credentials.mjs — the one source of truth.
+  const apiKey = resolvedJob
+    ? keyForJob(resolvedJob, { env, getAccountSecretFn })
+    : keyForAccount({ env, listAccountsFn, getAccountSecretFn }).apiKey
   if (!apiKey || apiKey.length === 0) {
-    throw new Error('JULES_API_KEY is not set — set it in the environment to check a Jules session.')
+    throw new Error(NO_KEY_MESSAGE)
   }
 
   const session = await client.getSession({ apiKey, sessionId: resolvedSessionId })
