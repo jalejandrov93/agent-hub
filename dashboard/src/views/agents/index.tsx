@@ -35,6 +35,7 @@ import {
   useRefreshDiscoveryMutation,
   useSetOverrideMutation,
   useStateQuery,
+  useQuotaQuery,
 } from "@/lib/queries"
 import { breakerFor, overrideFor } from "@/lib/badges"
 import { formatLatency, formatModel } from "@/lib/format"
@@ -73,6 +74,7 @@ export function AgentsView() {
 
   const stateQuery = useStateQuery()
   const configQuery = useConfigQuery()
+  const quotaQuery = useQuotaQuery()
   const refreshAgents = useRefreshAgentsMutation()
   const refreshDiscovery = useRefreshDiscoveryMutation()
   const setOverride = useSetOverrideMutation()
@@ -85,6 +87,7 @@ export function AgentsView() {
     jobs: stateQuery.data?.jobs ?? [],
     events: stateQuery.data?.events ?? [],
     config: configQuery.data ?? null,
+    quota: quotaQuery.data?.agents ?? [],
   }
 
   const setSearchParams = React.useCallback(

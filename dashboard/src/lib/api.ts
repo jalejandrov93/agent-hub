@@ -23,11 +23,13 @@ import {
   CloudActivitiesResponse,
   CloudSourceCacheEntry,
   JulesCheckResponse,
+  AgentsQuotaResponse,
 } from "@shared"
 import type {
   StateResponseT,
   ConfigResponseT,
   MetricsResponseT,
+  AgentsQuotaResponseT,
   ProposalT,
   LearningT,
   LearningInputT,
@@ -103,6 +105,10 @@ export function getConfig(): Promise<ConfigResponseT> {
 
 export function getMetrics(): Promise<MetricsResponseT> {
   return fetchJson(MetricsResponse, "/api/metrics")
+}
+
+export function getQuota(): Promise<AgentsQuotaResponseT> {
+  return fetchJson(AgentsQuotaResponse, "/api/quota")
 }
 
 const ProposalsPayload = z.object({ proposals: z.array(Proposal) })

@@ -33,6 +33,7 @@ test('the server boots over stdio and exposes the full tool set', async () => {
       tools.map((t) => t.name).sort(),
       [
         'agents_metrics',
+        'agents_quota',
         'agents_status',
         'delegate',
         'job_cancel',

@@ -56,6 +56,8 @@ agents_status → route → delegate → job_wait / job_status → job_result �
    pass it to `delegate`. When the choice matters and the pair has history, call
    `agents_metrics` first (`groupBy` optional) — success rate, p50/p95 latency and error kinds
    per agent/model/mode/taskType beat a guess.
+   
+   **IMPORTANT**: Before delegating, check `agents_quota` (or the `quota` annotation on `route`'s returned agents). If a chosen agent is exhausted, TELL THE USER with the reset time instead of delegating to it. agent-hub does not skip exhausted agents automatically — the human decides whether to switch agents, wait, or upgrade.
 3. `delegate({agent, model, task, cwd, mode?, timeoutS?, title?, variant?, taskType?})` — `agent` is
    `'agy'|'opencode'|'copilot'`. Returns `{jobId, status:'queued'}` immediately. `task` must
    name the output shape and a line budget (see Prompt-shaping below). `mode:'write'` requires

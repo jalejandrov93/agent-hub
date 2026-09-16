@@ -108,6 +108,44 @@ export const JobRecord = z
   })
   .passthrough()
 
+export const QuotaWindow = z
+  .object({
+    id: z.string(),
+    label: z.string(),
+    usedPercent: nullableNumber,
+    usageKnown: z.boolean(),
+    resetsAt: nullableString,
+    windowMinutes: nullableNumber,
+  })
+  .passthrough()
+
+export const QuotaInfo = z
+  .object({
+    provider: z.string().optional(),
+    windows: z.array(QuotaWindow).optional(),
+    exhausted: z.boolean().optional(),
+    nextResetAt: nullableString,
+    dataConfidence: z.string().optional(),
+    fetchedAt: z.string().optional(),
+    note: nullableString,
+    quotaUnavailableReason: nullableString,
+  })
+  .passthrough()
+
+export const AgentQuotaRow = z
+  .object({
+    agent: z.string(),
+    model: z.string(),
+    quota: QuotaInfo.nullable().optional(),
+  })
+  .passthrough()
+
+export const AgentsQuotaResponse = z
+  .object({
+    agents: z.array(AgentQuotaRow),
+  })
+  .passthrough()
+
 export const AgentStatusRow = z
   .object({
     agent: z.string(),
@@ -121,6 +159,7 @@ export const AgentStatusRow = z
     dataPolicy: nullableString,
     binPath: nullableString,
     cliVersion: nullableString,
+    quota: QuotaInfo.nullable().optional(),
   })
   .passthrough()
 
@@ -159,6 +198,7 @@ export const ChainStep = z.lazy(() =>
       model: z.string(),
       mode: z.string().optional(),
       parallelWith: ChainStep.optional(),
+      quota: QuotaInfo.nullable().optional(),
     })
     .passthrough()
 )

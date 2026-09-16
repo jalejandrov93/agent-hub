@@ -19,6 +19,7 @@ vi.mock("@/lib/api", () => ({
   getMetrics: vi.fn(),
   getProposals: vi.fn(),
   getLearnings: vi.fn(),
+  getQuota: vi.fn(),
   refreshAgents: vi.fn(),
   refreshDiscovery: vi.fn(),
   setOverride: vi.fn(),
@@ -110,6 +111,7 @@ describe("AgentsView", () => {
     vi.mocked(api.refreshAgents).mockResolvedValue({ results: [] })
     vi.mocked(api.refreshDiscovery).mockResolvedValue({})
     vi.mocked(api.setOverride).mockResolvedValue({})
+    vi.mocked(api.getQuota).mockResolvedValue({ agents: [] })
   })
 
   it("with filter=unhealthy hides ready rows and keeps unhealthy ones", async () => {
