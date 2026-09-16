@@ -26,6 +26,7 @@ export function paths(env = process.env) {
     // Per-account /sources cache. Not credentials, so default mode is fine.
     sourcesCacheFile: path.join(home, 'sources-cache.json'),
     learningsFile: path.join(home, 'learnings.json'),
+    quotaCacheFile: path.join(home, 'quota-cache.json'),
     runsDir: path.join(home, 'runs'),
     locksDir: path.join(home, 'runs', '.locks'),
   }

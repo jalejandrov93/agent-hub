@@ -9,6 +9,7 @@ import { reconcileOrphans, listJobs, readResult, responsePath } from './jobstore
 import { agentsStatusTool, routeTool, knownTaskTypes } from './tools/agents.mjs'
 import { delegateTool, jobWaitTool, jobStatusTool, jobResultTool, jobCancelTool, jobReplyTool } from './tools/jobs.mjs'
 import { julesDelegateTool, julesSourcesTool, julesCheckTool, julesSessionsTool, julesAccountsTool, julesSchedulesTool } from './tools/jules.mjs'
+import { agentsQuotaTool } from './tools/agents.mjs'
 import { resumeRemoteJobs } from './cloud/runner.mjs'
 import { metricsTool } from './tools/insights.mjs'
 import { learningProposeTool } from './tools/learnings.mjs'
@@ -17,6 +18,7 @@ import {
   TASK_TYPES,
   LEARNING_TEXT_MAX,
   AgentStatusRow,
+  AgentQuotaRow,
   RouteResult,
   DelegateResponse,
   JobRecord,
@@ -42,6 +44,7 @@ const log = (...args) => console.error('[agent-hub]', ...args)
 // changing the shared schemas.mjs contracts other consumers (the dashboard)
 // rely on.
 const AgentsStatusResponse = z.object({ agents: z.array(AgentStatusRow) }).passthrough()
+const AgentsQuotaResponseWrapper = z.object({ agents: z.array(AgentQuotaRow) }).passthrough()
 const LearningProposeResponse = z.object({ learning: Learning, note: z.string() }).passthrough()
 
 const ok = (payload, structuredContent) => ({
@@ -77,6 +80,21 @@ const taskTypeArg = z
 
 export function buildServer() {
   const server = new McpServer({ name: 'agent-hub', version: VERSION })
+
+  server.registerTool(
+    'agents_quota',
+    {
+      title: 'Agent quota usage',
+      description: 'Read-only view of the current quota usage for agents, reflecting CodexBar status.',
+      inputSchema: { refresh: z.boolean().optional().describe('Bypass the 5-minute cache and fetch live.') },
+      outputSchema: AgentsQuotaResponseWrapper,
+      annotations: { readOnlyHint: true, openWorldHint: true, idempotentHint: true },
+    },
+    guard(
+      ({ refresh }) => agentsQuotaTool({ refresh: !!refresh, env: process.env }),
+      (agents) => ({ agents })
+    )
+  )
 
   server.registerTool(
     'agents_status',
