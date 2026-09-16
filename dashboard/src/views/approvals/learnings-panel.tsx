@@ -100,8 +100,15 @@ export function LearningsPanel() {
     { key: "scope", header: "Scope", cell: (learning) => scopeLabel(learning) },
     {
       key: "text",
+      // The TableCell primitive sets whitespace-nowrap and white-space is
+      // inherited, so the span must re-enable wrapping for itself: without it
+      // a long learning runs across the Status and Actions columns and pushes
+      // Approve/Reject out of reach.
       header: "Text",
-      cell: (learning) => <span className="block max-w-md">{learning.text}</span>,
+      className: "align-top",
+      cell: (learning) => (
+        <span className="block max-w-md whitespace-normal break-words">{learning.text}</span>
+      ),
     },
     {
       key: "source",
