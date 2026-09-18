@@ -113,6 +113,24 @@ function unwrapHandle(value) {
 }
 
 /**
+ * A dispatch result that carries a jobId but no handle protocol (bare job
+ * record, or {job} without abort) is a PENDING execution, never a final
+ * result. Live validation proved the old fallthrough marked a freshly-queued
+ * record SUCCEEDED. Wrap it as a minimal handle so it goes through
+ * waitForHandleTerminal like everything else; an already-terminal record
+ * resolves immediately there.
+ */
+function pendingJobHandle(value) {
+  if (!value || typeof value !== 'object') return null
+  const jobId =
+    (typeof value.jobId === 'string' && value.jobId) ||
+    (value.job && typeof value.job.jobId === 'string' && value.job.jobId) ||
+    null
+  if (!jobId) return null
+  return { jobId }
+}
+
+/**
  * Resolves a fanout `items` expression without `new Function`/`eval`.
  * Array => as-is; string => C1.1 DSL value expression evaluated against
  * current step states (must yield an array); otherwise falls back to the
@@ -255,9 +273,9 @@ async function executeNode({
         dispatchPromise.catch(() => {})
         adoptHarness(dispatched)
 
-        const handle = unwrapHandle(dispatched)
+        const handle = unwrapHandle(dispatched) ?? pendingJobHandle(dispatched)
         if (!handle) {
-          // Legacy dispatch (valor plano): el resultado ya está aquí.
+          // Legacy dispatch (valor plano, sin jobId): el resultado ya está aquí.
           result = dispatched
         } else {
           // C1.1: espera el record terminal REAL con el presupuesto restante
@@ -318,7 +336,7 @@ async function executeNode({
               env,
             })
 
-            const childHandle = unwrapHandle(childRes)
+            const childHandle = unwrapHandle(childRes) ?? pendingJobHandle(childRes)
             adoptHarness(childRes)
             let finalChild = childRes
             if (childHandle) {

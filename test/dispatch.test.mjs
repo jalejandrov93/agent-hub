@@ -547,3 +547,11 @@ test('reserva honesta: token stale → error limpio (locked), nunca robo', async
   }
 })
 
+
+test('computeDispatchKey scopes by workflowId without breaking the legacy hash', () => {
+  const legacy = computeDispatchKey({ task: 'foo', cwd: '/bar', taskType: 'triage', workflowStep: 'step-1' })
+  const same = computeDispatchKey({ task: 'foo', cwd: '/bar', taskType: 'triage', workflowStep: 'step-1', workflowId: null })
+  const other = computeDispatchKey({ task: 'foo', cwd: '/bar', taskType: 'triage', workflowStep: 'step-1', workflowId: 'wf-2' })
+  assert.equal(legacy, same, 'omitted workflowId keeps the exact legacy hash')
+  assert.notEqual(legacy, other, 'same step in another workflow must not share a job')
+})

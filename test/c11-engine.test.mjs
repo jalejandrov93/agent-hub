@@ -236,3 +236,41 @@ test('C1.1 anti-robo: resume con dueño vivo y lease fresca NO re-ejecuta', asyn
   assert.deepEqual(dispatched, [], 'nadie re-ejecutó nada')
   closeDb(env)
 })
+
+test('C1.1 regresión live: record queued sin handle espera al terminal real, no marca succeeded', async () => {
+  const home = tmpHome()
+  const env = { AGENT_HUB_HOME: home }
+  const { createJob, updateResult } = await import('../src/jobstore.mjs')
+  // Job real en queued, como lo devuelve startRemoteJob al crear la sesión.
+  const job = createJob({ agent: 'jules', model: 'jules', task: 't', cwd: null, title: 't', mode: 'write', env })
+  let reads = 0
+  const dispatchFn = async () => ({ ...job })
+
+  const workflow = {
+    id: 'wf-c11-bare-record',
+    name: 'bare record test',
+    nodes: [{ id: 'step1', type: 'delegate', task: 'work', maxAttempts: 1, timeoutS: 30 }],
+  }
+
+  const { readResult } = await import('../src/jobstore.mjs')
+  const runPromise = runWorkflow({
+    workflow,
+    env,
+    dispatchFn,
+    readResultFn: (id) => { reads++; return readResult(id, env) },
+    pollIntervalMs: 5,
+  })
+
+  // Mientras sigue queued, el nodo no puede estar succeeded.
+  await new Promise((r) => setTimeout(r, 80))
+  const dbCtx = getDb(env)
+  const midRow = getWorkflowNode(dbCtx, 'wf-c11-bare-record', 'step1')
+  assert.notEqual(midRow.status, NODE_STATUS.SUCCEEDED, 'record queued no debe marcar succeeded')
+  assert.ok(reads > 1, 'el engine debe estar observando el record, no dando por hecho el resultado')
+
+  updateResult(job.jobId, { status: 'succeeded' }, env)
+  const result = await runPromise
+  assert.equal(result.status, 'succeeded')
+  assert.equal(result.nodes.step1.status, NODE_STATUS.SUCCEEDED)
+  closeDb(env)
+})

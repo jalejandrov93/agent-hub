@@ -124,11 +124,15 @@ const inFlightDispatches = new Map()
 const recentDispatches = new Map()
 
 /**
- * Computes the deterministic dispatchKey: sha256(task+cwd+taskType+workflowStep)
+ * Computes the deterministic dispatchKey: sha256(task+cwd+taskType+workflowStep[+workflowId]).
+ * workflowId scopes the key to one workflow run: two different workflows with
+ * an identical step must NOT share a job (live validation showed a re-run
+ * reusing another run's terminal record and "succeeding" in 0s). Omitted
+ * workflowId keeps the exact legacy hash (backward compatible).
  */
-export function computeDispatchKey({ task, cwd, taskType, workflowStep } = {}) {
+export function computeDispatchKey({ task, cwd, taskType, workflowStep, workflowId = null } = {}) {
   const hash = crypto.createHash('sha256')
-  hash.update(`${task ?? ''}${cwd ?? ''}${taskType ?? ''}${workflowStep ?? ''}`)
+  hash.update(`${task ?? ''}${cwd ?? ''}${taskType ?? ''}${workflowStep ?? ''}${workflowId ?? ''}`)
   return hash.digest('hex')
 }
 
@@ -330,6 +334,9 @@ export async function dispatch({
   mode = 'read',
   workflowStep = null,
   dispatchKey = null,
+  // Workflow scoping for the idempotency key (see computeDispatchKey).
+  // The engine passes workflow_id; accept workflowId too for direct callers.
+  workflowId = null,
   attempt = 1,
   parentExecutionId = null,
   rootExecutionId = null,
@@ -375,7 +382,8 @@ export async function dispatch({
   cancelJobFn = defaultCancelJob,
   ...restDeps
 } = {}) {
-  const key = dispatchKey ?? computeDispatchKey({ task, cwd, taskType, workflowStep })
+  const resolvedWorkflowId = workflowId ?? restDeps.workflowId ?? restDeps.workflow_id ?? null
+  const key = dispatchKey ?? computeDispatchKey({ task, cwd, taskType, workflowStep, workflowId: resolvedWorkflowId })
   // Harness profile + effective wait contract, resolved once per dispatch.
   // An explicit waitMode always wins over every profile default.
   const profile = resolveHarness({ explicit: harness, env, clientHint })
