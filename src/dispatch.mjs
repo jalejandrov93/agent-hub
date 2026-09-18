@@ -11,6 +11,7 @@ import { ADAPTIVE_TIMEOUT } from './config.mjs'
 import { classifyError } from './policy/taxonomy.mjs'
 import { adapterFor as defaultAdapterFor } from './adapters/index.mjs'
 import { cancelJob as defaultCancelJob } from './jobrunner.mjs'
+import { resolveHarness, normalizeWaitMode } from './harness/registry.mjs'
 
 /** Terminal job statuses: only these count as a real terminal outcome. */
 export const TERMINAL_JOB_STATUSES = Object.freeze(['succeeded', 'failed', 'canceled'])
@@ -335,6 +336,23 @@ export async function dispatch({
   timeoutS,
   category = null,
   env = process.env,
+  // Harness wait contract: waitMode 'none' returns at create/start,
+  // 'attention' observes until terminal OR waiting/attention, 'terminal'
+  // only resolves on terminal (keeps observing past waiting states).
+  // Default comes from the harness profile when the caller passes none.
+  waitMode = undefined,
+  // Explicit harness profile id ('generic'|'claude-code'|'opencode').
+  // Priority: explicit > AGENT_HUB_HARNESS env > clientHint > generic.
+  harness = undefined,
+  // MCP client hint ('claude-code'|'opencode'|null, from clientInfo.name).
+  // Default-only: never overrides an explicit harness/env/waitMode and
+  // never decides anything security-sensitive.
+  clientHint = undefined,
+  // Local observation budget (seconds) for attention/terminal modes.
+  waitTimeoutS = null,
+  waitPollIntervalMs = 250,
+  onWaiting = null,
+  waitExecutionFn = waitExecution,
   // Injectable dependencies
   routeFn = route,
   policyForFn = policyFor,
@@ -358,8 +376,53 @@ export async function dispatch({
   ...restDeps
 } = {}) {
   const key = dispatchKey ?? computeDispatchKey({ task, cwd, taskType, workflowStep })
+  // Harness profile + effective wait contract, resolved once per dispatch.
+  // An explicit waitMode always wins over every profile default.
+  const profile = resolveHarness({ explicit: harness, env, clientHint })
+  const effectiveWaitMode = normalizeWaitMode(waitMode ?? profile.delegation.defaultWaitMode) ?? 'none'
+  // Observes a dispatch result per the effective waitMode. Single funnel:
+  // every return path below goes through here, so harness/waitMode travel
+  // on the result and 'none' keeps the historical create/start-and-return
+  // behavior byte-for-byte (plus the two additive fields).
+  const observeWithMode = async (base) => {
+    if (effectiveWaitMode === 'none') return base
+    const handle = base.__handle
+    if (!handle?.jobId) return { ...base, wait: { done: false, timedOut: true, waiting: false, jobId: base.jobId ?? null } }
+    const budgetS = Math.max(0.05, waitTimeoutS ?? 60)
+    if (effectiveWaitMode === 'attention') {
+      const outcome = await waitExecutionFn(handle, {
+        timeoutS: budgetS,
+        pollIntervalMs: waitPollIntervalMs,
+        readResultFn,
+        onWaiting,
+      })
+      return { ...base, wait: outcome }
+    }
+    // terminal: keep observing past waiting states until a terminal
+    // outcome, an abort, or the local budget expires.
+    const deadline = nowFn() + Math.max(1, budgetS) * 1000
+    let last = null
+    for (;;) {
+      const remainingS = Math.max(0.05, (deadline - nowFn()) / 1000)
+      const outcome = await waitExecutionFn(handle, {
+        timeoutS: remainingS,
+        pollIntervalMs: waitPollIntervalMs,
+        readResultFn,
+        onWaiting,
+      })
+      if (outcome?.waiting && !outcome?.aborted && nowFn() < deadline) {
+        last = outcome
+        continue
+      }
+      last = outcome
+      break
+    }
+    if (last?.waiting && nowFn() >= deadline) last = { ...last, timedOut: true }
+    return { ...base, wait: last }
+  }
   // Wraps a { job, dispatchKey, executionId, candidate } result with the
-  // C1.1 execution handle (compat: old fields untouched).
+  // C1.1 execution handle (compat: old fields untouched) plus the harness
+  // wait contract, then observes per waitMode (none = return immediately).
   const withHandle = (result, candidateForRemote) => {
     const remoteFlag = Boolean(
       candidateForRemote?.agent === 'jules' ||
@@ -373,13 +436,16 @@ export async function dispatch({
       cancelJobFn,
       isRemote: remoteFlag,
     })
-    return {
+    const base = {
       ...result,
       jobId: handle.jobId,
       sessionId: handle.sessionId,
       abort: (...args) => handle.abort(...args),
       __handle: handle,
+      harness: profile.id,
+      waitMode: effectiveWaitMode,
     }
+    return observeWithMode(base)
   }
 
   // 1. Check recent runs for existing job with same dispatchKey
@@ -545,6 +611,8 @@ export async function dispatch({
           parent_execution_id: parentExecutionId,
           root_execution_id: rootExecId,
           env,
+          harness: profile.id,
+          waitMode: effectiveWaitMode,
         })
         recentDispatches.set(key, { job: adoptedJob, timestamp: nowFn() })
         return withHandle({
@@ -654,6 +722,9 @@ export async function dispatch({
           resumed: activeCtx.resumed,
           env,
           ...restDeps,
+          // Resolved contract always wins over caller extras.
+          harness: profile.id,
+          waitMode: effectiveWaitMode,
         })
 
         reservationAdopted = true
