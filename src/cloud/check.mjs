@@ -47,6 +47,43 @@ async function collectActivities({ client, apiKey, sessionId, pageSize }) {
  * 'running', finishRemoteJob finalizes it so the job stops being 'running'
  * forever and job_result returns the real answer.
  */
+export function computeAttention({ state, activities = [], record } = {}) {
+  const isWaiting = state === 'PAUSED' || (typeof state === 'string' && state.startsWith('AWAITING_'))
+  const attentionRequired = Boolean(isWaiting)
+
+  let attentionReason = null
+  let recommendedAction = null
+  let canAutoResolve = false
+
+  if (state === 'AWAITING_USER_FEEDBACK') {
+    attentionReason = 'user_feedback'
+    recommendedAction = 'send_message'
+    canAutoResolve = false
+  } else if (state === 'AWAITING_PLAN_APPROVAL') {
+    attentionReason = 'plan_approval'
+    recommendedAction = 'approve_plan'
+    canAutoResolve = true
+  } else if (state === 'PAUSED') {
+    attentionReason = 'paused'
+    recommendedAction = null
+    canAutoResolve = false
+  }
+
+  const interactionCount = Array.isArray(activities)
+    ? activities.filter((a) => a?.userMessaged != null || a?.planApproved != null).length
+    : 0
+  const recordedAttempts = record?.remote?.attempts ?? record?.turnDepth ?? 0
+  const attempts = Math.max(recordedAttempts, interactionCount)
+
+  return {
+    attentionRequired,
+    attentionReason,
+    recommendedAction,
+    canAutoResolve,
+    attempts,
+  }
+}
+
 export async function checkRemoteSession({
   jobId,
   sessionId,
@@ -61,6 +98,7 @@ export async function checkRemoteSession({
   getAccountSecretFn = defaultGetAccountSecret,
   listAccountsFn = defaultListAccounts,
   activityPageSize = 100,
+  enrich = false,
 } = {}) {
   if (!jobId && !sessionId) {
     throw new Error('checkRemoteSession requires a jobId or a sessionId')
@@ -173,7 +211,7 @@ export async function checkRemoteSession({
     }
   }
 
-  return {
+  const baseResult = {
     jobId: resolvedJobId,
     sessionId: resolvedSessionId,
     state,
@@ -185,4 +223,13 @@ export async function checkRemoteSession({
     recovered,
     terminal,
   }
+
+  if (enrich) {
+    return {
+      ...baseResult,
+      ...computeAttention({ state, activities, record: resolvedJob }),
+    }
+  }
+
+  return baseResult
 }

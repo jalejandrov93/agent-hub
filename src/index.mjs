@@ -8,7 +8,8 @@ import { paths } from './config.mjs'
 import { reconcileOrphans, listJobs, readResult, responsePath } from './jobstore.mjs'
 import { agentsStatusTool, routeTool, knownTaskTypes } from './tools/agents.mjs'
 import { delegateTool, jobWaitTool, jobStatusTool, jobResultTool, jobCancelTool, jobReplyTool } from './tools/jobs.mjs'
-import { julesDelegateTool, julesSourcesTool, julesCheckTool, julesSessionsTool, julesAccountsTool, julesSchedulesTool } from './tools/jules.mjs'
+import { julesDelegateTool, julesSourcesTool, julesCheckTool, julesSessionsTool, julesAccountsTool, julesSchedulesTool, julesInteractTool } from './tools/jules.mjs'
+import { computeAttention } from './cloud/check.mjs'
 import { agentsQuotaTool } from './tools/agents.mjs'
 import { resumeRemoteJobs } from './cloud/runner.mjs'
 import { metricsTool } from './tools/insights.mjs'
@@ -25,6 +26,7 @@ import {
   MetricsResponse,
   Learning,
   JulesCheckResponse,
+  JulesInteractResponse,
   AgentQuotaRow,
   JulesSessionsResponse,
   JulesSourcesResponse,
@@ -352,7 +354,33 @@ export function buildServer() {
       outputSchema: JulesCheckResponse,
       annotations: { readOnlyHint: false, openWorldHint: true, idempotentHint: true },
     },
-    guard(({ jobId, sessionId }) => julesCheckTool({ jobId, sessionId }))
+    guard(async ({ jobId, sessionId }) => {
+      const check = await julesCheckTool({ jobId, sessionId, enrich: true })
+      if (check.attentionRequired !== undefined) return check
+      return {
+        ...check,
+        ...computeAttention({ state: check.state, record: check }),
+      }
+    })
+  )
+
+  server.registerTool(
+    'jules_interact',
+    {
+      title: 'Interact with a Jules session',
+      description:
+        'Send a message or approve a plan for an active Jules session. Only action "reply" (requires message) and "approve_plan" ' +
+        'are supported. Jules runs remotely on Google infrastructure and does NOT support remote pause, resume, or cancel.',
+      inputSchema: {
+        jobId: z.string().min(1).optional().describe('Local jobId whose remote.sessionId should receive the interaction.'),
+        sessionId: z.string().min(1).optional().describe('A bare Jules session id.'),
+        action: z.enum(['reply', 'approve_plan']).describe('Interaction action: reply (requires message) or approve_plan.'),
+        message: z.string().min(1).optional().describe('The reply message text. Required when action is reply.'),
+      },
+      outputSchema: JulesInteractResponse,
+      annotations: { readOnlyHint: false, openWorldHint: true },
+    },
+    guard(({ jobId, sessionId, action, message }) => julesInteractTool({ jobId, sessionId, action, message }))
   )
 
   server.registerTool(
