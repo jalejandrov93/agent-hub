@@ -13,7 +13,8 @@ async function run() {
     case 'mcp':
     case undefined: {
       process.argv = [process.argv[0], process.argv[1], ...rest]
-      await import(path.join(SRC, 'index.mjs'))
+      const { main } = await import(path.join(SRC, 'index.mjs'))
+      await main()
       break
     }
     case 'hook': {
@@ -35,7 +36,8 @@ async function run() {
     }
     case 'selftest': {
       process.argv = [process.argv[0], process.argv[1], '--selftest']
-      await import(path.join(SRC, 'index.mjs'))
+      const { main } = await import(path.join(SRC, 'index.mjs'))
+      await main()
       break
     }
     default: {

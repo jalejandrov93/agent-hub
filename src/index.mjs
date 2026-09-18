@@ -808,7 +808,11 @@ async function main() {
 }
 
 // Importing this module (e.g. listMcpTools() for GET /api/tools) must be
-// side-effect-free: main() runs only when node executes this file directly.
+// side-effect-free: main() runs only when node executes src/index.mjs
+// directly (dev convenience) or when the bin/agent-hub dispatcher calls the
+// exported main() explicitly (it must — a bare import.meta.url comparison
+// never fires through the dispatcher, since argv[1] is bin/agent-hub).
+export { main }
 const invokedDirectly =
   process.argv[1] != null && path.resolve(process.argv[1]) === fileURLToPath(import.meta.url)
 if (invokedDirectly) {
