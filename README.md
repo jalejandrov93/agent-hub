@@ -280,7 +280,8 @@ result is a pull request, never a change to your `cwd`. That difference drives
 every design decision below.
 
 Jules is reachable only through its own tools (`jules_delegate`,
-`jules_sources`, `jules_check`, `jules_sessions`, `jules_interact`). It is deliberately absent
+`jules_sources`, `jules_check`, `jules_sessions`, `jules_interact`,
+`jules_wait`, `jules_supervise`). It is deliberately absent
 from the delegation map, so `route` never picks it and `delegate` cannot reach
 it — you get a cloud session only when you ask for one.
 
@@ -342,9 +343,12 @@ completions:
 
 Post-interaction rule: `jules_interact` → observe with `jules_wait` (or
 `jules_check`), never `job_wait` alone. Continuous supervision belongs to
-the future `jules_supervise` (B4), which will own observation through a
+`jules_supervise` (B4), which owns observation through a
 `remote.watch = {owner, generation}` lease so two watchers never drive the
-same session.
+same session: it loops observe → decide → interact → resume-observation,
+auto-replies only through 6 hard gates with `maxAutoReplies=2` counted on
+`autoReplyCount` (never `turnDepth`), and escalates anything else as
+`REQUEST_USER`. `PAUSED` is never approved/replied.
 
 **Several accounts.** Quotas are per Jules account, so agent-hub can hold more
 than one. Add them in the dashboard; they live in `accounts.json` under
@@ -531,6 +535,7 @@ read jobs from a disposable worktree when that matters.
 | `jules_sessions` | `{limit?, state?, account?}` | Lists sessions straight from the Jules API, newest first, each with the local `jobId` when this machine has one and `null` when it does not. Without `account` it merges every enabled account, tags each session with its `accountId`, and reports an account that fails in `accountErrors` without failing the call. The recovery path when the local record is gone. |
 | `jules_accounts` | `{}` | The configured Jules accounts, read-only: masked keys (`keyLast4` only), rolling 24-hour and concurrent usage, and each account's source-cache status. Accounts are created and edited in the dashboard. |
 | `jules_schedules` | `{}` | The recurring Jules tasks, read-only, with their next run and last result. Schedules are created and edited in the dashboard. |
+| `jules_supervise` | `{jobId?, sessionId?, policy?, timeoutS?}` | Supervised autonomy for a Jules session: acquires the `remote.watch` lease and loops observe → decide → interact → resume-observation. Auto-approves plans and auto-replies feedback only through hard gates with `maxAutoReplies=2` (on `autoReplyCount`); anything ambiguous returns attention for a human (`REQUEST_USER`). Outcomes: `terminal`, `attention`, `paused`, `timeout`, `budget_exhausted`. |
 | `learning_propose` | `{text, agent?, model?, taskType?, sourceJobId?}` | Records a gotcha as **pending**; a human must approve it in the dashboard before it is injected into a prompt. Returns `{learning, note}`. |
 
 Every tool also declares a zod `outputSchema` and returns the same payload as
