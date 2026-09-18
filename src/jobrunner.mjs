@@ -3,17 +3,63 @@ import { spawnDetached, runWithTimeout as defaultRunWithTimeout, killProcessGrou
 import { createJob, updateResult, appendStdout, stdoutPath, responsePath, readResult } from './jobstore.mjs'
 import { appendEvent } from './eventlog.mjs'
 import { adapterFor as defaultAdapterFor } from './adapters/index.mjs'
-import { checkWriteAllowed, acquireWriteLock, releaseWriteLock } from './worktree.mjs'
-import { resolveVariant, KILL_GRACE_S } from './config.mjs'
+import { checkWriteAllowed, acquireWriteLock, releaseWriteLock, heartbeatWriteLock, LEASE_TTL_MS_DEFAULT, adoptWriteLock } from './worktree.mjs'
+import { resolveVariant, KILL_GRACE_S, SANDBOX } from './config.mjs'
+import { resolveSandboxProfile, filterEnv, sandboxTelemetry } from './sandbox.mjs'
 import { resolveEffectiveTimeoutS as defaultResolveEffectiveTimeoutS } from './timeouts.mjs'
 import { selectLearnings as defaultSelectLearnings, augmentTask as defaultAugmentTask } from './learnings.mjs'
 import { takeSnapshot as defaultTakeSnapshot, diffSnapshots as defaultDiffSnapshots, formatViolation as defaultFormatViolation } from './readguard.mjs'
 import { startRemoteJob as defaultStartRemoteJob } from './cloud/runner.mjs'
 
-// jobId -> { pgid } for jobs still running in THIS process. Used by
-// cancelJob for an immediate kill; reconcileOrphans (jobstore.mjs) covers
-// jobs left running by a process that died without ever calling cancelJob.
+// jobId -> { pgid, leaseToken, heartbeatTimer, leaseTtlMs } for jobs still
+// running in THIS process. Used by cancelJob for an immediate kill; the
+// leaseToken lets cancel/finish release ONLY the lease this job acquired —
+// never a new holder's lease after a reclaim. reconcileOrphans
+// (jobstore.mjs) covers jobs left running by a process that died without
+// ever calling cancelJob.
 const active = new Map()
+
+/** Lease TTL for a write job's lock: explicit opt wins, then
+ * AGENT_HUB_LEASE_TTL_MS, then the worktree default. */
+export function resolveLeaseTtlMs(env = process.env, override) {
+  const n = Number(override ?? env?.AGENT_HUB_LEASE_TTL_MS)
+  return Number.isFinite(n) && n > 0 ? n : LEASE_TTL_MS_DEFAULT
+}
+
+function stopHeartbeat(jobId) {
+  const entry = active.get(jobId)
+  if (entry?.heartbeatTimer) {
+    clearInterval(entry.heartbeatTimer)
+    entry.heartbeatTimer = null
+  }
+}
+
+/**
+ * While a write job runs, refresh its lease every ttlMs/3 so a long job
+ * never loses its lock mid-run. If the lease was reclaimed by someone else
+ * (heartbeat returns false — e.g. this process was paused past expiry), the
+ * timer stops itself: beating a dead lease is pointless, and the terminal
+ * release below (token-guarded) will correctly no-op instead of deleting the
+ * new holder's lease.
+ */
+function startHeartbeat({ jobId, cwd, token, ttlMs, env }) {
+  const intervalMs = Math.min(ttlMs, Math.max(50, Math.floor(ttlMs / 3)))
+  const timer = setInterval(() => {
+    let ok = false
+    try {
+      ok = heartbeatWriteLock({ cwd, token, env, ttlMs })
+    } catch {
+      ok = false
+    }
+    if (!ok) clearInterval(timer)
+  }, intervalMs)
+  if (typeof timer.unref === 'function') timer.unref()
+  const entry = active.get(jobId)
+  if (entry) entry.heartbeatTimer = timer
+  else active.set(jobId, { heartbeatTimer: timer })
+}
+// Emit the compatibility-sandbox warning once per process, not per job.
+let _warnedCompatibility = false
 
 function summarize(text, max = 300) {
   if (!text) return ''
@@ -59,6 +105,20 @@ export function startJob({
   requirePlanApproval,
   automationMode,
   startRemoteJobFn = defaultStartRemoteJob,
+  // Lease TTL for this job's write lock (ms). Defaults to
+  // AGENT_HUB_LEASE_TTL_MS / LEASE_TTL_MS_DEFAULT via resolveLeaseTtlMs.
+  leaseTtlMs,
+  // A1 dispatch / C0 provenance fields
+  dispatchKey,
+  executionId,
+  parentExecutionId,
+  rootExecutionId,
+  attempt,
+  workflow_id,
+  step_id,
+  reservationToken,
+  adoptWriteLockFn = adoptWriteLock,
+  acquireWriteLockFn = acquireWriteLock,
 }) {
   // Resolved BEFORE anything else — including learnings/timeout/createJob —
   // because a remote adapter (Jules) edits a branch on GitHub via its own
@@ -88,6 +148,13 @@ export function startJob({
       resolveEffectiveTimeoutSFn,
       selectLearningsFn,
       augmentTaskFn,
+      dispatchKey,
+      executionId,
+      parentExecutionId,
+      rootExecutionId,
+      attempt,
+      workflow_id,
+      step_id,
     })
   }
 
@@ -130,8 +197,20 @@ export function startJob({
     variant: effectiveVariant,
     sessionId,
     parentJobId,
+    dispatchKey,
+    executionId,
+    parentExecutionId,
+    rootExecutionId,
+    attempt,
+    workflow_id,
+    step_id,
   })
   appendEvent({ kind: 'job.queued', agent, model, cwd, title, jobId: job.jobId, taskType }, { env })
+
+  // Token of the lease THIS job acquired (null for read mode / remote /
+  // gate failures). Every later release/heartbeat for this job must use it,
+  // so a stale holder can never delete a new holder's lease after a reclaim.
+  let leaseToken = null
 
   if (mode === 'write') {
     const gate = checkWriteAllowed({ cwd, allowlist })
@@ -140,11 +219,23 @@ export function startJob({
       appendEvent({ kind: 'job.failed', agent, model, cwd, title, jobId: job.jobId, errorKind: 'worktree_denied', taskType, summary: gate.reason }, { env })
       return { job: readResult(job.jobId, env), done: Promise.resolve() }
     }
-    const lock = acquireWriteLock({ cwd, jobId: job.jobId, env })
-    if (!lock.acquired) {
-      updateResult(job.jobId, { status: 'failed', errorKind: 'locked', error: lock.reason }, env)
-      appendEvent({ kind: 'job.failed', agent, model, cwd, title, jobId: job.jobId, errorKind: 'locked', taskType, summary: lock.reason }, { env })
-      return { job: readResult(job.jobId, env), done: Promise.resolve() }
+    leaseTtlMs = resolveLeaseTtlMs(env, leaseTtlMs)
+    if (reservationToken) {
+      const adoption = adoptWriteLockFn({ cwd, token: reservationToken, jobId: job.jobId, env, ttlMs: leaseTtlMs })
+      if (!adoption.adopted) {
+        updateResult(job.jobId, { status: 'failed', errorKind: 'locked', error: `Reservation invalid: ${adoption.reason}` }, env)
+        appendEvent({ kind: 'job.failed', agent, model, cwd, title, jobId: job.jobId, errorKind: 'locked', taskType, summary: `Reservation invalid: ${adoption.reason}` }, { env })
+        return { job: readResult(job.jobId, env), done: Promise.resolve() }
+      }
+      leaseToken = adoption.token
+    } else {
+      const lock = acquireWriteLockFn({ cwd, jobId: job.jobId, env, ttlMs: leaseTtlMs })
+      if (!lock.acquired) {
+        updateResult(job.jobId, { status: 'failed', errorKind: 'locked', error: lock.reason }, env)
+        appendEvent({ kind: 'job.failed', agent, model, cwd, title, jobId: job.jobId, errorKind: 'locked', taskType, summary: lock.reason }, { env })
+        return { job: readResult(job.jobId, env), done: Promise.resolve() }
+      }
+      leaseToken = lock.token
     }
   }
 
@@ -154,11 +245,15 @@ export function startJob({
   // must never be judged by a snapshot it never ran against.
   const snapshot = mode === 'read' ? takeSnapshotFn(cwd) : null
 
-  // The local CLIs are third-party processes outside our control, and
-  // JULES_API_KEY is a credential agent-hub itself introduced: it must not
-  // travel to them. Nothing else is filtered.
-  const childEnv = { ...process.env }
-  delete childEnv.JULES_API_KEY
+  // The local CLIs are third-party processes outside our control. Secrets
+  // are always redacted; HOME isolation depends on the sandbox profile.
+  const sandboxProfile = resolveSandboxProfile(env.AGENT_HUB_SANDBOX_PROFILE)
+  const childEnv = filterEnv({ ...process.env }, sandboxProfile)
+
+  if (sandboxProfile === 'compatibility' && !_warnedCompatibility) {
+    _warnedCompatibility = true
+    console.warn('Agent running in compatibility sandbox: environment secrets filtered, HOME inherited. Use isolated-home for stronger credential isolation.')
+  }
 
   let child
   try {
@@ -166,13 +261,15 @@ export function startJob({
   } catch (error) {
     updateResult(job.jobId, { status: 'failed', errorKind: 'crash', error: String(error?.message ?? error) }, env)
     appendEvent({ kind: 'job.failed', agent, model, cwd, title, jobId: job.jobId, errorKind: 'crash', taskType, summary: String(error?.message ?? error) }, { env })
-    if (mode === 'write') releaseWriteLock({ cwd, env })
+    if (mode === 'write') releaseWriteLock({ cwd, token: leaseToken, jobId: job.jobId, env })
     return { job: readResult(job.jobId, env), done: Promise.resolve() }
   }
 
   updateResult(job.jobId, { status: 'running', pid: child.pid, pgid: child.pid }, env)
-  appendEvent({ kind: 'job.started', agent, model, cwd, title, jobId: job.jobId, taskType }, { env })
-  active.set(job.jobId, { pgid: child.pid })
+  const sandbox = sandboxTelemetry(childEnv, process.env, sandboxProfile)
+  appendEvent({ kind: 'job.started', agent, model, cwd, title, jobId: job.jobId, taskType, sandbox }, { env })
+  active.set(job.jobId, { pgid: child.pid, leaseToken })
+  if (mode === 'write') startHeartbeat({ jobId: job.jobId, cwd, token: leaseToken, ttlMs: leaseTtlMs, env })
 
   // Hard-kill at timeoutS + KILL_GRACE_S, not at timeoutS itself: agy is
   // given --print-timeout <timeoutS>s (see buildArgv above) and exits on its
@@ -188,8 +285,12 @@ export function startJob({
   const done = exitPromise
     .then(({ timedOut }) => finishJob({ jobId: job.jobId, agent, model, cwd, title, adapter, mode, env, timedOut, taskType, snapshot, takeSnapshotFn, diffSnapshotsFn, formatViolationFn }))
     .finally(() => {
+      stopHeartbeat(job.jobId)
       active.delete(job.jobId)
-      if (mode === 'write') releaseWriteLock({ cwd, env })
+      // Token-guarded: if this job's lease already expired and was reclaimed
+      // by another holder, the stale token no longer matches and this
+      // correctly no-ops instead of deleting the new holder's lease.
+      if (mode === 'write') releaseWriteLock({ cwd, token: leaseToken, jobId: job.jobId, env })
     })
 
   return { job: readResult(job.jobId, env), done }
@@ -334,7 +435,9 @@ export async function cancelJob(jobId, { env = process.env } = {}) {
     return updated
   }
 
-  const pgid = active.get(jobId)?.pgid ?? result.pgid
+  const entry = active.get(jobId)
+  const pgid = entry?.pgid ?? result.pgid
+  stopHeartbeat(jobId)
   if (pgid) {
     await killProcessGroup(pgid, {})
   }
@@ -343,6 +446,10 @@ export async function cancelJob(jobId, { env = process.env } = {}) {
     { env }
   )
   active.delete(jobId)
-  if (result.mode === 'write') releaseWriteLock({ cwd: result.cwd, env })
+  // Token-guarded like the done.finally above; falls back to the
+  // jobId+pid legacy check when this process never held the token (e.g. a
+  // job started before a restart), which then correctly refuses to release a
+  // lease it cannot prove it owns — the lease expires on its own instead.
+  if (result.mode === 'write') releaseWriteLock({ cwd: result.cwd, token: entry?.leaseToken, jobId, env })
   return updated
 }

@@ -120,7 +120,7 @@ test('a failing read job (CANCELED) ends up failed with errorKind and a job.fail
   assert.ok(events.some((e) => e.jobId === job.jobId && e.kind === 'job.failed'))
 })
 
-test('startJob never passes JULES_API_KEY to the spawned local CLI, but keeps the rest of the environment', async () => {
+test('startJob redacts JULES_API_KEY (and other secrets) via the sandbox filter, keeping the rest of the environment', async () => {
   const home = tmpHome()
   const { startJob } = await freshModules(home)
   const adapters = { fake: fakeAdapter(SUCCESS_SCRIPT) }
@@ -141,7 +141,7 @@ test('startJob never passes JULES_API_KEY to the spawned local CLI, but keeps th
   }
 
   assert.ok(capturedOptions.env, 'spawn must receive an explicit env')
-  assert.equal(capturedOptions.env.JULES_API_KEY, undefined)
+  assert.equal(capturedOptions.env.JULES_API_KEY, '***', 'JULES_API_KEY is redacted to *** by the sandbox filter')
   assert.equal(capturedOptions.env.PATH, process.env.PATH)
 })
 

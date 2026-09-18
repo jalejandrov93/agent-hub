@@ -13,6 +13,7 @@ export function paths(env = process.env) {
   const home = stateHome(env)
   return {
     home,
+    dbFile: path.join(home, 'agent-hub.db'),
     eventsFile: path.join(home, 'events.jsonl'),
     preflightCacheFile: path.join(home, 'preflight-cache.json'),
     discoveryFile: path.join(home, 'discovery.json'),
@@ -62,6 +63,21 @@ export const CIRCUIT_BREAKER = {
   // instead of waiting for failureThreshold within the window. 'billing'
   // (e.g. DeepSeek 402 Insufficient Balance) never clears on its own retry.
   immediateKinds: new Set(['billing']),
+}
+
+export const CIRCUIT_BREAKER_BY_CLASS = {
+  billing: { windowMs: 30 * 60 * 1000, failureThreshold: 1, immediate: true },
+  auth: { windowMs: 30 * 60 * 1000, failureThreshold: 1, immediate: true },
+  quota: { windowMs: 30 * 60 * 1000, failureThreshold: 2 },
+  timeout: { windowMs: 15 * 60 * 1000, failureThreshold: 3 },
+  transport: { windowMs: 15 * 60 * 1000, failureThreshold: 3 },
+  crash: { windowMs: 15 * 60 * 1000, failureThreshold: 2 },
+  quality: { windowMs: 15 * 60 * 1000, failureThreshold: 3 },
+  default: { windowMs: 30 * 60 * 1000, failureThreshold: 2 },
+}
+
+export function breakerKey(agent, model, klass) {
+  return klass ? `${agent}:${model}:${klass}` : `${agent}:${model}`
 }
 
 /**
@@ -118,6 +134,21 @@ export function resolveTimeoutS(agent, model) {
  * Reasoning-effort variant (minimal/low/medium/high/max) for opencode:
  * explicit override wins, then the model's MODEL_REGISTRY default, else none.
  */
+/**
+ * Sandbox configuration. 'compatibility' is the DEFAULT profile — it only
+ * redacts known secret env vars but INHERITS the real HOME directory.
+ * compatibility is NOT a security sandbox. Use 'isolated-home' or 'isolated'
+ * for stronger credential isolation (HOME points to a fresh temp dir).
+ */
+export const SANDBOX = {
+  defaultProfile: 'compatibility',
+  profiles: {
+    compatibility: { inheritHome: true, redactEnv: true },
+    'isolated-home': { inheritHome: false, redactEnv: true },
+    isolated: { inheritHome: false, redactEnv: true },
+  },
+}
+
 export function resolveVariant(agent, model, override) {
   if (override) return override
   return MODEL_REGISTRY[agent]?.[model]?.variant ?? null

@@ -1,5 +1,5 @@
 #!/usr/bin/env node
-// Dispatch: agent-hub <mcp|hook|dashboard|preflight|selftest> [...args]
+// Dispatch: agent-hub <mcp|hook|dashboard|watch|preflight|selftest> [...args]
 import path from 'node:path'
 import { fileURLToPath } from 'node:url'
 
@@ -13,7 +13,8 @@ async function run() {
     case 'mcp':
     case undefined: {
       process.argv = [process.argv[0], process.argv[1], ...rest]
-      await import(path.join(SRC, 'index.mjs'))
+      const { main } = await import(path.join(SRC, 'index.mjs'))
+      await main()
       break
     }
     case 'hook': {
@@ -28,6 +29,11 @@ async function run() {
       startDashboard({ port })
       break
     }
+    case 'watch': {
+      const { runWatchCli } = await import(path.join(SRC, 'notify', 'cli.mjs'))
+      await runWatchCli(rest)
+      break
+    }
     case 'preflight': {
       const { runPreflightCli } = await import(path.join(SRC, 'preflight-cli.mjs'))
       await runPreflightCli(rest)
@@ -35,11 +41,12 @@ async function run() {
     }
     case 'selftest': {
       process.argv = [process.argv[0], process.argv[1], '--selftest']
-      await import(path.join(SRC, 'index.mjs'))
+      const { main } = await import(path.join(SRC, 'index.mjs'))
+      await main()
       break
     }
     default: {
-      console.error(`agent-hub: unknown subcommand "${sub}". Use one of: mcp, hook, dashboard, preflight, selftest.`)
+      console.error(`agent-hub: unknown subcommand "${sub}". Use one of: mcp, hook, dashboard, watch, preflight, selftest.`)
       process.exitCode = 1
     }
   }

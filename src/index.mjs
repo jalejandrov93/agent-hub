@@ -2,34 +2,43 @@ import { McpServer, ResourceTemplate } from '@modelcontextprotocol/sdk/server/mc
 import { StdioServerTransport } from '@modelcontextprotocol/sdk/server/stdio.js'
 import { execFileSync } from 'node:child_process'
 import fs from 'node:fs'
+import path from 'node:path'
+import { fileURLToPath } from 'node:url'
 import { z } from 'zod'
 
 import { paths } from './config.mjs'
+import { initDb } from './storage/index.mjs'
 import { reconcileOrphans, listJobs, readResult, responsePath } from './jobstore.mjs'
 import { agentsStatusTool, routeTool, knownTaskTypes } from './tools/agents.mjs'
 import { delegateTool, jobWaitTool, jobStatusTool, jobResultTool, jobCancelTool, jobReplyTool } from './tools/jobs.mjs'
-import { julesDelegateTool, julesSourcesTool, julesCheckTool, julesSessionsTool, julesAccountsTool, julesSchedulesTool } from './tools/jules.mjs'
+import { julesDelegateTool, julesSourcesTool, julesCheckTool, julesSessionsTool, julesAccountsTool, julesSchedulesTool, julesInteractTool, julesWait, julesSuperviseTool } from './tools/jules.mjs'
+import { computeAttention } from './cloud/check.mjs'
 import { agentsQuotaTool } from './tools/agents.mjs'
 import { resumeRemoteJobs } from './cloud/runner.mjs'
 import { metricsTool } from './tools/insights.mjs'
 import { learningProposeTool } from './tools/learnings.mjs'
 import { scheduleStartupDiscovery, scheduleQuotaWarmup } from './startup.mjs'
+import { dispatch } from './dispatch.mjs'
 import {
   TASK_TYPES,
   LEARNING_TEXT_MAX,
   AgentStatusRow,
   RouteResult,
   DelegateResponse,
+  DispatchResponse,
   JobRecord,
   JobResultResponse,
   MetricsResponse,
   Learning,
   JulesCheckResponse,
+  JulesInteractResponse,
+  JulesWaitResponse,
   AgentQuotaRow,
   JulesSessionsResponse,
   JulesSourcesResponse,
   JulesAccountsResponse,
   JulesSchedulesResponse,
+  JulesSuperviseResponse,
 } from './schemas.mjs'
 
 const VERSION = '2.1.0'
@@ -78,10 +87,40 @@ const taskTypeArg = z
   .optional()
   .describe('Pass the same taskType used for route() — it feeds metrics, adaptive timeouts and learnings.')
 
+// Registry mirror of every tool registered in buildServer(): register()
+// appends {name, ...def} here, so listMcpTools() returns [{name, title,
+// description}] with zero drift and zero MCP connection. Populated as a
+// side effect of buildServer() only — importing this module never connects.
+const TOOLS = []
+
+/** Pure, side-effect-free snapshot of the registered MCP tools. */
+export function listMcpTools() {
+  // TOOLS fills as a side effect of buildServer(), which only registers
+  // (never connects — connect happens in main()). Lazy-build once so this
+  // stays pure to import and connect-free to call; dedupe by name so a
+  // process that also boots the real server never reports doubles.
+  if (TOOLS.length === 0) buildServer()
+  const seen = new Map()
+  for (const { name, title, description } of TOOLS) {
+    if (!seen.has(name)) seen.set(name, { name, title, description })
+  }
+  return [...seen.values()]
+}
+
 export function buildServer() {
   const server = new McpServer({ name: 'agent-hub', version: VERSION })
 
-  server.registerTool(
+  // Single source of truth for the registered MCP tools: every
+  // server.registerTool call below goes through this helper, which keeps a
+  // parallel {name, ...def} entry so GET /api/tools (and any future
+  // consumer) can list {name, title, description} with zero drift and zero
+  // MCP connection. Pure data — importing this module must never connect.
+  const register = (name, def, handler) => {
+    TOOLS.push({ name, ...def })
+    return server.registerTool(name, def, handler)
+  }
+
+  register(
     'agents_quota',
     {
       title: 'Agent quota usage',
@@ -102,7 +141,7 @@ export function buildServer() {
     )
   )
 
-  server.registerTool(
+  register(
     'agents_status',
     {
       title: 'Agent CLI health',
@@ -119,7 +158,7 @@ export function buildServer() {
     )
   )
 
-  server.registerTool(
+  register(
     'route',
     {
       title: 'Pick an agent+model for a task type',
@@ -141,7 +180,7 @@ export function buildServer() {
     guard(({ taskType, mode, includeCatalog }) => routeTool({ taskType, mode, includeCatalog: !!includeCatalog }))
   )
 
-  server.registerTool(
+  register(
     'delegate',
     {
       title: 'Delegate a task to an agent CLI',
@@ -168,11 +207,42 @@ export function buildServer() {
     )
   )
 
-  server.registerTool(
+  register(
+    'dispatch',
+    {
+      title: 'Dispatch a task through routing, policy, and reservation',
+      description:
+        'Route, reserve write lock, and execute a task with automatic policy recovery (retry, fallback). ' +
+        'Deduplicates concurrent or recent dispatches with the same dispatchKey.',
+      inputSchema: {
+        task: z.string().min(1).describe('The prompt/task text.'),
+        cwd: z.string().min(1),
+        taskType: taskTypeArg.optional(),
+        mode: modeEnum.optional().default('read'),
+        workflowStep: z.string().optional().describe('Workflow step identifier used in key derivation.'),
+        dispatchKey: z.string().optional().describe('Explicit idempotency key. Defaults to sha256(task+cwd+taskType+workflowStep).'),
+        attempt: z.number().int().positive().optional().default(1),
+        parentExecutionId: z.string().optional(),
+        rootExecutionId: z.string().optional(),
+        timeoutS: z.number().int().positive().optional(),
+      },
+      outputSchema: DispatchResponse,
+      annotations: { readOnlyHint: false, openWorldHint: true },
+    },
+    guard(({ task, taskType, cwd, mode, workflowStep, dispatchKey, attempt, parentExecutionId, rootExecutionId, timeoutS }) =>
+      dispatch({ task, taskType, cwd, mode, workflowStep, dispatchKey, attempt, parentExecutionId, rootExecutionId, timeoutS })
+    )
+  )
+
+  register(
     'job_wait',
     {
       title: 'Wait for a job to finish',
-      description: 'Poll a job until it reaches a terminal state or timeoutS (max 60s) elapses.',
+      description:
+        'Poll a job until it reaches a terminal state or timeoutS (max 60s) elapses. ' +
+        'A remote (Jules) session waiting for interaction (AWAITING_*/PAUSED) also ends the wait immediately: ' +
+        'done+waiting:true with attentionRequired, attentionReason and recommendedAction — then act via jules_interact. ' +
+        'done+timedOut:true means only the local budget elapsed; the job/session keeps running.',
       inputSchema: { jobId: jobIdArg, timeoutS: z.number().int().positive().max(60).optional().default(30) },
       outputSchema: JobRecord,
       annotations: { readOnlyHint: true, idempotentHint: true },
@@ -180,7 +250,7 @@ export function buildServer() {
     guard(({ jobId, timeoutS }) => jobWaitTool({ jobId, timeoutS }))
   )
 
-  server.registerTool(
+  register(
     'job_status',
     {
       title: 'Read a job status',
@@ -192,7 +262,7 @@ export function buildServer() {
     guard(({ jobId }) => jobStatusTool({ jobId }))
   )
 
-  server.registerTool(
+  register(
     'job_result',
     {
       title: 'Read a job result (head only)',
@@ -208,7 +278,7 @@ export function buildServer() {
     guard(({ jobId, maxLines, tailLines }) => jobResultTool({ jobId, maxLines, tailLines }))
   )
 
-  server.registerTool(
+  register(
     'job_cancel',
     {
       title: 'Cancel a running job',
@@ -220,7 +290,7 @@ export function buildServer() {
     guard(({ jobId }) => jobCancelTool({ jobId }))
   )
 
-  server.registerTool(
+  register(
     'job_reply',
     {
       title: 'Reply to a finished agy/opencode job, resuming its session',
@@ -251,7 +321,7 @@ export function buildServer() {
     guard(({ jobId, message, mode, timeoutS, title, taskType, action }) => jobReplyTool({ jobId, message, mode, timeoutS, title, taskType, action }))
   )
 
-  server.registerTool(
+  register(
     'jules_delegate',
     {
       title: 'Delegate a task to Jules (Google\'s remote coding agent)',
@@ -285,7 +355,7 @@ export function buildServer() {
     )
   )
 
-  server.registerTool(
+  register(
     'jules_sources',
     {
       title: 'List GitHub repos connected to the Jules account',
@@ -303,7 +373,7 @@ export function buildServer() {
     guard(({ account }) => julesSourcesTool({ account }))
   )
 
-  server.registerTool(
+  register(
     'jules_accounts',
     {
       title: 'List configured Jules accounts',
@@ -318,7 +388,7 @@ export function buildServer() {
     guard(() => julesAccountsTool({}))
   )
 
-  server.registerTool(
+  register(
     'jules_schedules',
     {
       title: 'List recurring Jules tasks',
@@ -334,7 +404,7 @@ export function buildServer() {
     guard(() => julesSchedulesTool({}))
   )
 
-  server.registerTool(
+  register(
     'jules_check',
     {
       title: 'Check a Jules session live',
@@ -352,10 +422,64 @@ export function buildServer() {
       outputSchema: JulesCheckResponse,
       annotations: { readOnlyHint: false, openWorldHint: true, idempotentHint: true },
     },
-    guard(({ jobId, sessionId }) => julesCheckTool({ jobId, sessionId }))
+    guard(async ({ jobId, sessionId }) => {
+      const check = await julesCheckTool({ jobId, sessionId, enrich: true })
+      if (check.attentionRequired !== undefined) return check
+      return {
+        ...check,
+        ...computeAttention({ state: check.state, record: check }),
+      }
+    })
   )
 
-  server.registerTool(
+  register(
+    'jules_interact',
+    {
+      title: 'Interact with a Jules session',
+      description:
+        'Send a message or approve a plan for an active Jules session. Only action "reply" (requires message) and "approve_plan" ' +
+        'are supported. Jules runs remotely on Google infrastructure and does NOT support remote pause, resume, or cancel. ' +
+        'Model A: interacting never restarts polling — after this call nothing observes the session until you do ' +
+        '(jules_wait/jules_check) or the supervisor owns it. job_wait alone will NOT see post-interaction completion.',
+      inputSchema: {
+        jobId: z.string().min(1).optional().describe('Local jobId whose remote.sessionId should receive the interaction.'),
+        sessionId: z.string().min(1).optional().describe('A bare Jules session id.'),
+        action: z.enum(['reply', 'approve_plan']).describe('Interaction action: reply (requires message) or approve_plan.'),
+        message: z.string().min(1).optional().describe('The reply message text. Required when action is reply.'),
+      },
+      outputSchema: JulesInteractResponse,
+      annotations: { readOnlyHint: false, openWorldHint: true },
+    },
+    guard(({ jobId, sessionId, action, message }) => julesInteractTool({ jobId, sessionId, action, message }))
+  )
+
+  register(
+    'jules_wait',
+    {
+      title: 'Wait locally for a Jules session to need you or finish',
+      description:
+        'Local orchestration only — the Jules API has no wait endpoint. Polls with a local budget until the session reaches ' +
+        'a terminal state (done+terminal) or a waiting state AWAITING_*/PAUSED (done+waiting, with attentionRequired, ' +
+        'attentionReason and recommendedAction — then act via jules_interact). Returns done+timedOut:false only when the ' +
+        'local budget elapsed while the session keeps working; the remote session is unaffected. ' +
+        'Never a watch daemon: one bounded wait per call; continuous supervision is the future jules_supervise.',
+      inputSchema: {
+        jobId: z.string().min(1).optional().describe('Local jobId whose remote.sessionId should be watched.'),
+        sessionId: z.string().min(1).optional().describe('A bare Jules session id.'),
+        timeoutS: z.number().int().positive().max(600).optional().default(30),
+        pollIntervalS: z.number().int().positive().max(60).optional(),
+      },
+      outputSchema: JulesWaitResponse,
+      // Observation with local side effects: checkRemoteSession persists the
+      // fresh state and may finalize the local job — readOnlyHint:false.
+      annotations: { readOnlyHint: false, openWorldHint: true, idempotentHint: true },
+    },
+    guard(({ jobId, sessionId, timeoutS, pollIntervalS }) =>
+      julesWait({ jobId, sessionId, timeoutS, intervalMs: pollIntervalS != null ? pollIntervalS * 1000 : undefined })
+    )
+  )
+
+  register(
     'jules_sessions',
     {
       title: 'List Jules sessions live from the API',
@@ -378,7 +502,48 @@ export function buildServer() {
     guard(({ limit, state, account }) => julesSessionsTool({ limit, state, account }))
   )
 
-  server.registerTool(
+  register(
+    'jules_supervise',
+    {
+      title: 'Supervise a Jules session with autonomous watch and interaction',
+      description:
+        'Autonomous watch-and-interact loop for a Jules session. Acquires the watch lease so concurrent ' +
+        'watchers observe read-only. Continuously observes the session, auto-approving plans (if enabled) ' +
+        'and classifying user feedback through hard gates across 3 levels with evidence (AUTO_REPLY: strict mechanical allowlist; ' +
+        'SAFE_CONTINUE: conditional operational blockers; REQUEST_USER: 10 escalation classes), on separate ' +
+        'budgets (maxAutoReplies/maxSafeContinues). A PAUSED session is never auto-resumed. ' +
+        'Returns with outcome: terminal (completed/failed), attention (needs human decision), paused, ' +
+        'timeout, or budget_exhausted (a budget reached).',
+      inputSchema: {
+        jobId: z.string().min(1).optional().describe('Local jobId whose remote.sessionId should be supervised.'),
+        sessionId: z.string().min(1).optional().describe('A bare Jules session id.'),
+        autoApprovePlan: z.boolean().optional().default(true).describe('Automatically approve plans when AWAITING_PLAN_APPROVAL.'),
+        autoResolveFeedback: z.boolean().optional().default(true).describe('Automatically reply to unambiguous questions when AWAITING_USER_FEEDBACK.'),
+        maxAutoReplies: z.number().int().nonnegative().optional().default(2).describe('Maximum number of auto-replies across the session.'),
+        maxSafeContinues: z.number().int().nonnegative().optional().default(3).describe('Maximum number of safe continues across the session.'),
+        pauseAfterAmbiguity: z.boolean().optional().default(true).describe('Pause and request user attention if feedback cannot be safely auto-resolved.'),
+        timeoutS: z.number().int().positive().max(600).optional().default(300).describe('Supervision timeout in seconds.'),
+        pollIntervalS: z.number().int().positive().max(60).optional().describe('Poll interval in seconds between checks.'),
+      },
+      outputSchema: JulesSuperviseResponse,
+      annotations: { readOnlyHint: false, openWorldHint: true },
+    },
+    guard(({ jobId, sessionId, autoApprovePlan, autoResolveFeedback, maxAutoReplies, maxSafeContinues, pauseAfterAmbiguity, timeoutS, pollIntervalS }) =>
+      julesSuperviseTool({
+        jobId,
+        sessionId,
+        autoApprovePlan,
+        autoResolveFeedback,
+        maxAutoReplies,
+        maxSafeContinues,
+        pauseAfterAmbiguity,
+        timeoutS,
+        pollIntervalS,
+      })
+    )
+  )
+
+  register(
     'agents_metrics',
     {
       title: 'Delegation metrics',
@@ -395,7 +560,7 @@ export function buildServer() {
     guard(({ groupBy }) => metricsTool({ groupBy }))
   )
 
-  server.registerTool(
+  register(
     'learning_propose',
     {
       title: 'Propose a learning',
@@ -607,6 +772,12 @@ async function main() {
     return
   }
 
+  try {
+    initDb()
+  } catch (error) {
+    log('initDb failed on startup:', error?.message ?? error)
+  }
+
   const changed = reconcileOrphans()
   if (changed.length > 0) log(`reconciled ${changed.length} orphaned job(s) on startup: ${changed.join(', ')}`)
 
@@ -644,7 +815,17 @@ async function main() {
   log(`ready — state dir ${paths().home}`)
 }
 
-main().catch((error) => {
-  log('fatal:', error?.message ?? error)
-  process.exitCode = 1
-})
+// Importing this module (e.g. listMcpTools() for GET /api/tools) must be
+// side-effect-free: main() runs only when node executes src/index.mjs
+// directly (dev convenience) or when the bin/agent-hub dispatcher calls the
+// exported main() explicitly (it must — a bare import.meta.url comparison
+// never fires through the dispatcher, since argv[1] is bin/agent-hub).
+export { main }
+const invokedDirectly =
+  process.argv[1] != null && path.resolve(process.argv[1]) === fileURLToPath(import.meta.url)
+if (invokedDirectly) {
+  main().catch((error) => {
+    log('fatal:', error?.message ?? error)
+    process.exitCode = 1
+  })
+}

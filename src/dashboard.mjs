@@ -7,7 +7,8 @@ import { listJobs } from './jobstore.mjs'
 import { getWorkGraph } from './workGraph.mjs'
 import { readCache, agentsStatus, pingAgent, breakerStatus } from './preflight.mjs'
 import { cancelJob } from './jobrunner.mjs'
-import { paths, DEFAULT_TIMEOUTS_S, CIRCUIT_BREAKER, PREFLIGHT_TTL_MS, WRITE_ALLOWLIST, MODEL_REGISTRY } from './config.mjs'
+import { paths, stateHome, DEFAULT_TIMEOUTS_S, CIRCUIT_BREAKER, PREFLIGHT_TTL_MS, WRITE_ALLOWLIST, MODEL_REGISTRY } from './config.mjs'
+import { initDb } from './storage/index.mjs'
 import { runDiscovery, readDiscovery, resolveAgentCli, KNOWN_AGENTS, pruneCacheForMap } from './discovery.mjs'
 import { readOverrides, setOverride, clearOverride, overrideKey } from './overrides.mjs'
 import { DELEGATION_MAP } from './router.mjs'
@@ -17,6 +18,7 @@ import { computeMetrics } from './metrics.mjs'
 import { listProposals, refreshProposals, decideProposal } from './proposals.mjs'
 import { listLearnings, proposeLearning, decideLearning, deleteLearning } from './learnings.mjs'
 import { jobResultTool } from './tools/jobs.mjs'
+import { listMcpTools } from './index.mjs'
 import { startScheduler, runScheduleNow } from './scheduler.mjs'
 import { createAccount, updateAccount, deleteAccount, setPolicy, listAccounts } from './accounts.mjs'
 import { refreshSources, readSourcesCache, normalizedSources } from './cloud/sources.mjs'
@@ -452,6 +454,15 @@ export function createServer({ env = process.env, commandRunner = runCommand, di
       agentsQuotaTool({ env })
         .then((payload) => sendJson(res, 200, { agents: payload }))
         .catch((error) => sendError(res, error))
+      return
+    }
+
+    if (url.pathname === '/api/tools' && req.method === 'GET') {
+      try {
+        sendJson(res, 200, { tools: listMcpTools() })
+      } catch (error) {
+        sendError(res, domainError(error))
+      }
       return
     }
 
@@ -1044,6 +1055,12 @@ export function createServer({ env = process.env, commandRunner = runCommand, di
 }
 
 export function startDashboard({ port = 7777, env = process.env } = {}) {
+  try {
+    initDb(stateHome(env))
+  } catch (error) {
+    console.error('[agent-hub] initDb failed:', error?.message ?? error)
+  }
+
   // "The board does not lie": drop zombie preflight-cache rows once at boot,
   // same as the MCP server's own startup path (startup.mjs). Pure fs
   // read/write — never a CLI spawn or a discovery probe, so this is safe to

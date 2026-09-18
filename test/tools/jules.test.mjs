@@ -4,7 +4,10 @@ import fs from 'node:fs'
 import path from 'node:path'
 import os from 'node:os'
 import { fileURLToPath } from 'node:url'
-import { julesDelegateTool, julesSourcesTool, julesCheckTool, julesSessionsTool, julesAccountsTool, julesSchedulesTool } from '../../src/tools/jules.mjs'
+import { julesDelegateTool, julesSourcesTool, julesCheckTool, julesSessionsTool, julesAccountsTool, julesSchedulesTool, julesInteractTool, julesWait } from '../../src/tools/jules.mjs'
+import { computeAttention } from '../../src/cloud/check.mjs'
+import { ALL_JULES_STATES, isWaitingState } from '../../src/cloud/jules/adapter.mjs'
+import { STATE_INTERVALS, intervalForState } from '../../src/cloud/poller.mjs'
 import { createAccount } from '../../src/accounts.mjs'
 import { createSchedule, updateSchedule } from '../../src/schedules.mjs'
 import { refreshSources } from '../../src/cloud/sources.mjs'
@@ -535,4 +538,209 @@ test('julesSchedulesTool tolerates a lastJobId whose record is gone', () => {
   }
   const result = julesSchedulesTool({ env, readResultFn })
   assert.equal(result.schedules[0].lastResult, null)
+})
+
+test('ALL_JULES_STATES and isWaitingState behave according to contract', () => {
+  assert.deepEqual(ALL_JULES_STATES, [
+    'QUEUED',
+    'PLANNING',
+    'AWAITING_PLAN_APPROVAL',
+    'AWAITING_USER_FEEDBACK',
+    'IN_PROGRESS',
+    'PAUSED',
+    'COMPLETED',
+    'FAILED',
+    'UNKNOWN',
+  ])
+  assert.equal(isWaitingState('AWAITING_PLAN_APPROVAL'), true)
+  assert.equal(isWaitingState('AWAITING_USER_FEEDBACK'), true)
+  assert.equal(isWaitingState('PAUSED'), true)
+  assert.equal(isWaitingState('IN_PROGRESS'), false)
+  assert.equal(isWaitingState('COMPLETED'), false)
+  assert.equal(isWaitingState('FAILED'), false)
+  assert.equal(isWaitingState('PLANNING'), false)
+  assert.equal(isWaitingState(null), false)
+})
+
+test('STATE_INTERVALS and intervalForState adhere to semantic intervals', () => {
+  assert.equal(intervalForState('QUEUED'), 5000)
+  assert.equal(intervalForState('PLANNING'), 5000)
+  assert.equal(intervalForState('IN_PROGRESS'), 5000)
+  assert.equal(intervalForState('IN_PROGRESS', 5000), 7500)
+  assert.equal(intervalForState('IN_PROGRESS', 10000), 15000)
+  assert.equal(intervalForState('IN_PROGRESS', 15000), 15000)
+  assert.equal(intervalForState('AWAITING_PLAN_APPROVAL'), 30000)
+  assert.equal(intervalForState('AWAITING_PLAN_APPROVAL', 30000), 45000)
+  assert.equal(intervalForState('AWAITING_PLAN_APPROVAL', 60000), 60000)
+  assert.equal(intervalForState('AWAITING_USER_FEEDBACK'), 30000)
+  assert.equal(intervalForState('PAUSED'), 300000)
+  assert.equal(intervalForState('PAUSED', 300000), 300000)
+})
+
+test('julesInteractTool validates actions and rejects remote pause/resume/cancel', async () => {
+  await assert.rejects(
+    () => julesInteractTool({ sessionId: 's1', action: 'pause' }),
+    /does not support remote pause/i
+  )
+  await assert.rejects(
+    () => julesInteractTool({ sessionId: 's1', action: 'resume' }),
+    /does not support remote resume/i
+  )
+  await assert.rejects(
+    () => julesInteractTool({ sessionId: 's1', action: 'cancel' }),
+    /does not support remote cancel/i
+  )
+  await assert.rejects(
+    () => julesInteractTool({ sessionId: 's1', action: 'reply' }),
+    /message is required/i
+  )
+  await assert.rejects(
+    () => julesInteractTool({ action: 'approve_plan' }),
+    /requires either jobId or sessionId/i
+  )
+})
+
+test('julesInteractTool sends message on reply and approves plan on approve_plan', async () => {
+  const sent = []
+  const approved = []
+  const client = {
+    sendMessage: async (args) => sent.push(args),
+    approvePlan: async (args) => approved.push(args),
+  }
+  const updates = []
+  const store = {
+    readResultFn: () => ({
+      jobId: 'j1',
+      turnDepth: 1,
+      remote: { sessionId: 's1', attempts: 1, pollingStoppedReason: 'awaiting_interaction' },
+    }),
+    updateResultFn: (id, patch) => updates.push({ id, patch }),
+  }
+
+  const replyRes = await julesInteractTool({
+    jobId: 'j1',
+    action: 'reply',
+    message: 'proceed with option A',
+    env: isolated({ JULES_API_KEY: 'k' }),
+    client,
+    readResultFn: store.readResultFn,
+    updateResultFn: store.updateResultFn,
+  })
+
+  assert.equal(replyRes.success, true)
+  assert.equal(replyRes.action, 'reply')
+  assert.equal(sent.length, 1)
+  assert.equal(sent[0].prompt, 'proceed with option A')
+  assert.equal(updates.length, 1)
+  assert.equal(updates[0].patch.remote.attempts, 2)
+  assert.equal(updates[0].patch.remote.pollingStoppedReason, 'awaiting_interaction',
+    'Model A: interact must NOT clear pollingStoppedReason — no watcher exists after this call')
+
+  const approveRes = await julesInteractTool({
+    sessionId: 's1',
+    action: 'approve_plan',
+    env: isolated({ JULES_API_KEY: 'k' }),
+    client,
+    listJobsFn: () => [],
+  })
+  assert.equal(approveRes.success, true)
+  assert.equal(approveRes.action, 'approve_plan')
+  assert.equal(approved.length, 1)
+  assert.equal(approved[0].sessionId, 's1')
+})
+
+test('julesWait polls until terminal or waiting state', async () => {
+  let calls = 0
+  const checkRemoteSessionFn = async () => {
+    calls++
+    if (calls === 1) return { state: 'IN_PROGRESS' }
+    return { state: 'AWAITING_PLAN_APPROVAL' }
+  }
+
+  const res = await julesWait({
+    jobId: 'j1',
+    checkRemoteSessionFn,
+    sleepFn: async () => {},
+    nowFn: () => 0,
+  })
+
+  assert.equal(res.done, true)
+  assert.equal(res.waiting, true)
+  assert.equal(res.terminal, false)
+  assert.equal(res.state, 'AWAITING_PLAN_APPROVAL')
+  assert.equal(calls, 2)
+})
+
+test('julesWait respects local timeout', async () => {
+  let now = 0
+  const res = await julesWait({
+    jobId: 'j1',
+    timeoutS: 5,
+    checkRemoteSessionFn: async () => ({ state: 'IN_PROGRESS' }),
+    sleepFn: async (ms) => {
+      now += ms
+    },
+    nowFn: () => now,
+  })
+
+  assert.equal(res.done, false)
+  assert.equal(res.timedOut, true)
+  assert.equal(res.state, 'IN_PROGRESS')
+})
+
+test('computeAttention calculates attention fields and recommended action', () => {
+  const uf = computeAttention({ state: 'AWAITING_USER_FEEDBACK', activities: [{ userMessaged: 'hi' }] })
+  assert.equal(uf.attentionRequired, true)
+  assert.equal(uf.attentionReason, 'user_feedback')
+  assert.equal(uf.recommendedAction, 'send_message')
+  assert.equal(uf.canAutoResolve, false)
+  assert.equal(uf.attempts, 1)
+
+  const pa = computeAttention({ state: 'AWAITING_PLAN_APPROVAL' })
+  assert.equal(pa.attentionRequired, true)
+  assert.equal(pa.attentionReason, 'plan_approval')
+  assert.equal(pa.recommendedAction, 'approve_plan')
+  assert.equal(pa.canAutoResolve, true)
+  assert.equal(pa.attempts, 0)
+
+  const paused = computeAttention({ state: 'PAUSED' })
+  assert.equal(paused.attentionRequired, true)
+  assert.equal(paused.attentionReason, 'paused')
+  assert.equal(paused.recommendedAction, null)
+  assert.equal(paused.canAutoResolve, false)
+
+  const comp = computeAttention({ state: 'COMPLETED' })
+  assert.equal(comp.attentionRequired, false)
+  assert.equal(comp.attentionReason, null)
+  assert.equal(comp.recommendedAction, null)
+})
+
+test('julesInteractTool tracks split intervention counters and leaves turnDepth alone', async () => {
+  const client = {
+    sendMessage: async () => {},
+    approvePlan: async () => {},
+  }
+  const updates = []
+  const store = {
+    readResultFn: () => ({
+      jobId: 'j1',
+      turnDepth: 0,
+      remote: { sessionId: 's1', attempts: 0, interventionCount: 0, autoReplyCount: 0, planApprovalCount: 0 },
+    }),
+    updateResultFn: (id, patch) => updates.push({ id, patch }),
+  }
+  const env = isolated({ JULES_API_KEY: 'k' })
+
+  await julesInteractTool({ jobId: 'j1', action: 'reply', message: 'go on', env, client, ...store })
+  const r1 = updates[0].patch.remote
+  assert.equal(r1.interventionCount, 1)
+  assert.equal(r1.autoReplyCount, 1)
+  assert.equal(r1.planApprovalCount, 0)
+  assert.equal(r1.attempts, 1, 'legacy attempts stays incremented for existing consumers')
+  assert.ok(!('turnDepth' in updates[0].patch), 'a reply must not consume conversation depth')
+
+  await julesInteractTool({ jobId: 'j1', action: 'approve_plan', env, client, ...store })
+  const r2 = updates[1].patch.remote
+  assert.equal(r2.autoReplyCount, 0, 'each interact reads fresh counters from the record')
+  assert.equal(r2.planApprovalCount, 1)
 })

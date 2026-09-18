@@ -68,11 +68,36 @@ export const RemoteInfo = z
     source: nullableString,
     startingBranch: nullableString,
     state: nullableString,
+    // When the current state was first observed (ISO timestamp). Set by the
+    // poller on a state transition; lets callers tell "waiting 30s" apart
+    // from "waiting 3h" without scanning the event log.
+    stateSince: nullableString,
+    // Last time new remote activity (not just a poll tick) was observed.
+    lastActivityAt: nullableString,
     branch: nullableString,
     prUrl: nullableString,
     activityCursor: nullableString,
     seenActivityIds: z.array(z.string()).optional(),
     lastPolledAt: nullableString,
+    // Why the local watcher stopped polling a still-live session, e.g.
+    // 'awaiting_interaction' while the remote state is AWAITING_*/PAUSED.
+    // Null while polling is active. Descriptive only — the state machine in
+    // pollUntilTerminal is what actually returns on waiting states.
+    pollingStoppedReason: nullableString,
+    // Legacy interaction counter, kept for existing records. New code uses
+    // the split counters below; attempts stays incremented for compatibility.
+    attempts: nullableNumber,
+    // Intervention counters (P0.3): turnDepth is conversation depth and must
+    // not be conflated with these. A plan approval must not consume the
+    // auto-reply budget (maxAutoReplies) and vice versa.
+    interventionCount: nullableNumber,
+    autoReplyCount: nullableNumber,
+    safeContinueCount: nullableNumber,
+    planApprovalCount: nullableNumber,
+    // B4 watch lease: observation ownership so a supervisor and a concurrent
+    // jules_wait never drive the same session (see §7 execution-contract.md).
+    watch: z.object({ owner: z.string().nullable().optional(), generation: z.number().int().nonnegative().nullable().optional() }).nullable().optional(),
+    watchGenerationCounter: nullableNumber,
   })
   .passthrough()
 
@@ -105,6 +130,21 @@ export const JobRecord = z
     timeoutSource: TimeoutSource.optional(),
     learningIds: z.array(z.string()).optional(),
     remote: RemoteInfo.optional(),
+    // C0 workflow/provenance fields — nullable optional so they don't break existing records.
+    workflow_id: z.string().nullable().optional(),
+    step_id: z.string().nullable().optional(),
+    parent_execution_id: z.string().nullable().optional(),
+    root_execution_id: z.string().nullable().optional(),
+    attempt: z.number().int().nullable().optional(),
+    remote_state: z.string().nullable().optional(),
+    quality_score: z.number().nullable().optional(),
+    verified: z.boolean().nullable().optional(),
+    judge_verdict: z.string().nullable().optional(),
+    // A1 dispatch provenance fields
+    execution_id: z.string().nullable().optional(),
+    executionId: z.string().nullable().optional(),
+    dispatch_key: z.string().nullable().optional(),
+    dispatchKey: z.string().nullable().optional(),
   })
   .passthrough()
 
@@ -290,6 +330,15 @@ export const MetricsResponse = z
   .object({ generatedAt: z.string(), groupBy: z.array(z.string()), rows: z.array(MetricsRow) })
   .passthrough()
 
+/** One MCP tool registered in buildServer() — the {name, title, description} snapshot listMcpTools() returns. */
+export const McpToolInfo = z
+  .object({ name: z.string(), title: z.string(), description: z.string() })
+  .passthrough()
+
+export const McpToolsResponse = z
+  .object({ tools: z.array(McpToolInfo) })
+  .passthrough()
+
 export const PairRef = z.object({ agent: z.string(), model: z.string() }).passthrough()
 
 export const ProposalStatus = z.enum(['pending', 'accepted', 'rejected', 'superseded'])
@@ -381,6 +430,21 @@ export const DelegateResponse = z
   })
   .passthrough()
 
+export const DispatchResponse = z
+  .object({
+    job: JobRecord,
+    dispatchKey: z.string(),
+    executionId: z.string(),
+    candidate: z
+      .object({
+        agent: z.string(),
+        model: z.string(),
+        mode: z.string().optional(),
+      })
+      .passthrough(),
+  })
+  .passthrough()
+
 export const JobResultResponse = z
   .object({
     text: z.string(),
@@ -411,6 +475,76 @@ export const JulesCheckResponse = z
     // True when a remote job wrongly marked failed/orphaned was reopened.
     recovered: z.boolean().optional(),
     terminal: z.boolean(),
+    attentionRequired: z.boolean().optional(),
+    attentionReason: z.enum(['user_feedback', 'plan_approval', 'paused']).nullable().optional(),
+    recommendedAction: z.enum(['send_message', 'approve_plan']).nullable().optional(),
+    canAutoResolve: z.boolean().optional(),
+    attempts: z.number().int().nonnegative().optional(),
+  })
+  .passthrough()
+
+export const JulesInteractResponse = z
+  .object({
+    jobId: nullableString,
+    sessionId: z.string().nullable(),
+    action: z.enum(['reply', 'approve_plan']),
+    status: z.string().optional(),
+    success: z.boolean().optional(),
+  })
+  .passthrough()
+
+/**
+ * Local orchestration result from jules_wait (NOT a remote capability — the
+ * Jules API has no wait endpoint). Same live check fields as jules_check
+ * plus the local outcome: done+terminal (session ended), done+waiting
+ * (session needs interaction — act via jules_interact), or !done+timedOut
+ * (local budget elapsed, session still working).
+ */
+export const JulesWaitResponse = z
+  .object({
+    jobId: nullableString,
+    sessionId: z.string().nullable(),
+    state: z.string(),
+    prUrl: nullableString,
+    branch: nullableString,
+    sessionUrl: nullableString,
+    lastMessage: nullableString,
+    finalized: z.boolean().optional(),
+    terminal: z.boolean(),
+    attentionRequired: z.boolean().optional(),
+    attentionReason: z.enum(['user_feedback', 'plan_approval', 'paused']).nullable().optional(),
+    recommendedAction: z.enum(['send_message', 'approve_plan']).nullable().optional(),
+    canAutoResolve: z.boolean().optional(),
+    attempts: z.number().int().nonnegative().optional(),
+    done: z.boolean(),
+    waiting: z.boolean(),
+    timedOut: z.boolean(),
+  })
+  .passthrough()
+
+/**
+ * Result from jules_supervise: the supervisor's final observation after its
+ * watch cycle ends. `outcome` says WHY it stopped: 'terminal' (session ended),
+ * 'attention' (needs human), 'paused' (PAUSED state — never auto-resumed),
+ * 'timeout' (local budget elapsed), or 'budget_exhausted' (maxAutoReplies hit).
+ */
+export const JulesSuperviseResponse = z
+  .object({
+    jobId: nullableString,
+    sessionId: z.string().nullable(),
+    state: z.string(),
+    prUrl: nullableString,
+    branch: nullableString,
+    sessionUrl: nullableString,
+    lastMessage: nullableString,
+    terminal: z.boolean(),
+    outcome: z.enum(['terminal', 'attention', 'paused', 'timeout', 'budget_exhausted']),
+    attentionRequired: z.boolean().optional(),
+    attentionReason: z.enum(['user_feedback', 'plan_approval', 'paused']).nullable().optional(),
+    recommendedAction: z.enum(['send_message', 'approve_plan']).nullable().optional(),
+    autoReplyCount: z.number().int().nonnegative().optional(),
+    safeContinueCount: z.number().int().nonnegative().optional(),
+    planApprovalCount: z.number().int().nonnegative().optional(),
   })
   .passthrough()
 

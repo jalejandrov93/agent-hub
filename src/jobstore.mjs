@@ -3,6 +3,7 @@ import path from 'node:path'
 import crypto from 'node:crypto'
 import { paths } from './config.mjs'
 import { updateJsonLocked } from './fsutil.mjs'
+import { getDb, upsertJob } from './storage/index.mjs'
 
 function ensureDir(dir) {
   fs.mkdirSync(dir, { recursive: true })
@@ -29,7 +30,7 @@ function jobDir(jobId, env = process.env) {
   return path.join(paths(env).runsDir, jobId)
 }
 
-function resultPath(jobId, env = process.env) {
+export function resultPath(jobId, env = process.env) {
   return path.join(jobDir(jobId, env), 'result.json')
 }
 
@@ -49,6 +50,39 @@ export function promptPath(jobId, env = process.env) {
 function newJobId() {
   const ts = new Date().toISOString().replace(/[:.]/g, '-')
   return `${ts}-${crypto.randomBytes(4).toString('hex')}`
+}
+
+let sqliteMirrorWarned = false
+
+function mirrorJobToDb(job, env = process.env) {
+  try {
+    const ctx = getDb(env)
+    if (!ctx || ctx.backend !== 'sqlite' || !ctx.db) {
+      if (!sqliteMirrorWarned) {
+        console.warn('[agent-hub] better-sqlite3 unavailable; skipping SQLite job mirror')
+        sqliteMirrorWarned = true
+      }
+      return
+    }
+    upsertJob(ctx, {
+      job_id: job.jobId,
+      workflow_id: job.workflow_id ?? null,
+      step_id: job.step_id ?? null,
+      parent_execution_id: job.parent_execution_id ?? null,
+      root_execution_id: job.root_execution_id ?? null,
+      attempt: job.attempt ?? null,
+      remote_state: job.remote_state ?? (job.remote?.state ?? null),
+      quality_score: job.quality_score ?? null,
+      verified: job.verified === true ? 1 : (job.verified === false ? 0 : (job.verified ?? null)),
+      judge_verdict: job.judge_verdict ?? null,
+      result_json: JSON.stringify(job),
+    })
+  } catch (error) {
+    if (!sqliteMirrorWarned) {
+      console.warn('[agent-hub] SQLite job mirror failed:', error?.message ?? error)
+      sqliteMirrorWarned = true
+    }
+  }
 }
 
 /**
@@ -71,12 +105,30 @@ export function createJob({
   variant,
   sessionId,
   parentJobId,
+  // C0 workflow/provenance params
+  workflow_id = null,
+  step_id = null,
+  parent_execution_id = null,
+  root_execution_id = null,
+  attempt = null,
+  remote_state = null,
+  quality_score = null,
+  verified = null,
+  judge_verdict = null,
+  // A1 dispatch params
+  executionId = null,
+  execution_id = null,
+  dispatchKey = null,
+  dispatch_key = null,
 }) {
   const jobId = newJobId()
   const dir = jobDir(jobId, env)
   ensureDir(dir)
 
   fs.writeFileSync(promptPath(jobId, env), task ?? '', 'utf8')
+
+  const resolvedExecutionId = executionId ?? execution_id ?? null
+  const resolvedDispatchKey = dispatchKey ?? dispatch_key ?? null
 
   const result = {
     jobId,
@@ -101,8 +153,28 @@ export function createJob({
     status: 'queued',
     createdAt: new Date().toISOString(),
     updatedAt: new Date().toISOString(),
+    // C0 workflow/provenance fields
+    workflow_id: workflow_id ?? null,
+    step_id: step_id ?? null,
+    parent_execution_id: parent_execution_id ?? null,
+    root_execution_id: root_execution_id ?? null,
+    attempt: attempt ?? null,
+    remote_state: remote_state ?? null,
+    quality_score: quality_score ?? null,
+    verified: verified ?? null,
+    judge_verdict: judge_verdict ?? null,
+    // A1 dispatch provenance fields
+    executionId: resolvedExecutionId,
+    execution_id: resolvedExecutionId,
+    dispatchKey: resolvedDispatchKey,
+    dispatch_key: resolvedDispatchKey,
+  }
+  // Dual state: if remote_state is provided, mirror it into remote.state for compat.
+  if (remote_state != null) {
+    result.remote = { state: remote_state }
   }
   fs.writeFileSync(resultPath(jobId, env), JSON.stringify(result, null, 2), 'utf8')
+  mirrorJobToDb(result, env)
   return result
 }
 
@@ -121,20 +193,22 @@ export function readResult(jobId, env = process.env) {
  * through updateJsonLocked (not a plain writeFileSync) to make the whole
  * sequence atomic across processes, never just the final write.
  */
-export function updateResult(jobId, patch, env = process.env) {
+export function updateResult(jobId, patchOrUpdater, env = process.env) {
   readResult(jobId, env) // throws `job not found: ${jobId}` if result.json does not exist
   const updatedAt = new Date().toISOString()
   return updateJsonLocked(resultPath(jobId, env), (current) => {
+    const patch = typeof patchOrUpdater === 'function' ? patchOrUpdater(current) : patchOrUpdater
     const next = { ...current, ...patch, updatedAt }
     // cancelJob (dashboard process) and finishJob (MCP process) race: a finish
     // computed from a record read before the cancel must not resurrect the job
     // as succeeded/failed. Cancellation wins on status; everything else may
     // still merge (tokens, sessionId, costUsd, ...).
-    if (current.status === 'canceled' && patch.status && patch.status !== 'canceled') {
+    if (current.status === 'canceled' && patch?.status && patch.status !== 'canceled') {
       next.status = 'canceled'
       next.errorKind = current.errorKind
       next.error = current.error
     }
+    mirrorJobToDb(next, env)
     return next
   })
 }

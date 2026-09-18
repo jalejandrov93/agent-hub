@@ -16,6 +16,7 @@ import { WorkGraphView } from "@/views/work-graph"
 import { ApprovalsView } from "@/views/approvals"
 import { ConfigView } from "@/views/config"
 import { CloudView } from "@/views/cloud"
+import { ToolsView } from "@/views/tools"
 import {
   AgentsSearch,
   HistorySearch,
@@ -109,6 +110,12 @@ const cloudRoute = createRoute({
   component: CloudView,
 })
 
+const toolsRoute = createRoute({
+  getParentRoute: () => rootRoute,
+  path: "/tools",
+  component: ToolsView,
+})
+
 const routeTree = rootRoute.addChildren([
   indexRoute,
   overviewRoute,
@@ -122,6 +129,7 @@ const routeTree = rootRoute.addChildren([
   approvalsRoute,
   configRoute,
   cloudRoute,
+  toolsRoute,
 ])
 
 export const router = createRouter({

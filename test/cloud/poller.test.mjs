@@ -813,3 +813,39 @@ test('pollOnce caps seenActivityIds at the most recent 500 entries', async () =>
   assert.equal(patch.remote.seenActivityIds[0], 'id-100')
   assert.equal(patch.remote.seenActivityIds[499], 'id-599')
 })
+
+// P0.2: a waiting state is a result, not a reason to keep polling.
+test('pollUntilTerminal returns waiting on AWAITING_USER_FEEDBACK instead of slow-polling it', async () => {
+  const clock = fakeClock()
+  const client = scriptedClient({
+    states: ['AWAITING_USER_FEEDBACK'],
+    pages: [emptyPage()],
+  })
+  const res = await pollUntilTerminal({
+    jobId: 'j1',
+    apiKey: 'k',
+    sessionId: 's1',
+    timeoutMs: 10000,
+    client,
+    adapter: makeAdapter({ terminal: ['COMPLETED'] }),
+    nowFn: clock.nowFn,
+    sleepFn: clock.sleepFn,
+    appendStdoutFn: () => {},
+    updateResultFn: () => {},
+    readResultFn: runningRecord,
+  })
+  assert.equal(res.outcome, 'waiting')
+  assert.equal(res.state, 'AWAITING_USER_FEEDBACK')
+  assert.equal(clock.delays.length, 0, 'no further sleeps once waiting is observed')
+})
+
+test('isWaitingRemoteState matches the adapter predicate and the AWAITING_/PAUSED fallback', async () => {
+  const { isWaitingRemoteState } = await import('../../src/cloud/poller.mjs')
+  assert.equal(isWaitingRemoteState({ isWaitingState: () => true }, 'WHATEVER'), true)
+  assert.equal(isWaitingRemoteState({}, 'AWAITING_USER_FEEDBACK'), true)
+  assert.equal(isWaitingRemoteState({}, 'AWAITING_PLAN_APPROVAL'), true)
+  assert.equal(isWaitingRemoteState({}, 'PAUSED'), true)
+  assert.equal(isWaitingRemoteState({}, 'IN_PROGRESS'), false)
+  assert.equal(isWaitingRemoteState({}, 'COMPLETED'), false)
+  assert.equal(isWaitingRemoteState({}, null), false)
+})

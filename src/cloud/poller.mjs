@@ -1,5 +1,6 @@
 import crypto from 'node:crypto'
 import { appendStdout, updateResult, readResult } from '../jobstore.mjs'
+import { applyRemoteObservation } from './remote-observation.mjs'
 
 export const MIN_INTERVAL_MS = 5000
 export const MAX_INTERVAL_MS = 60000
@@ -11,6 +12,18 @@ const MAX_PAGES_PER_TICK = 20
 
 // Dedup memory is bounded: a long session must not grow result.json forever.
 const MAX_SEEN_ACTIVITY_IDS = 500
+
+/**
+ * True when a remote session state means "waiting for someone else" rather
+ * than "working". Prefer the adapter's own predicate; the prefix/PAUSED
+ * fallback keeps this correct for adapters that predate isWaitingState.
+ * Exported so job_wait can apply the exact same definition to a stored
+ * record — one definition, two call sites, no drift.
+ */
+export function isWaitingRemoteState(adapter, state) {
+  if (adapter?.isWaitingState?.(state)) return true
+  return typeof state === 'string' && (state.startsWith('AWAITING_') || state === 'PAUSED')
+}
 
 /**
  * A stable identity for an activity. Prefer the API's own name/id; when an
@@ -25,6 +38,40 @@ function activityIdentity(activity) {
   const description = typeof activity?.description === 'string' ? activity.description : ''
   if (createTime.length > 0 || description.length > 0) return `anon:${createTime}:${description}`
   return `anon:${crypto.createHash('sha1').update(JSON.stringify(activity ?? null)).digest('hex')}`
+}
+
+export const STATE_INTERVALS = {
+  QUEUED: { minIntervalMs: 5000, maxIntervalMs: 5000, min: 5000, max: 5000, valueOf() { return 5000 } },
+  PLANNING: { minIntervalMs: 5000, maxIntervalMs: 5000, min: 5000, max: 5000, valueOf() { return 5000 } },
+  IN_PROGRESS: { minIntervalMs: 5000, maxIntervalMs: 15000, min: 5000, max: 15000, valueOf() { return 5000 } },
+  AWAITING_PLAN_APPROVAL: { minIntervalMs: 30000, maxIntervalMs: 60000, min: 30000, max: 60000, valueOf() { return 30000 } },
+  AWAITING_USER_FEEDBACK: { minIntervalMs: 30000, maxIntervalMs: 60000, min: 30000, max: 60000, valueOf() { return 30000 } },
+  PAUSED: { minIntervalMs: 300000, maxIntervalMs: 300000, min: 300000, max: 300000, valueOf() { return 300000 } },
+}
+
+export function intervalForState(state, options = {}) {
+  const opts = typeof options === 'number' ? { current: options } : options
+  const cfg = STATE_INTERVALS[state] ?? {
+    minIntervalMs: MIN_INTERVAL_MS,
+    maxIntervalMs: MAX_INTERVAL_MS,
+  }
+  const minIntervalMs = cfg.minIntervalMs ?? MIN_INTERVAL_MS
+  const maxIntervalMs = cfg.maxIntervalMs ?? MAX_INTERVAL_MS
+  const backoffFactor = opts.backoffFactor ?? BACKOFF_FACTOR
+
+  if (opts.current === undefined) {
+    return minIntervalMs
+  }
+
+  if (opts.sawNewActivity) {
+    return minIntervalMs
+  }
+
+  if (opts.current < minIntervalMs) {
+    return minIntervalMs
+  }
+
+  return Math.min(opts.current * backoffFactor, maxIntervalMs)
 }
 
 export function nextInterval(current, {
@@ -66,27 +113,41 @@ export async function pollOnce({
 }) {
   const session = await client.getSession({ apiKey, sessionId })
 
+  let currentRemote = remote
+  try {
+    currentRemote = readResultFn(jobId, env)?.remote ?? remote
+  } catch {
+    // no persisted record (unit tests) — fall back to the passed snapshot
+  }
+
+  const isWaiting = isWaitingRemoteState(adapter, session.state)
+
   let pageToken = cursor
   let lastToken = cursor
   const activities = []
   let pages = 0
-  while (pages < MAX_PAGES_PER_TICK) {
-    const page = await client.listActivities({ apiKey, sessionId, pageToken })
-    pages++
-    const batch = Array.isArray(page?.activities) ? page.activities : []
-    activities.push(...batch)
-    if (page?.nextPageToken) {
-      lastToken = page.nextPageToken
-      pageToken = page.nextPageToken
-    } else {
-      break
+
+  if (!isWaiting) {
+    while (pages < MAX_PAGES_PER_TICK) {
+      const page = await client.listActivities({ apiKey, sessionId, pageToken })
+      pages++
+      const batch = Array.isArray(page?.activities) ? page.activities : []
+      activities.push(...batch)
+      if (page?.nextPageToken) {
+        lastToken = page.nextPageToken
+        pageToken = page.nextPageToken
+      } else {
+        break
+      }
+      // An empty page with a next token means there is nothing more to read
+      // this tick; stop rather than chase a token with no data behind it.
+      if (batch.length === 0) break
     }
-    // An empty page with a next token means there is nothing more to read
-    // this tick; stop rather than chase a token with no data behind it.
-    if (batch.length === 0) break
   }
 
-  const seenIds = Array.isArray(remote.seenActivityIds) ? remote.seenActivityIds : []
+  const seenIds = Array.isArray(currentRemote.seenActivityIds ?? remote.seenActivityIds)
+    ? (currentRemote.seenActivityIds ?? remote.seenActivityIds)
+    : []
   const seen = new Set(seenIds)
   const seenActivityIds = [...seen]
   const newActivities = activities.filter((activity) => !seen.has(activityIdentity(activity)))
@@ -112,9 +173,8 @@ export async function pollOnce({
   // during the network round trip (a job_reply, another process). Spread the
   // CURRENT block and overwrite only the fields this tick owns, so a concurrent
   // write is not silently reverted.
-  let currentRemote = remote
   try {
-    currentRemote = readResultFn(jobId, env)?.remote ?? remote
+    currentRemote = readResultFn(jobId, env)?.remote ?? currentRemote
   } catch {
     // no persisted record (unit tests) — fall back to the passed snapshot
   }
@@ -125,21 +185,26 @@ export async function pollOnce({
   const branch = adapter.branchFromSession?.(session) ?? null
   const prUrl = summary?.prUrl ?? adapter.prUrlFromSession?.(session) ?? null
 
-  updateResultFn(
+  const nowIso = new Date(nowFn()).toISOString()
+  applyRemoteObservation({
     jobId,
-    {
-      remote: {
-        ...currentRemote,
-        state: session.state,
-        branch: branch ?? currentRemote.branch ?? null,
-        prUrl: prUrl ?? currentRemote.prUrl ?? null,
-        activityCursor: lastToken,
-        seenActivityIds: cappedSeenActivityIds,
-        lastPolledAt: new Date(nowFn()).toISOString(),
-      },
+    state: session.state,
+    isWaiting,
+    sawNewActivity,
+    patch: {
+      branch: branch ?? currentRemote.branch ?? null,
+      prUrl: prUrl ?? currentRemote.prUrl ?? null,
+      activityCursor: lastToken,
+      seenActivityIds: cappedSeenActivityIds,
+      lastPolledAt: nowIso,
+      ...(isWaiting ? { pollingStoppedReason: 'awaiting_interaction' } : {}),
     },
-    env
-  )
+    currentRemote,
+    updateResultFn,
+    readResultFn,
+    env,
+    nowFn,
+  })
 
   return { state: session.state, cursor: lastToken, sawNewActivity, lines, summary, session }
 }
@@ -232,12 +297,33 @@ export async function pollUntilTerminal({
       return { outcome, state: tick.state, summary: tick.summary, session: tick.session, apiError: null }
     }
 
+    // P0.2: a waiting state is a real result, not a reason to keep polling.
+    // Returning here (instead of slow-polling forever) hands control to the
+    // supervisor/human via job_wait's waiting signal or jules_check's
+    // attention fields. This is what makes pollingStoppedReason true rather
+    // than descriptive: after this return nothing polls again on its own.
+    // Model A (confirmed): jules_interact/job_reply clear the reason but
+    // NEVER restart a poller — post-interaction observation belongs to the
+    // caller (jules_wait/jules_check) or the future supervisor, which owns
+    // the watch lease (see docs/execution-contract.md §7).
+    if (isWaitingRemoteState(adapter, tick.state)) {
+      return { outcome: 'waiting', state: tick.state, summary: tick.summary, session: tick.session, apiError: null }
+    }
+
     await sleepFn(interval)
-    interval = nextInterval(interval, {
-      sawNewActivity: tick.sawNewActivity,
-      minIntervalMs,
-      maxIntervalMs,
-      backoffFactor,
-    })
+    if (STATE_INTERVALS[tick.state]) {
+      interval = intervalForState(tick.state, {
+        current: interval,
+        sawNewActivity: tick.sawNewActivity,
+        backoffFactor,
+      })
+    } else {
+      interval = nextInterval(interval, {
+        sawNewActivity: tick.sawNewActivity,
+        minIntervalMs,
+        maxIntervalMs,
+        backoffFactor,
+      })
+    }
   }
 }

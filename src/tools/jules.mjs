@@ -1,6 +1,6 @@
 import { startRemoteJob as defaultStartRemoteJob } from '../cloud/runner.mjs'
 import { checkRemoteSession as defaultCheckRemoteSession } from '../cloud/check.mjs'
-import { listJobs as defaultListJobs, readResult as defaultReadResult } from '../jobstore.mjs'
+import { listJobs as defaultListJobs, readResult as defaultReadResult, updateResult as defaultUpdateResult } from '../jobstore.mjs'
 import { listSchedules as defaultListSchedules } from '../schedules.mjs'
 import {
   listAccounts as defaultListAccounts,
@@ -9,10 +9,11 @@ import {
   readPolicy as defaultReadPolicy,
 } from '../accounts.mjs'
 import { readSourcesCache as defaultReadSourcesCache } from '../cloud/sources.mjs'
-import { keyForAccount } from '../cloud/credentials.mjs'
+import { keyForJob, keyForAccount } from '../cloud/credentials.mjs'
 import * as defaultClient from '../cloud/jules/client.mjs'
 import { listAllSources } from '../cloud/jules/client.mjs'
 import * as defaultAdapter from '../cloud/jules/adapter.mjs'
+import { julesSuperviseTool } from '../cloud/jules/supervisor.mjs'
 import { TASK_TYPES } from '../schemas.mjs'
 
 /** Reject a caller-supplied taskType that is not one of schemas.mjs TASK_TYPES (mirrors tools/jobs.mjs). */
@@ -334,3 +335,241 @@ export function julesSchedulesTool({
     }),
   }
 }
+
+/**
+ * Single implementation of a Jules interaction (reply / approve_plan),
+ * shared by jules_interact, job_reply on a Jules parent, and the future
+ * supervisor. One implementation means one place for reply/approve_plan
+ * semantics, counter updates and policy accounting.
+ *
+ * Model A (confirmed): this only modifies the remote session plus local
+ * counters. It NEVER clears pollingStoppedReason (a null reason means
+ * "polling active", and no watcher exists here) and NEVER restarts a
+ * poller — only an observation that sees a non-waiting state
+ * (jules_wait/supervisor/jules_check, or a poller tick) may clear it.
+ */
+export async function interactWithSession({
+  jobId,
+  sessionId,
+  action,
+  message,
+  feedbackDecision,
+  env = process.env,
+  client = defaultClient,
+  listJobsFn = defaultListJobs,
+  readResultFn = defaultReadResult,
+  updateResultFn = defaultUpdateResult,
+  listAccountsFn = defaultListAccounts,
+  getAccountSecretFn = defaultGetAccountSecret,
+} = {}) {
+  if (action === 'pause' || action === 'resume' || action === 'cancel') {
+    throw new Error(`Jules API does not support remote ${action} (no remote pause, resume, or cancel endpoints exist)`)
+  }
+
+  if (action !== 'reply' && action !== 'approve_plan') {
+    throw new Error(`Invalid action "${action}": only "reply" and "approve_plan" are supported. Remote pause, resume, and cancel are not supported.`)
+  }
+
+  if (action === 'reply' && (!message || String(message).trim().length === 0)) {
+    throw new Error('message is required for action "reply"')
+  }
+
+  if (!jobId && !sessionId) {
+    throw new Error('jules_interact requires either jobId or sessionId')
+  }
+
+  let resolvedJobId = jobId ?? null
+  let resolvedSessionId = sessionId ?? null
+  let resolvedJob = null
+
+  if (jobId) {
+    const record = readResultFn(jobId, env)
+    const recorded = record?.remote?.sessionId
+    if (!recorded && !sessionId) {
+      throw new Error(`job ${jobId} has no Jules session recorded`)
+    }
+    resolvedSessionId = sessionId ?? recorded
+    resolvedJob = record
+  } else {
+    let jobs = []
+    try {
+      jobs = listJobsFn(env)
+    } catch {
+      // ignore
+    }
+    const match = Array.isArray(jobs) ? jobs.find((job) => job?.remote?.sessionId === resolvedSessionId) : null
+    if (match) {
+      resolvedJobId = match.jobId
+      resolvedJob = match
+    }
+  }
+
+  const apiKey = resolvedJob
+    ? keyForJob(resolvedJob, { env, getAccountSecretFn })
+    : keyForAccount({ env, listAccountsFn, getAccountSecretFn }).apiKey
+
+  if (!apiKey || apiKey.length === 0) {
+    throw new Error('JULES_API_KEY is missing or rejected')
+  }
+
+  if (action === 'approve_plan') {
+    await client.approvePlan({ apiKey, sessionId: resolvedSessionId })
+  } else {
+    await client.sendMessage({ apiKey, sessionId: resolvedSessionId, prompt: message })
+  }
+
+  if (resolvedJobId) {
+    try {
+      const current = readResultFn(resolvedJobId, env)
+      const currentRemote = current?.remote ?? {}
+      // attempts stays incremented for existing records/consumers, but the
+      // semantic counters below are what policies must read: turnDepth is
+      // conversation depth and is deliberately NOT bumped here, so a plan
+      // approval never consumes the auto-reply budget (maxAutoReplies).
+      // pollingStoppedReason is deliberately NOT cleared: no watcher exists
+      // after this call (Model A), so null would falsely claim polling is
+      // active. The next observation that sees a non-waiting state clears it.
+      const newAttempts = (currentRemote.attempts ?? current?.turnDepth ?? 0) + 1
+      const isSafeContinue = feedbackDecision === 'safe_continue'
+      const isAutoReply = action === 'reply' && !isSafeContinue
+      updateResultFn(
+        resolvedJobId,
+        {
+          remote: {
+            ...currentRemote,
+            attempts: newAttempts,
+            interventionCount: (currentRemote.interventionCount ?? 0) + 1,
+            autoReplyCount: (currentRemote.autoReplyCount ?? 0) + (isAutoReply ? 1 : 0),
+            safeContinueCount: (currentRemote.safeContinueCount ?? 0) + (isSafeContinue ? 1 : 0),
+            planApprovalCount: (currentRemote.planApprovalCount ?? 0) + (action === 'approve_plan' ? 1 : 0),
+          },
+        },
+        env
+      )
+    } catch {
+      // best-effort
+    }
+  }
+
+  return {
+    jobId: resolvedJobId,
+    sessionId: resolvedSessionId,
+    action,
+    status: 'ok',
+    success: true,
+  }
+}
+
+/**
+ * MCP tool wrapper around interactWithSession (same behavior, MCP defaults).
+ */
+export async function julesInteractTool(args = {}) {
+  return interactWithSession({
+    env: process.env,
+    client: defaultClient,
+    listJobsFn: defaultListJobs,
+    readResultFn: defaultReadResult,
+    updateResultFn: defaultUpdateResult,
+    listAccountsFn: defaultListAccounts,
+    getAccountSecretFn: defaultGetAccountSecret,
+    ...args,
+  })
+}
+
+/**
+ * Local helper (not an MCP tool): poll with a local timeout waiting for a terminal
+ * state (COMPLETED, FAILED) or a waiting state (AWAITING_*, PAUSED).
+ */
+export async function julesWait({
+  jobId,
+  sessionId,
+  timeoutMs,
+  timeoutS = 30,
+  intervalMs = 2000,
+  env = process.env,
+  client = defaultClient,
+  adapter = defaultAdapter,
+  checkRemoteSessionFn = defaultCheckRemoteSession,
+  sleepFn = (ms) => new Promise((resolve) => setTimeout(resolve, ms)),
+  nowFn = Date.now,
+  readResultFn = defaultReadResult,
+  listJobsFn = defaultListJobs,
+  finishRemoteJobFn,
+  updateResultFn,
+} = {}) {
+  const effectiveTimeoutMs = timeoutMs ?? (timeoutS * 1000)
+  const start = nowFn()
+
+  // Resolve the jobId for watch lease checking
+  let resolvedJobId = jobId ?? null
+  if (!resolvedJobId && sessionId) {
+    let jobs = []
+    try { jobs = listJobsFn(env) } catch { /* ignore */ }
+    const match = Array.isArray(jobs) ? jobs.find((j) => j?.remote?.sessionId === sessionId) : null
+    if (match) resolvedJobId = match.jobId
+  }
+
+  while (true) {
+    // B4 watch lease: when another owner (e.g. 'supervisor') holds the watch,
+    // observe read-only — no finalization, no state mutation. The supervisor
+    // owns the interaction lifecycle and will finalize when it's done.
+    let effectiveFinishRemoteJobFn = finishRemoteJobFn
+    let effectiveUpdateResultFn = updateResultFn
+
+    if (resolvedJobId) {
+      try {
+        const record = readResultFn(resolvedJobId, env)
+        const watch = record?.remote?.watch
+        if (watch?.owner != null && watch.owner !== 'jules_wait') {
+          // Foreign lease active — wrap check to be read-only
+          effectiveFinishRemoteJobFn = () => {}
+          effectiveUpdateResultFn = () => {}
+        }
+      } catch { /* no record — proceed normally */ }
+    }
+
+    const check = await checkRemoteSessionFn({
+      jobId,
+      sessionId,
+      env,
+      client,
+      adapter,
+      enrich: true,
+      readResultFn,
+      listJobsFn,
+      ...(effectiveFinishRemoteJobFn !== undefined ? { finishRemoteJobFn: effectiveFinishRemoteJobFn } : {}),
+      ...(effectiveUpdateResultFn !== undefined ? { updateResultFn: effectiveUpdateResultFn } : {}),
+    })
+    const state = check.state
+    const terminal = adapter.isTerminalState(state)
+    const waiting = adapter.isWaitingState?.(state) || (typeof state === 'string' && (state.startsWith('AWAITING_') || state === 'PAUSED'))
+
+    if (terminal || waiting) {
+      return {
+        ...check,
+        done: true,
+        terminal,
+        waiting,
+        timedOut: false,
+      }
+    }
+
+    const elapsed = nowFn() - start
+    if (elapsed >= effectiveTimeoutMs) {
+      return {
+        ...check,
+        done: false,
+        terminal: false,
+        waiting: false,
+        timedOut: true,
+      }
+    }
+
+    const sleepTime = Math.min(intervalMs, effectiveTimeoutMs - elapsed)
+    await sleepFn(sleepTime)
+  }
+}
+
+export { julesSuperviseTool }
+export const jules_supervise = julesSuperviseTool
+export const jules_wait = julesWait

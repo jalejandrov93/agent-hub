@@ -280,7 +280,8 @@ result is a pull request, never a change to your `cwd`. That difference drives
 every design decision below.
 
 Jules is reachable only through its own tools (`jules_delegate`,
-`jules_sources`, `jules_check`, `jules_sessions`). It is deliberately absent
+`jules_sources`, `jules_check`, `jules_sessions`, `jules_interact`,
+`jules_wait`, `jules_supervise`). It is deliberately absent
 from the delegation map, so `route` never picks it and `delegate` cannot reach
 it — you get a cloud session only when you ask for one.
 
@@ -305,9 +306,49 @@ only way to learn the outcome:
   no record of it, so a reinstall or a session started elsewhere is still
   recoverable.
 
-**Cancel is local only.** The Jules API exposes no cancel endpoint. `job_cancel`
+**Cancel is local only.** The Jules API exposes no cancel endpoint — and no
+`pause`/`resume` endpoints either. `job_cancel`
 marks the job canceled and stops this server's polling; the session keeps
 running on Google's side. The tool says so.
+
+**Waiting is a state, not a stall.** A Jules session can sit in
+`AWAITING_PLAN_APPROVAL`, `AWAITING_USER_FEEDBACK` or `PAUSED` indefinitely,
+and the hub no longer polls those blindly: the poll interval is semantic per
+state (`QUEUED`/`PLANNING` 5s, `IN_PROGRESS` 5–15s backoff, `AWAITING_*`
+30–60s, `PAUSED` 5min), a waiting tick skips re-draining `listActivities`,
+and the job record carries `pollingStoppedReason: 'awaiting_interaction'`
+until new activity resumes it. `jules_check` now also answers
+`attentionRequired` / `attentionReason` (`user_feedback` | `plan_approval` |
+`paused`) / `recommendedAction` (`send_message` | `approve_plan`) /
+`canAutoResolve` / `attempts`, and `jules_interact` (`reply` |
+`approve_plan`) is the interaction API — `pause`/`resume`/`cancel` remotes
+are explicitly rejected because the backend does not offer them. See
+`src/cloud/poller.mjs` (`STATE_INTERVALS`, `intervalForState`),
+`src/cloud/jules/adapter.mjs` (`ALL_JULES_STATES`, `isWaitingState`) and
+`src/cloud/check.mjs` (`computeAttention`).
+
+**Model A: interacting never restarts polling.** After `jules_interact`
+(or `job_reply` on a Jules parent) nothing observes the session again on its
+own — the local record freezes at `running` until *you* observe it. So the
+three observation tools have distinct jobs, and mixing them up loses
+completions:
+
+- `job_wait` — waits on the **local record**: returns on terminal, or
+  immediately on `done`+`waiting` with attention fields. It does *not* poll
+  Jules itself, so after an interaction it will *not* see the session finish.
+- `jules_wait` — **actively observes** one session for a bounded local budget
+  (`timeoutS≤600`); never a watch daemon.
+- `jules_check` — one **punctual inspection** plus reconciliation (finalizes
+  the local job if the session already ended).
+
+Post-interaction rule: `jules_interact` → observe with `jules_wait` (or
+`jules_check`), never `job_wait` alone. Continuous supervision belongs to
+`jules_supervise` (B4), which owns observation through a
+`remote.watch = {owner, generation}` lease so two watchers never drive the
+same session: it loops observe → decide → interact → resume-observation,
+auto-replies only through 6 hard gates with `maxAutoReplies=2` counted on
+`autoReplyCount` (never `turnDepth`), and escalates anything else as
+`REQUEST_USER`. `PAUSED` is never approved/replied.
 
 **Several accounts.** Quotas are per Jules account, so agent-hub can hold more
 than one. Add them in the dashboard; they live in `accounts.json` under
@@ -367,6 +408,64 @@ insufficient-balance error does not clear on retry). A manual
 `breakerReset` override (dashboard "Reset breaker" button, or `POST
 /api/overrides`) makes earlier failures at or before that instant stop
 counting.
+
+Per-class breakers extend this without replacing it: `src/policy/taxonomy.mjs`
+classifies failures (`billing`, `auth`, `quota`, `timeout`, `transport`,
+`crash`, `quality`), `CIRCUIT_BREAKER_BY_CLASS` in `src/config.mjs` sets a
+window/threshold per class, and `src/breakers.mjs` evaluates them
+(`circuitBreakerOpenByClass`, `matchingFailuresByClass`, `breakerStatus`).
+`src/policy/registry.mjs` (`POLICY_TABLE`, `policyFor`) then maps each class
+to an explicit `{retry, resume, fallback, escalation}` policy executed by
+`executeWithPolicy()` in `src/policy/executor.mjs` — one declarative loop,
+not a chain of `if/else`. The table covers every taxonomy category
+(`billing`/`auth` never retry and escalate to human; `quota` retries bounded
+then falls back; `crash` gets one retry then an alternate adapter), and
+`ctx.recoveryOrder` lets a remote adapter run resume/reconcile before any
+retry that could duplicate a session (escalation always stays last).
+
+### Execution contract
+
+`docs/execution-contract.md` is the normative spec for job execution
+(deadline, cancellation, retry/resume/fallback/escalation, idempotency, read
+purity, write ownership, local-vs-remote state). The two invariants to
+remember: a **local deadline is never a remote failure** (a timed-out watcher
+stops polling with `pollingStoppedReason: local_deadline`; only the remote
+session's own state finalizes the job), and **local cancel always wins**
+while **remote cancel is never guaranteed**. Dispatch idempotency
+(`dispatchKey = sha256(task + cwd + taskType + workflowStep)`,
+`executionId`/`attempt`/`parentExecutionId`/`rootExecutionId`) is separate
+from remote-creation reconciliation (fingerprint `repo/branch/task/title/window`
+plus a `listSessions` search before creating).
+
+### Workflow-ready job records
+
+`JobRecord` carries nullable workflow columns from the start (`workflow_id`,
+`step_id`, `parent_execution_id`, `root_execution_id`, `attempt`,
+`remote_state`, `quality_score`, `verified`, `judge_verdict`) so the later
+workflow engine never needs a breaking migration.
+
+### C0-real: SQLite as coordination state
+
+`better-sqlite3` is a runtime dependency; `initDb()` runs at MCP and
+dashboard startup (`AGENT_HUB_HOME/agent-hub.db`, WAL, singleton per state
+dir). `createJob`/`updateResult` dual-write: `runs/<jobId>/result.json`
+stays the content artifact and compat path, while SQLite (`jobs`, `leases`,
+`workflows`, `workflow_nodes`) is the authority for coordination state —
+this is what lets two processes update the same job without lost updates,
+and what C1's DAG will build on. If the native module is ever unavailable,
+the mirror is skipped with a one-time warning and the JSON path keeps
+working alone. Crash/recovery (kill → restart → coherent state) and
+concurrent-writer tests pin the guarantee (`test/storage-c0real.test.mjs`).
+
+### Event watcher (C0.5)
+
+`bin/agent-hub watch [--once|--follow] [--sink console|file|webhook]`
+tails `events.jsonl` (`src/notify/watch.mjs`, same offset-tracked pattern as
+the dashboard SSE) and routes first-level events (`job.finished`,
+`job.failed`, `jules.waiting`, `jules.attention_required`,
+`workflow.completed`) to console / `<AGENT_HUB_HOME>/notifications.jsonl` /
+webhook adapters (`src/notify/adapters.mjs`, never throws, never logs
+secrets). It runs as its own process — never inside the MCP stdio lifecycle.
 
 ### Write-mode gate
 
@@ -440,7 +539,8 @@ read jobs from a disposable worktree when that matters.
 | `agents_status` | `{refresh?: boolean}` | L0-L2 for every pair in the delegation map. Never pings. Rows include `binPath`/`cliVersion` from `discovery.json`. |
 | `route` | `{taskType: enum, mode?: 'read'\|'write', includeCatalog?: boolean}` | Skips unavailable/breaker-open/held pairs; returns `{primary, fallbacks, skipped, discovery, reason, appliedProposal}`. `discovery` holds `{binPath, version, modelCount, checkedAt, error}` per CLI; `includeCatalog: true` returns the full model catalog instead. `appliedProposal` names the accepted proposal whose order was applied, or `null`. |
 | `delegate` | `{agent, model, task, cwd, mode?, timeoutS?, title?, variant?, taskType?}` | Returns `{jobId, status:'queued'}` immediately. `variant` is opencode's reasoning effort (minimal/low/medium/high/max); ignored by agy/copilot. Pass the same `taskType` you gave `route` so metrics, adaptive timeouts and learnings apply. |
-| `job_wait` | `{jobId, timeoutS?<=60}` | Polls until terminal or timeout. |
+| `dispatch` | `{task, cwd, taskType?, mode?, workflowStep?, dispatchKey?, attempt?, parentExecutionId?, rootExecutionId?, timeoutS?}` | Atomic decide+execute: revalidates preflight/breaker at execution time (closes the `route`→`delegate` TOCTOU gap), applies the per-class policy with adapter-aware recovery (remote candidates resume/reconcile before retry; policy resolved from the real error, not the caller's guess), and deduplicates by `dispatchKey` (concurrent same-key dispatches share one job). Write mode reserves a lease token that `startJob` adopts. `route` stays recommendation-only, `delegate` exact-execution. |
+| `job_wait` | `{jobId, timeoutS?<=60}` | Polls until terminal (`done`, `waiting:false`), until a remote session waits for interaction (`done` + `waiting:true` with `attentionRequired`, `attentionReason`, `recommendedAction` — act via `jules_interact`, no timeout burned), or until the local budget elapses (`done:false`, `timedOut:true`; job/session keep running). |
 | `job_status` | `{jobId}` | Current status, no waiting. |
 | `job_result` | `{jobId, maxLines?, tailLines?}` | Head of the response (default 20 lines) plus extra `tailLines` from the end (default 10, never repeating a head line) and `fullPath`, `truncated`, `tailTruncated`. |
 | `job_cancel` | `{jobId}` | Kills the whole process group; marks `canceled`. |
@@ -449,10 +549,13 @@ read jobs from a disposable worktree when that matters.
 | `agents_metrics` | `{groupBy?: ('agent'\|'model'\|'mode'\|'taskType')[]}` | Success rate, p50/p95 latency, error kinds and tokens per group (default: all four dimensions) from job history. |
 | `jules_delegate` | `{task, cwd?, source?, startingBranch?, title?, requirePlanApproval?, automationMode?, account?, timeoutS?, taskType?}` | Starts a Jules cloud session. Needs `JULES_API_KEY` and either `cwd` (infers the source and branch from the `origin` remote) or an explicit `source`. Returns `{jobId, status:'queued'}`; the job behaves like any other for `job_status`/`job_wait`/`job_result`. The result is a GitHub pull request. |
 | `jules_sources` | `{account?}` | The GitHub repos connected to the Jules account. Connect new ones in the Jules web UI — the API cannot add them. |
-| `jules_check` | `{jobId?, sessionId?}` | One live read of a session: `state`, `prUrl`, `branch`, `sessionUrl`, last message. Needs no poller, so it works after a reboot, and it finalizes a local job whose session ended while the machine was off. |
+| `jules_check` | `{jobId?, sessionId?}` | One live read of a session: `state`, `prUrl`, `branch`, `sessionUrl`, last message — plus `attentionRequired`, `attentionReason`, `recommendedAction`, `canAutoResolve`, `attempts` when the session is waiting (`AWAITING_*`/`PAUSED`). Needs no poller, so it works after a reboot, and it finalizes a local job whose session ended while the machine was off. |
+| `jules_interact` | `{jobId?, sessionId?, action: 'reply'\|'approve_plan', message?}` | Talk to a live Jules session: `reply` (needs `message`) or `approve_plan`. Remote `pause`/`resume`/`cancel` are rejected — the API does not offer them; a `PAUSED` session is observed with backoff, not resumed by call. Bumps `attempts`/`interventionCount` (`autoReplyCount` for replies, `planApprovalCount` for approvals — never `turnDepth`, so approvals don't consume the auto-reply budget) but deliberately leaves `pollingStoppedReason` untouched — only an observation that sees a non-waiting state clears it, and interacting never restarts polling. `job_reply` on a Jules parent runs the same shared implementation (`interactWithSession`). |
+| `jules_wait` | `{jobId?, sessionId?, timeoutS?<=600, pollIntervalS?}` | Local orchestration only (the API has no wait endpoint). Waits until terminal (`done`+`terminal`) or waiting (`done`+`waiting` with attention fields), else `done:false`+`timedOut:true` on budget expiry. Remote session unaffected. |
 | `jules_sessions` | `{limit?, state?, account?}` | Lists sessions straight from the Jules API, newest first, each with the local `jobId` when this machine has one and `null` when it does not. Without `account` it merges every enabled account, tags each session with its `accountId`, and reports an account that fails in `accountErrors` without failing the call. The recovery path when the local record is gone. |
 | `jules_accounts` | `{}` | The configured Jules accounts, read-only: masked keys (`keyLast4` only), rolling 24-hour and concurrent usage, and each account's source-cache status. Accounts are created and edited in the dashboard. |
 | `jules_schedules` | `{}` | The recurring Jules tasks, read-only, with their next run and last result. Schedules are created and edited in the dashboard. |
+| `jules_supervise` | `{jobId?, sessionId?, autoApprovePlan? (=true), autoResolveFeedback?, maxAutoReplies? (=2), maxSafeContinues? (=3), pauseAfterAmbiguity?, timeoutS?, pollIntervalS?}` | Supervised autonomy for a Jules session: acquires the `remote.watch` lease (atomic CAS, UUID owner, monotonic generation) and loops observe → decide → interact → resume-observation. Decisions are three-level with evidence: `AUTO_REPLY` (strict mechanical allowlist), `SAFE_CONTINUE` (conditional operational blockers, e.g. stale dep only without API change), `REQUEST_USER` (10 escalation classes) — budgets `maxAutoReplies` / `maxSafeContinues` on separate counters. Outcomes: `terminal`, `attention`, `paused`, `timeout`, `budget_exhausted`. |
 | `learning_propose` | `{text, agent?, model?, taskType?, sourceJobId?}` | Records a gotcha as **pending**; a human must approve it in the dashboard before it is injected into a prompt. Returns `{learning, note}`. |
 
 Every tool also declares a zod `outputSchema` and returns the same payload as
@@ -494,6 +597,7 @@ routes, so a link can open the exact filtered view:
 | Activity | `#/subagents` | Claude Code subagent runs recorded by the hooks |
 | Activity | `#/timeline?source=&q=` | Last 200 events over SSE, filtered by source and free text |
 | System | `#/approvals?tab=proposals\|learnings` | Routing proposals and learnings awaiting a human accept/reject |
+| System | `#/tools` | MCP tool inventory (`GET /api/tools`): every registered tool with title and description — validates the loaded build exposes what you expect after each change. |
 | System | `#/config?section=delegation\|process\|breaker\|overrides\|paths` | Delegation map, process PATH and CLIs, breaker and TTL, overrides, paths |
 
 Sidebar badges show unhealthy agents, running jobs, failures in the last 24h,

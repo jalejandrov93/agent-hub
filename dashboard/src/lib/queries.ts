@@ -228,6 +228,10 @@ export function useWorkGraphQuery() {
   })
 }
 
+export function useToolsQuery() {
+  return useQuery({ queryKey: qk.tools, queryFn: api.getTools })
+}
+
 export function useCreateLearningMutation() {
   const queryClient = useQueryClient()
   return useMutation({
