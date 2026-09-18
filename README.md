@@ -496,6 +496,9 @@ concurrent schedulers can't double-claim a node (`claimed_by` CAS in
   `transitionNode()` (`assertValidTransition` always); resume only revives a
   `running` node whose lease expired *and* whose owner is dead, else it
   re-adopts. A `fork()`-based test pins cross-process single execution.
+A dispatch result carrying a `jobId` is always waited on (`pendingJobHandle`;
+a bare pending record never counts as success), and `dispatchKey` is scoped
+by `workflowId` so identical steps in different runs never share a job.
 
 ### Harness profiles (`src/harness/`)
 
