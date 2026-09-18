@@ -280,7 +280,7 @@ result is a pull request, never a change to your `cwd`. That difference drives
 every design decision below.
 
 Jules is reachable only through its own tools (`jules_delegate`,
-`jules_sources`, `jules_check`, `jules_sessions`). It is deliberately absent
+`jules_sources`, `jules_check`, `jules_sessions`, `jules_interact`). It is deliberately absent
 from the delegation map, so `route` never picks it and `delegate` cannot reach
 it — you get a cloud session only when you ask for one.
 
@@ -305,9 +305,26 @@ only way to learn the outcome:
   no record of it, so a reinstall or a session started elsewhere is still
   recoverable.
 
-**Cancel is local only.** The Jules API exposes no cancel endpoint. `job_cancel`
+**Cancel is local only.** The Jules API exposes no cancel endpoint — and no
+`pause`/`resume` endpoints either. `job_cancel`
 marks the job canceled and stops this server's polling; the session keeps
 running on Google's side. The tool says so.
+
+**Waiting is a state, not a stall.** A Jules session can sit in
+`AWAITING_PLAN_APPROVAL`, `AWAITING_USER_FEEDBACK` or `PAUSED` indefinitely,
+and the hub no longer polls those blindly: the poll interval is semantic per
+state (`QUEUED`/`PLANNING` 5s, `IN_PROGRESS` 5–15s backoff, `AWAITING_*`
+30–60s, `PAUSED` 5min), a waiting tick skips re-draining `listActivities`,
+and the job record carries `pollingStoppedReason: 'awaiting_interaction'`
+until new activity resumes it. `jules_check` now also answers
+`attentionRequired` / `attentionReason` (`user_feedback` | `plan_approval` |
+`paused`) / `recommendedAction` (`send_message` | `approve_plan`) /
+`canAutoResolve` / `attempts`, and `jules_interact` (`reply` |
+`approve_plan`) is the interaction API — `pause`/`resume`/`cancel` remotes
+are explicitly rejected because the backend does not offer them. See
+`src/cloud/poller.mjs` (`STATE_INTERVALS`, `intervalForState`),
+`src/cloud/jules/adapter.mjs` (`ALL_JULES_STATES`, `isWaitingState`) and
+`src/cloud/check.mjs` (`computeAttention`).
 
 **Several accounts.** Quotas are per Jules account, so agent-hub can hold more
 than one. Add them in the dashboard; they live in `accounts.json` under
@@ -367,6 +384,41 @@ insufficient-balance error does not clear on retry). A manual
 `breakerReset` override (dashboard "Reset breaker" button, or `POST
 /api/overrides`) makes earlier failures at or before that instant stop
 counting.
+
+Per-class breakers extend this without replacing it: `src/policy/taxonomy.mjs`
+classifies failures (`billing`, `auth`, `quota`, `timeout`, `transport`,
+`crash`, `quality`), `CIRCUIT_BREAKER_BY_CLASS` in `src/config.mjs` sets a
+window/threshold per class, and `src/breakers.mjs` evaluates them
+(`circuitBreakerOpenByClass`, `matchingFailuresByClass`, `breakerStatus`).
+`src/policy/registry.mjs` (`POLICY_TABLE`, `policyFor`) then maps each class
+to an explicit `{retry, resume, fallback, escalation}` policy executed by
+`executeWithPolicy()` in `src/policy/executor.mjs` — one declarative loop,
+not a chain of `if/else`.
+
+### Execution contract
+
+`docs/execution-contract.md` is the normative spec for job execution
+(deadline, cancellation, retry/resume/fallback/escalation, idempotency, read
+purity, write ownership, local-vs-remote state). The two invariants to
+remember: a **local deadline is never a remote failure** (a timed-out watcher
+stops polling with `pollingStoppedReason: local_deadline`; only the remote
+session's own state finalizes the job), and **local cancel always wins**
+while **remote cancel is never guaranteed**. Dispatch idempotency
+(`dispatchKey = sha256(task + cwd + taskType + workflowStep)`,
+`executionId`/`attempt`/`parentExecutionId`/`rootExecutionId`) is separate
+from remote-creation reconciliation (fingerprint `repo/branch/task/title/window`
+plus a `listSessions` search before creating).
+
+### Workflow-ready job records
+
+`JobRecord` carries nullable workflow columns from the start (`workflow_id`,
+`step_id`, `parent_execution_id`, `root_execution_id`, `attempt`,
+`remote_state`, `quality_score`, `verified`, `judge_verdict`) so the later
+workflow engine never needs a breaking migration. `src/storage/sqlite.mjs`
+provides the minimal C0 store (SQLite WAL when `better-sqlite3` is present,
+JSON fallback otherwise) with `workflows`, `workflow_nodes`, `jobs` and
+`leases` tables; `runs/<jobId>/result.json` stays the source of truth until
+the engine lands.
 
 ### Write-mode gate
 
@@ -449,7 +501,8 @@ read jobs from a disposable worktree when that matters.
 | `agents_metrics` | `{groupBy?: ('agent'\|'model'\|'mode'\|'taskType')[]}` | Success rate, p50/p95 latency, error kinds and tokens per group (default: all four dimensions) from job history. |
 | `jules_delegate` | `{task, cwd?, source?, startingBranch?, title?, requirePlanApproval?, automationMode?, account?, timeoutS?, taskType?}` | Starts a Jules cloud session. Needs `JULES_API_KEY` and either `cwd` (infers the source and branch from the `origin` remote) or an explicit `source`. Returns `{jobId, status:'queued'}`; the job behaves like any other for `job_status`/`job_wait`/`job_result`. The result is a GitHub pull request. |
 | `jules_sources` | `{account?}` | The GitHub repos connected to the Jules account. Connect new ones in the Jules web UI — the API cannot add them. |
-| `jules_check` | `{jobId?, sessionId?}` | One live read of a session: `state`, `prUrl`, `branch`, `sessionUrl`, last message. Needs no poller, so it works after a reboot, and it finalizes a local job whose session ended while the machine was off. |
+| `jules_check` | `{jobId?, sessionId?}` | One live read of a session: `state`, `prUrl`, `branch`, `sessionUrl`, last message — plus `attentionRequired`, `attentionReason`, `recommendedAction`, `canAutoResolve`, `attempts` when the session is waiting (`AWAITING_*`/`PAUSED`). Needs no poller, so it works after a reboot, and it finalizes a local job whose session ended while the machine was off. |
+| `jules_interact` | `{jobId?, sessionId?, action: 'reply'\|'approve_plan', message?}` | Talk to a live Jules session: `reply` (needs `message`) or `approve_plan`. Remote `pause`/`resume`/`cancel` are rejected — the API does not offer them; a `PAUSED` session is observed with backoff, not resumed by call. Clears `pollingStoppedReason` and bumps `attempts`. `job_reply` on a Jules parent still works for compatibility. |
 | `jules_sessions` | `{limit?, state?, account?}` | Lists sessions straight from the Jules API, newest first, each with the local `jobId` when this machine has one and `null` when it does not. Without `account` it merges every enabled account, tags each session with its `accountId`, and reports an account that fails in `accountErrors` without failing the call. The recovery path when the local record is gone. |
 | `jules_accounts` | `{}` | The configured Jules accounts, read-only: masked keys (`keyLast4` only), rolling 24-hour and concurrent usage, and each account's source-cache status. Accounts are created and edited in the dashboard. |
 | `jules_schedules` | `{}` | The recurring Jules tasks, read-only, with their next run and last result. Schedules are created and edited in the dashboard. |
