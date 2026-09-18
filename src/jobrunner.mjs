@@ -4,7 +4,8 @@ import { createJob, updateResult, appendStdout, stdoutPath, responsePath, readRe
 import { appendEvent } from './eventlog.mjs'
 import { adapterFor as defaultAdapterFor } from './adapters/index.mjs'
 import { checkWriteAllowed, acquireWriteLock, releaseWriteLock } from './worktree.mjs'
-import { resolveVariant, KILL_GRACE_S } from './config.mjs'
+import { resolveVariant, KILL_GRACE_S, SANDBOX } from './config.mjs'
+import { resolveSandboxProfile, filterEnv, sandboxTelemetry } from './sandbox.mjs'
 import { resolveEffectiveTimeoutS as defaultResolveEffectiveTimeoutS } from './timeouts.mjs'
 import { selectLearnings as defaultSelectLearnings, augmentTask as defaultAugmentTask } from './learnings.mjs'
 import { takeSnapshot as defaultTakeSnapshot, diffSnapshots as defaultDiffSnapshots, formatViolation as defaultFormatViolation } from './readguard.mjs'
@@ -14,6 +15,9 @@ import { startRemoteJob as defaultStartRemoteJob } from './cloud/runner.mjs'
 // cancelJob for an immediate kill; reconcileOrphans (jobstore.mjs) covers
 // jobs left running by a process that died without ever calling cancelJob.
 const active = new Map()
+
+// Emit the compatibility-sandbox warning once per process, not per job.
+let _warnedCompatibility = false
 
 function summarize(text, max = 300) {
   if (!text) return ''
@@ -154,11 +158,15 @@ export function startJob({
   // must never be judged by a snapshot it never ran against.
   const snapshot = mode === 'read' ? takeSnapshotFn(cwd) : null
 
-  // The local CLIs are third-party processes outside our control, and
-  // JULES_API_KEY is a credential agent-hub itself introduced: it must not
-  // travel to them. Nothing else is filtered.
-  const childEnv = { ...process.env }
-  delete childEnv.JULES_API_KEY
+  // The local CLIs are third-party processes outside our control. Secrets
+  // are always redacted; HOME isolation depends on the sandbox profile.
+  const sandboxProfile = resolveSandboxProfile(env.AGENT_HUB_SANDBOX_PROFILE)
+  const childEnv = filterEnv({ ...process.env }, sandboxProfile)
+
+  if (sandboxProfile === 'compatibility' && !_warnedCompatibility) {
+    _warnedCompatibility = true
+    console.warn('Agent running in compatibility sandbox: environment secrets filtered, HOME inherited. Use isolated-home for stronger credential isolation.')
+  }
 
   let child
   try {
@@ -171,7 +179,8 @@ export function startJob({
   }
 
   updateResult(job.jobId, { status: 'running', pid: child.pid, pgid: child.pid }, env)
-  appendEvent({ kind: 'job.started', agent, model, cwd, title, jobId: job.jobId, taskType }, { env })
+  const sandbox = sandboxTelemetry(childEnv, process.env, sandboxProfile)
+  appendEvent({ kind: 'job.started', agent, model, cwd, title, jobId: job.jobId, taskType, sandbox }, { env })
   active.set(job.jobId, { pgid: child.pid })
 
   // Hard-kill at timeoutS + KILL_GRACE_S, not at timeoutS itself: agy is
