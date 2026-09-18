@@ -133,6 +133,21 @@ export function resolveTimeoutS(agent, model) {
  * Reasoning-effort variant (minimal/low/medium/high/max) for opencode:
  * explicit override wins, then the model's MODEL_REGISTRY default, else none.
  */
+/**
+ * Sandbox configuration. 'compatibility' is the DEFAULT profile — it only
+ * redacts known secret env vars but INHERITS the real HOME directory.
+ * compatibility is NOT a security sandbox. Use 'isolated-home' or 'isolated'
+ * for stronger credential isolation (HOME points to a fresh temp dir).
+ */
+export const SANDBOX = {
+  defaultProfile: 'compatibility',
+  profiles: {
+    compatibility: { inheritHome: true, redactEnv: true },
+    'isolated-home': { inheritHome: false, redactEnv: true },
+    isolated: { inheritHome: false, redactEnv: true },
+  },
+}
+
 export function resolveVariant(agent, model, override) {
   if (override) return override
   return MODEL_REGISTRY[agent]?.[model]?.variant ?? null
