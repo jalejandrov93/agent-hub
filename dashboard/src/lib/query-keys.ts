@@ -11,4 +11,5 @@ export const qk = {
   sessions: ["sessions"] as const,
   activities: (id: string) => ["activities", id] as const,
   workGraph: ["work-graph"] as const,
+  tools: ["tools"] as const,
 }

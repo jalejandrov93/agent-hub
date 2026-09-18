@@ -2,6 +2,8 @@ import { McpServer, ResourceTemplate } from '@modelcontextprotocol/sdk/server/mc
 import { StdioServerTransport } from '@modelcontextprotocol/sdk/server/stdio.js'
 import { execFileSync } from 'node:child_process'
 import fs from 'node:fs'
+import path from 'node:path'
+import { fileURLToPath } from 'node:url'
 import { z } from 'zod'
 
 import { paths } from './config.mjs'
@@ -84,10 +86,40 @@ const taskTypeArg = z
   .optional()
   .describe('Pass the same taskType used for route() — it feeds metrics, adaptive timeouts and learnings.')
 
+// Registry mirror of every tool registered in buildServer(): register()
+// appends {name, ...def} here, so listMcpTools() returns [{name, title,
+// description}] with zero drift and zero MCP connection. Populated as a
+// side effect of buildServer() only — importing this module never connects.
+const TOOLS = []
+
+/** Pure, side-effect-free snapshot of the registered MCP tools. */
+export function listMcpTools() {
+  // TOOLS fills as a side effect of buildServer(), which only registers
+  // (never connects — connect happens in main()). Lazy-build once so this
+  // stays pure to import and connect-free to call; dedupe by name so a
+  // process that also boots the real server never reports doubles.
+  if (TOOLS.length === 0) buildServer()
+  const seen = new Map()
+  for (const { name, title, description } of TOOLS) {
+    if (!seen.has(name)) seen.set(name, { name, title, description })
+  }
+  return [...seen.values()]
+}
+
 export function buildServer() {
   const server = new McpServer({ name: 'agent-hub', version: VERSION })
 
-  server.registerTool(
+  // Single source of truth for the registered MCP tools: every
+  // server.registerTool call below goes through this helper, which keeps a
+  // parallel {name, ...def} entry so GET /api/tools (and any future
+  // consumer) can list {name, title, description} with zero drift and zero
+  // MCP connection. Pure data — importing this module must never connect.
+  const register = (name, def, handler) => {
+    TOOLS.push({ name, ...def })
+    return server.registerTool(name, def, handler)
+  }
+
+  register(
     'agents_quota',
     {
       title: 'Agent quota usage',
@@ -108,7 +140,7 @@ export function buildServer() {
     )
   )
 
-  server.registerTool(
+  register(
     'agents_status',
     {
       title: 'Agent CLI health',
@@ -125,7 +157,7 @@ export function buildServer() {
     )
   )
 
-  server.registerTool(
+  register(
     'route',
     {
       title: 'Pick an agent+model for a task type',
@@ -147,7 +179,7 @@ export function buildServer() {
     guard(({ taskType, mode, includeCatalog }) => routeTool({ taskType, mode, includeCatalog: !!includeCatalog }))
   )
 
-  server.registerTool(
+  register(
     'delegate',
     {
       title: 'Delegate a task to an agent CLI',
@@ -174,7 +206,7 @@ export function buildServer() {
     )
   )
 
-  server.registerTool(
+  register(
     'dispatch',
     {
       title: 'Dispatch a task through routing, policy, and reservation',
@@ -201,7 +233,7 @@ export function buildServer() {
     )
   )
 
-  server.registerTool(
+  register(
     'job_wait',
     {
       title: 'Wait for a job to finish',
@@ -217,7 +249,7 @@ export function buildServer() {
     guard(({ jobId, timeoutS }) => jobWaitTool({ jobId, timeoutS }))
   )
 
-  server.registerTool(
+  register(
     'job_status',
     {
       title: 'Read a job status',
@@ -229,7 +261,7 @@ export function buildServer() {
     guard(({ jobId }) => jobStatusTool({ jobId }))
   )
 
-  server.registerTool(
+  register(
     'job_result',
     {
       title: 'Read a job result (head only)',
@@ -245,7 +277,7 @@ export function buildServer() {
     guard(({ jobId, maxLines, tailLines }) => jobResultTool({ jobId, maxLines, tailLines }))
   )
 
-  server.registerTool(
+  register(
     'job_cancel',
     {
       title: 'Cancel a running job',
@@ -257,7 +289,7 @@ export function buildServer() {
     guard(({ jobId }) => jobCancelTool({ jobId }))
   )
 
-  server.registerTool(
+  register(
     'job_reply',
     {
       title: 'Reply to a finished agy/opencode job, resuming its session',
@@ -288,7 +320,7 @@ export function buildServer() {
     guard(({ jobId, message, mode, timeoutS, title, taskType, action }) => jobReplyTool({ jobId, message, mode, timeoutS, title, taskType, action }))
   )
 
-  server.registerTool(
+  register(
     'jules_delegate',
     {
       title: 'Delegate a task to Jules (Google\'s remote coding agent)',
@@ -322,7 +354,7 @@ export function buildServer() {
     )
   )
 
-  server.registerTool(
+  register(
     'jules_sources',
     {
       title: 'List GitHub repos connected to the Jules account',
@@ -340,7 +372,7 @@ export function buildServer() {
     guard(({ account }) => julesSourcesTool({ account }))
   )
 
-  server.registerTool(
+  register(
     'jules_accounts',
     {
       title: 'List configured Jules accounts',
@@ -355,7 +387,7 @@ export function buildServer() {
     guard(() => julesAccountsTool({}))
   )
 
-  server.registerTool(
+  register(
     'jules_schedules',
     {
       title: 'List recurring Jules tasks',
@@ -371,7 +403,7 @@ export function buildServer() {
     guard(() => julesSchedulesTool({}))
   )
 
-  server.registerTool(
+  register(
     'jules_check',
     {
       title: 'Check a Jules session live',
@@ -399,7 +431,7 @@ export function buildServer() {
     })
   )
 
-  server.registerTool(
+  register(
     'jules_interact',
     {
       title: 'Interact with a Jules session',
@@ -420,7 +452,7 @@ export function buildServer() {
     guard(({ jobId, sessionId, action, message }) => julesInteractTool({ jobId, sessionId, action, message }))
   )
 
-  server.registerTool(
+  register(
     'jules_wait',
     {
       title: 'Wait locally for a Jules session to need you or finish',
@@ -446,7 +478,7 @@ export function buildServer() {
     )
   )
 
-  server.registerTool(
+  register(
     'jules_sessions',
     {
       title: 'List Jules sessions live from the API',
@@ -469,7 +501,7 @@ export function buildServer() {
     guard(({ limit, state, account }) => julesSessionsTool({ limit, state, account }))
   )
 
-  server.registerTool(
+  register(
     'jules_supervise',
     {
       title: 'Supervise a Jules session with autonomous watch and interaction',
@@ -509,7 +541,7 @@ export function buildServer() {
     )
   )
 
-  server.registerTool(
+  register(
     'agents_metrics',
     {
       title: 'Delegation metrics',
@@ -526,7 +558,7 @@ export function buildServer() {
     guard(({ groupBy }) => metricsTool({ groupBy }))
   )
 
-  server.registerTool(
+  register(
     'learning_propose',
     {
       title: 'Propose a learning',
@@ -775,7 +807,13 @@ async function main() {
   log(`ready — state dir ${paths().home}`)
 }
 
-main().catch((error) => {
-  log('fatal:', error?.message ?? error)
-  process.exitCode = 1
-})
+// Importing this module (e.g. listMcpTools() for GET /api/tools) must be
+// side-effect-free: main() runs only when node executes this file directly.
+const invokedDirectly =
+  process.argv[1] != null && path.resolve(process.argv[1]) === fileURLToPath(import.meta.url)
+if (invokedDirectly) {
+  main().catch((error) => {
+    log('fatal:', error?.message ?? error)
+    process.exitCode = 1
+  })
+}

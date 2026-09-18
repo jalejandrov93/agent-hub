@@ -30,6 +30,8 @@ import type {
   CloudSessionRow,
   CloudActivitiesResponse,
   CloudSourceCacheEntry,
+  McpToolInfo,
+  McpToolsResponse,
   WorkGraphResponse,
   WorkGraphRepo,
   WorkGraphWorktree,
@@ -101,6 +103,10 @@ export type CloudSessionsResponseT = z.infer<typeof CloudSessionsResponse>
 export type CloudSession = z.infer<typeof CloudSessionRow>
 
 export type CloudActivitiesResponseT = z.infer<typeof CloudActivitiesResponse>
+
+/** MCP tools (GET /api/tools, src/index.mjs listMcpTools) — name/title/description per registered tool. */
+export type McpToolT = z.infer<typeof McpToolInfo>
+export type McpToolsResponseT = z.infer<typeof McpToolsResponse>
 
 /** Minimal shape badges.ts needs — a subset of the live query caches. */
 export type DerivedState = {

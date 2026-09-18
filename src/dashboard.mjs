@@ -17,6 +17,7 @@ import { computeMetrics } from './metrics.mjs'
 import { listProposals, refreshProposals, decideProposal } from './proposals.mjs'
 import { listLearnings, proposeLearning, decideLearning, deleteLearning } from './learnings.mjs'
 import { jobResultTool } from './tools/jobs.mjs'
+import { listMcpTools } from './index.mjs'
 import { startScheduler, runScheduleNow } from './scheduler.mjs'
 import { createAccount, updateAccount, deleteAccount, setPolicy, listAccounts } from './accounts.mjs'
 import { refreshSources, readSourcesCache, normalizedSources } from './cloud/sources.mjs'
@@ -452,6 +453,15 @@ export function createServer({ env = process.env, commandRunner = runCommand, di
       agentsQuotaTool({ env })
         .then((payload) => sendJson(res, 200, { agents: payload }))
         .catch((error) => sendError(res, error))
+      return
+    }
+
+    if (url.pathname === '/api/tools' && req.method === 'GET') {
+      try {
+        sendJson(res, 200, { tools: listMcpTools() })
+      } catch (error) {
+        sendError(res, domainError(error))
+      }
       return
     }
 
