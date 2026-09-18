@@ -326,6 +326,26 @@ are explicitly rejected because the backend does not offer them. See
 `src/cloud/jules/adapter.mjs` (`ALL_JULES_STATES`, `isWaitingState`) and
 `src/cloud/check.mjs` (`computeAttention`).
 
+**Model A: interacting never restarts polling.** After `jules_interact`
+(or `job_reply` on a Jules parent) nothing observes the session again on its
+own — the local record freezes at `running` until *you* observe it. So the
+three observation tools have distinct jobs, and mixing them up loses
+completions:
+
+- `job_wait` — waits on the **local record**: returns on terminal, or
+  immediately on `done`+`waiting` with attention fields. It does *not* poll
+  Jules itself, so after an interaction it will *not* see the session finish.
+- `jules_wait` — **actively observes** one session for a bounded local budget
+  (`timeoutS≤600`); never a watch daemon.
+- `jules_check` — one **punctual inspection** plus reconciliation (finalizes
+  the local job if the session already ended).
+
+Post-interaction rule: `jules_interact` → observe with `jules_wait` (or
+`jules_check`), never `job_wait` alone. Continuous supervision belongs to
+the future `jules_supervise` (B4), which will own observation through a
+`remote.watch = {owner, generation}` lease so two watchers never drive the
+same session.
+
 **Several accounts.** Quotas are per Jules account, so agent-hub can hold more
 than one. Add them in the dashboard; they live in `accounts.json` under
 `AGENT_HUB_HOME`, written with mode `0600`, and no API response ever returns a

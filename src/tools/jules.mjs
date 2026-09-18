@@ -338,6 +338,10 @@ export function julesSchedulesTool({
 /**
  * Interact with an active Jules session: reply with a message or approve a plan.
  * The Jules API runs remotely and does NOT support remote pause, resume, or cancel.
+ *
+ * Model A (confirmed): interacting only modifies the remote session — it clears
+ * pollingStoppedReason but NEVER restarts a poller. Post-interaction observation
+ * belongs to the caller (jules_wait/jules_check) or the supervisor watch lease.
  */
 export async function julesInteractTool({
   jobId,

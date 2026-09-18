@@ -375,7 +375,9 @@ export function buildServer() {
       title: 'Interact with a Jules session',
       description:
         'Send a message or approve a plan for an active Jules session. Only action "reply" (requires message) and "approve_plan" ' +
-        'are supported. Jules runs remotely on Google infrastructure and does NOT support remote pause, resume, or cancel.',
+        'are supported. Jules runs remotely on Google infrastructure and does NOT support remote pause, resume, or cancel. ' +
+        'Model A: interacting never restarts polling — after this call nothing observes the session until you do ' +
+        '(jules_wait/jules_check) or the supervisor owns it. job_wait alone will NOT see post-interaction completion.',
       inputSchema: {
         jobId: z.string().min(1).optional().describe('Local jobId whose remote.sessionId should receive the interaction.'),
         sessionId: z.string().min(1).optional().describe('A bare Jules session id.'),
@@ -396,7 +398,8 @@ export function buildServer() {
         'Local orchestration only — the Jules API has no wait endpoint. Polls with a local budget until the session reaches ' +
         'a terminal state (done+terminal) or a waiting state AWAITING_*/PAUSED (done+waiting, with attentionRequired, ' +
         'attentionReason and recommendedAction — then act via jules_interact). Returns done+timedOut:false only when the ' +
-        'local budget elapsed while the session keeps working; the remote session is unaffected.',
+        'local budget elapsed while the session keeps working; the remote session is unaffected. ' +
+        'Never a watch daemon: one bounded wait per call; continuous supervision is the future jules_supervise.',
       inputSchema: {
         jobId: z.string().min(1).optional().describe('Local jobId whose remote.sessionId should be watched.'),
         sessionId: z.string().min(1).optional().describe('A bare Jules session id.'),

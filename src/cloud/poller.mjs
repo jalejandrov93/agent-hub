@@ -315,8 +315,11 @@ export async function pollUntilTerminal({
     // Returning here (instead of slow-polling forever) hands control to the
     // supervisor/human via job_wait's waiting signal or jules_check's
     // attention fields. This is what makes pollingStoppedReason true rather
-    // than descriptive: after this return nothing polls until an interaction
-    // (jules_interact/job_reply) clears the reason and polling resumes.
+    // than descriptive: after this return nothing polls again on its own.
+    // Model A (confirmed): jules_interact/job_reply clear the reason but
+    // NEVER restart a poller — post-interaction observation belongs to the
+    // caller (jules_wait/jules_check) or the future supervisor, which owns
+    // the watch lease (see docs/execution-contract.md §7).
     if (isWaitingRemoteState(adapter, tick.state)) {
       return { outcome: 'waiting', state: tick.state, summary: tick.summary, session: tick.session, apiError: null }
     }

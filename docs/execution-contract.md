@@ -97,3 +97,28 @@ target state for later slices); file:line refs ground what already exists.
   `src/cloud/runner.mjs:444-466`).
 - Terminal remote = `COMPLETED/FAILED` state, never timeout/error-budget
   (`src/cloud/poller.mjs:226-233` -> `src/cloud/runner.mjs:88-97`).
+
+## 7. Watch ownership (Model A, confirmed — design for B4)
+
+- `jules_interact`/`job_reply` on a Jules parent NEVER restart a poller.
+  After an interaction the session is unobserved until the caller observes it
+  (`jules_wait`/`jules_check`) or a supervisor owns it.
+- B4 `jules_supervise` must formally acquire observation ownership, not just
+  `check → reply → return`: Supervisor = observe → decide → interact →
+  resume-observation.
+- Lease shape (design, not yet implemented):
+  `remote.watch = {owner: 'supervisor' | 'jules_wait' | null, generation: N}`.
+  A new owner bumps `generation`; a stale generation stops writing. This keeps
+  a supervisor and a concurrent `jules_wait` from driving the same session.
+- `jules_wait` respects the lease: read-only observation while a supervisor
+  owns the watch.
+
+## 8. C0-real gate (C1 stays blocked until this lands)
+
+- C0 schema (SQLite WAL tables + nullable `JobRecord` columns) is groundwork,
+  not foundation: `src/storage/` is still a parallel layer, `result.json` /
+  `jobstore` remains the operational source of truth.
+- Exit gate for C1 DAG: SQLite in the execution path (dual-write or
+  write-through for jobs/workflows/leases), `initDb` at startup, and the
+  `better-sqlite3` packaging decision (native module vs JSON fallback in
+  `install:local`).
