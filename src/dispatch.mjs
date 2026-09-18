@@ -5,9 +5,11 @@ import { executeWithPolicy } from './policy/executor.mjs'
 import { startJob } from './jobrunner.mjs'
 import { createJob, listJobs, readResult } from './jobstore.mjs'
 import { runPreflight, circuitBreakerOpen } from './preflight.mjs'
-import { acquireWriteLock, releaseWriteLock } from './worktree.mjs'
+import { acquireWriteLock, releaseWriteLock, adoptWriteLock } from './worktree.mjs'
 import { resolveEffectiveTimeoutS } from './timeouts.mjs'
 import { ADAPTIVE_TIMEOUT } from './config.mjs'
+import { classifyError } from './policy/taxonomy.mjs'
+import { adapterFor as defaultAdapterFor } from './adapters/index.mjs'
 
 /** Default window for deduplicating recent dispatches: 10 minutes */
 export const DISPATCH_WINDOW_MS = 10 * 60 * 1000
@@ -246,6 +248,9 @@ export async function dispatch({
   fingerprintRemoteIntentFn = fingerprintRemoteIntent,
   findMatchingSessionFn = findMatchingSession,
   nowFn = Date.now,
+  adoptWriteLockFn = adoptWriteLock,
+  classifyErrorFn = classifyError,
+  adapterForFn = defaultAdapterFor,
   ...restDeps
 } = {}) {
   const key = dispatchKey ?? computeDispatchKey({ task, cwd, taskType, workflowStep })
@@ -301,6 +306,9 @@ export async function dispatch({
   })
   inFlightDispatches.set(key, inFlightPromise)
 
+  let reservationToken = null
+  let reservationAdopted = false
+
   try {
     const execId = `exec_${crypto.randomBytes(6).toString('hex')}`
     const rootExecId = rootExecutionId ?? execId
@@ -335,8 +343,24 @@ export async function dispatch({
       fallbackCandidates = usableCandidates.slice(1)
     }
 
-    // 4. Remote reconciliation for Jules
-    if (primaryCandidate.agent === 'jules') {
+    // Helper to determine if a candidate is remote
+    const isRemoteCandidate = (c) => {
+      if (!c) return false
+      if (c.agent === 'jules' || c.remote === true) return true
+      if (restDeps.adapter?.remote === true) return true
+      try {
+        return Boolean(adapterForFn(c.agent)?.remote)
+      } catch {
+        return false
+      }
+    }
+
+    const isRemote = isRemoteCandidate(primaryCandidate)
+
+    let matchedSessionId = restDeps.sessionId ?? null
+
+    // 4. Remote reconciliation for Jules / remote candidates
+    if (primaryCandidate.agent === 'jules' || isRemote) {
       const fingerprint = fingerprintRemoteIntentFn({
         source: restDeps.source,
         branch: restDeps.startingBranch ?? restDeps.branch,
@@ -359,25 +383,35 @@ export async function dispatch({
         sessions: restDeps.sessions,
       })
 
-      if (matched?.job) {
-        recentDispatches.set(key, { job: matched.job, timestamp: nowFn() })
-        return {
-          job: matched.job,
-          dispatchKey: key,
-          executionId: matched.job.executionId ?? matched.job.execution_id ?? execId,
-          candidate: primaryCandidate,
-        }
+      if (matched?.sessionId) {
+        matchedSessionId = matched.sessionId
+      } else if (matched?.session) {
+        const rawId = matched.session.id ?? matched.session.sessionId ?? matched.session.name
+        matchedSessionId = typeof rawId === 'string' && rawId.startsWith('sessions/') ? rawId.slice(9) : rawId
       }
-      if (matched?.session && !matched?.job) {
+
+      if (matched?.job) {
+        const jobSessId = matched.job.remote?.sessionId ?? matched.job.sessionId
+        if (jobSessId) matchedSessionId = jobSessId
+        if (matched.job.status !== 'failed' && matched.job.status !== 'canceled') {
+          recentDispatches.set(key, { job: matched.job, timestamp: nowFn() })
+          return {
+            job: matched.job,
+            dispatchKey: key,
+            executionId: matched.job.executionId ?? matched.job.execution_id ?? execId,
+            candidate: primaryCandidate,
+          }
+        }
+      } else if (matched?.session && !matched?.job) {
         const adoptedJob = createJobFn({
-          agent: 'jules',
+          agent: primaryCandidate.agent,
           model: primaryCandidate.model ?? 'default',
           task: task ?? matched.session.prompt ?? '',
           cwd: null,
           title: restDeps.title ?? matched.session.title ?? '',
           mode: 'write',
           remote_state: matched.session.state ?? 'IN_PROGRESS',
-          sessionId: matched.sessionId,
+          sessionId: matchedSessionId,
           dispatchKey: key,
           executionId: execId,
           attempt,
@@ -395,8 +429,10 @@ export async function dispatch({
       }
     }
 
-    // 5. Worktree reservation check
-    if (mode === 'write' && primaryCandidate.agent !== 'jules') {
+    const resolvedSessionId = matchedSessionId ?? restDeps.job?.remote?.sessionId ?? restDeps.job?.sessionId ?? restDeps.sessionId ?? null
+
+    // 5. Worktree reservation (honest reservation token)
+    if (mode === 'write' && !isRemote) {
       const lock = acquireWriteLockFn({ cwd, jobId: execId, env })
       if (!lock.acquired) {
         const err = new Error(`Worktree locked: ${lock.reason}`)
@@ -404,21 +440,45 @@ export async function dispatch({
         err.category = 'write-conflict'
         throw err
       }
-      releaseWriteLockFn({ cwd, env })
+      reservationToken = lock.token
     }
 
     // 6. Policy resolution & recovery execution
-    const resolvedPolicy = policyForFn(category || 'default') || {
-      retry: 1,
-      resume: false,
-      fallback: true,
-      escalation: 'human',
+    const recoveryOrder = isRemote
+      ? ['resume', 'fallback', 'retry', 'escalate']
+      : ['retry', 'resume', 'fallback', 'escalate']
+
+    const resolvePolicyForError = (err) => {
+      if (category) {
+        return policyForFn(category) || {
+          retry: 1,
+          resume: false,
+          fallback: true,
+          escalation: 'human',
+        }
+      }
+      const meta = {
+        errorKind: err?.errorKind ?? err?.result?.errorKind ?? err?.result?.job?.errorKind,
+        status: err?.status ?? err?.statusCode ?? err?.result?.status ?? err?.result?.job?.status,
+        category: err?.category ?? err?.result?.category,
+      }
+      const cat = classifyErrorFn(err, meta)
+      const pol = cat ? policyForFn(cat) : null
+      return pol || policyForFn('default') || {
+        retry: 1,
+        resume: false,
+        fallback: true,
+        escalation: 'human',
+      }
     }
 
     const execCtx = {
       candidate: primaryCandidate,
       fallbacks: [...fallbackCandidates],
-      recoveryOrder: ['retry', 'resume', 'fallback', 'escalate'],
+      recoveryOrder,
+      sessionId: resolvedSessionId,
+      policyFor: policyForFn,
+      onResume: restDeps.onResume,
       onFallback: async ({ candidate }) => {
         // Ensure the candidate popped from fallbacks is still usable
         if (candidate) {
@@ -428,6 +488,7 @@ export async function dispatch({
           }
         }
       },
+      ...restDeps,
     }
 
     const execResult = await executeWithPolicyFn(
@@ -458,16 +519,23 @@ export async function dispatch({
           attempt: attemptNum,
           parentExecutionId,
           rootExecutionId: rootExecId,
+          reservationToken,
+          adoptWriteLockFn,
           workflow_id: restDeps.workflowId ?? restDeps.workflow_id,
           step_id: workflowStep ?? restDeps.step_id,
+          sessionId: activeCtx.sessionId,
+          resumed: activeCtx.resumed,
           env,
           ...restDeps,
         })
+
+        reservationAdopted = true
 
         const job = startResult?.job ?? startResult
         const status = job?.status
         const error = job?.error
         const errorKind = job?.errorKind
+        const currentSessionId = job?.sessionId ?? job?.remote?.sessionId ?? startResult?.sessionId ?? activeCtx.sessionId
 
         return {
           job,
@@ -475,9 +543,10 @@ export async function dispatch({
           status,
           error,
           errorKind,
+          sessionId: currentSessionId,
         }
       },
-      resolvedPolicy,
+      resolvePolicyForError,
       execCtx
     )
 
@@ -493,6 +562,11 @@ export async function dispatch({
       candidate: finalCandidate,
     }
   } finally {
+    if (reservationToken && !reservationAdopted) {
+      try {
+        releaseWriteLockFn({ cwd, token: reservationToken, env })
+      } catch {}
+    }
     inFlightDispatches.delete(key)
     releaseInFlight?.()
   }

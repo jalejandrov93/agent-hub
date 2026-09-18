@@ -342,9 +342,9 @@ test('automatic fallback to next candidate when first candidate fails fast', asy
   assert.equal(res.job.jobId, 'job-succeeded-fallback')
 })
 
-test('reserves write lock when mode is write and releases after check', async () => {
+test('reserves write lock when mode is write and passes reservationToken to startJob', async () => {
   let acquireLockCalled = false
-  let releaseLockCalled = false
+  let passedReservationToken = null
 
   const res = await dispatch({
     task: 'write-task',
@@ -359,24 +359,191 @@ test('reserves write lock when mode is write and releases after check', async ()
     runPreflightFn: async () => ({ status: 'ready' }),
     acquireWriteLockFn: ({ cwd, jobId }) => {
       acquireLockCalled = true
-      return { acquired: true, file: '/tmp/lock.file' }
+      return { acquired: true, file: '/tmp/lock.file', token: 'reservation-token-abc' }
     },
-    releaseWriteLockFn: () => {
-      releaseLockCalled = true
+    startJobFn: async (args) => {
+      passedReservationToken = args.reservationToken
+      return {
+        job: {
+          jobId: 'job-write-1',
+          agent: args.agent,
+          model: args.model,
+          status: 'queued',
+          createdAt: new Date().toISOString(),
+          dispatchKey: args.dispatchKey,
+        },
+      }
     },
-    startJobFn: async (args) => ({
-      job: {
-        jobId: 'job-write-1',
-        agent: args.agent,
-        model: args.model,
-        status: 'queued',
-        createdAt: new Date().toISOString(),
-        dispatchKey: args.dispatchKey,
-      },
-    }),
   })
 
-  assert.ok(acquireLockCalled, 'acquireWriteLock must be called')
-  assert.ok(releaseLockCalled, 'releaseWriteLock must be called after reservation check')
+  assert.ok(acquireLockCalled, 'acquireWriteLock must be called to reserve lock')
+  assert.equal(passedReservationToken, 'reservation-token-abc', 'startJob must receive reservationToken')
   assert.equal(res.job.jobId, 'job-write-1')
 })
+
+test('timeout simulado en candidato remoto → reconcile/resume intentado ANTES que crear nueva ejecución', async () => {
+  const callOrder = []
+  let attempts = 0
+
+  const mockStartJob = async (args) => {
+    attempts++
+    callOrder.push(`startJob:attempt-${args.attempt}:resumed-${Boolean(args.resumed)}`)
+    if (attempts === 1) {
+      return {
+        job: {
+          jobId: 'job-remote-timeout-1',
+          agent: args.agent,
+          status: 'failed',
+          errorKind: 'timeout',
+          error: 'Remote session timed out',
+          remote: { sessionId: 'sess-remote-999' },
+        },
+        done: Promise.resolve(),
+      }
+    }
+    return {
+      job: {
+        jobId: 'job-remote-resumed-2',
+        agent: args.agent,
+        status: 'queued',
+        remote: { sessionId: args.sessionId },
+      },
+      done: Promise.resolve(),
+    }
+  }
+
+  const mockOnResume = async (ctx) => {
+    callOrder.push(`onResume:sessionId-${ctx.sessionId}`)
+  }
+
+  const res = await dispatch({
+    task: 'remote architecture task',
+    cwd: '/tmp/repo',
+    candidate: { agent: 'jules', model: 'default' },
+    startJobFn: mockStartJob,
+    onResume: mockOnResume,
+  })
+
+  assert.equal(callOrder[0], 'startJob:attempt-1:resumed-false')
+  assert.equal(callOrder[1], 'onResume:sessionId-sess-remote-999')
+  assert.equal(callOrder[2], 'startJob:attempt-1:resumed-true')
+  assert.equal(res.job.jobId, 'job-remote-resumed-2')
+})
+
+test('error auth a mitad de ejecución respeta auth→no-retry aunque el caller no pasó category', async () => {
+  let startJobCalls = 0
+
+  const mockStartJob = async (args) => {
+    startJobCalls++
+    return {
+      job: {
+        jobId: 'job-auth-fail',
+        agent: args.agent,
+        model: args.model,
+        status: 'failed',
+        errorKind: 'auth',
+        error: '401 Invalid API Key',
+      },
+      done: Promise.resolve(),
+    }
+  }
+
+  let caughtError = null
+  try {
+    await dispatch({
+      task: 'task-without-category',
+      cwd: '/tmp/test-auth',
+      candidate: { agent: 'opencode', model: 'default' },
+      startJobFn: mockStartJob,
+    })
+  } catch (err) {
+    caughtError = err
+  }
+
+  assert.ok(caughtError, 'dispatch must throw when terminal escalation is reached')
+  assert.equal(startJobCalls, 1, 'auth error must never be retried')
+  assert.equal(caughtError.escalation, 'human')
+})
+
+test('reserva honesta: startJob adopta reservationToken válido como execution lease', async () => {
+  const { home, env, cleanup } = makeTempHome()
+  try {
+    const cwd = path.join(home, 'worktree-wt')
+    fs.mkdirSync(cwd, { recursive: true })
+
+    const { acquireWriteLock, readWriteLock } = await import('../src/worktree.mjs')
+    const { startJob } = await import('../src/jobrunner.mjs')
+    const EventEmitter = (await import('node:events')).EventEmitter
+
+    const reservation = acquireWriteLock({ cwd, jobId: 'dispatch-exec-1', env })
+    assert.ok(reservation.acquired)
+    const token = reservation.token
+
+    const lockBefore = readWriteLock({ cwd, env })
+    assert.equal(lockBefore.jobId, 'dispatch-exec-1')
+    assert.equal(lockBefore.token, token)
+
+    const { job } = startJob({
+      agent: 'opencode',
+      model: 'opencode/test',
+      task: 'write code',
+      cwd,
+      mode: 'write',
+      allowlist: [cwd],
+      reservationToken: token,
+      env,
+      spawn: () => {
+        const ee = new EventEmitter()
+        ee.pid = 99999
+        ee.kill = () => {}
+        return ee
+      },
+    })
+
+    assert.notEqual(job.status, 'failed')
+    const lockAfter = readWriteLock({ cwd, env })
+    assert.equal(lockAfter.jobId, job.jobId, 'lock must be adopted with new jobId')
+    assert.equal(lockAfter.token, token, 'adopted lock must keep the same reservation token')
+  } finally {
+    cleanup()
+  }
+})
+
+test('reserva honesta: token stale → error limpio (locked), nunca robo', async () => {
+  const { home, env, cleanup } = makeTempHome()
+  try {
+    const cwd = path.join(home, 'worktree-wt-stale')
+    fs.mkdirSync(cwd, { recursive: true })
+
+    const { acquireWriteLock, readWriteLock } = await import('../src/worktree.mjs')
+    const { startJob } = await import('../src/jobrunner.mjs')
+
+    const activeLock = acquireWriteLock({ cwd, jobId: 'other-holder-job', env })
+    assert.ok(activeLock.acquired)
+
+    const { job } = startJob({
+      agent: 'opencode',
+      model: 'opencode/test',
+      task: 'write code',
+      cwd,
+      mode: 'write',
+      allowlist: [cwd],
+      reservationToken: 'stale-token-12345',
+      env,
+      spawn: () => {
+        throw new Error('should not spawn')
+      },
+    })
+
+    assert.equal(job.status, 'failed')
+    assert.equal(job.errorKind, 'locked')
+    assert.match(job.error, /Reservation invalid/i)
+
+    const currentLock = readWriteLock({ cwd, env })
+    assert.equal(currentLock.jobId, 'other-holder-job')
+    assert.equal(currentLock.token, activeLock.token)
+  } finally {
+    cleanup()
+  }
+})
+
