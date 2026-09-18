@@ -7,6 +7,7 @@ import { fileURLToPath } from 'node:url'
 import { z } from 'zod'
 
 import { paths } from './config.mjs'
+import { initDb } from './storage/index.mjs'
 import { reconcileOrphans, listJobs, readResult, responsePath } from './jobstore.mjs'
 import { agentsStatusTool, routeTool, knownTaskTypes } from './tools/agents.mjs'
 import { delegateTool, jobWaitTool, jobStatusTool, jobResultTool, jobCancelTool, jobReplyTool } from './tools/jobs.mjs'
@@ -769,6 +770,12 @@ async function main() {
   if (args.includes('--selftest')) {
     await selftest()
     return
+  }
+
+  try {
+    initDb()
+  } catch (error) {
+    log('initDb failed on startup:', error?.message ?? error)
   }
 
   const changed = reconcileOrphans()

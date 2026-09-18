@@ -1,5 +1,6 @@
 import fs from 'node:fs'
 import path from 'node:path'
+import { stateHome as resolveStateHome, paths } from '../config.mjs'
 
 /**
  * Dual-mode storage: better-sqlite3 when available, JSON file fallback.
@@ -25,8 +26,17 @@ try {
   // better-sqlite3 not installed — fall back to JSON
 }
 
+export function _setSqliteDB(val) {
+  SqliteDB = val
+}
+
 function ensureDir(dir) {
   fs.mkdirSync(dir, { recursive: true })
+}
+
+function normalizeHome(stateHomeArg) {
+  if (typeof stateHomeArg === 'string' && stateHomeArg.length > 0) return stateHomeArg
+  return resolveStateHome()
 }
 
 /* ------------------------------------------------------------------ */
@@ -54,22 +64,66 @@ function writeJsonStore(stateHome, store) {
 
 function jsonInitDb(stateHome) {
   ensureDir(stateHome)
-  // Seed the file if missing
   const p = jsonStoragePath(stateHome)
   if (!fs.existsSync(p)) {
     writeJsonStore(stateHome, { workflows: {}, workflow_nodes: {}, jobs: {}, leases: {} })
   }
 }
 
+function normalizeJobRow(row) {
+  return {
+    job_id: row.job_id,
+    workflow_id: row.workflow_id ?? null,
+    step_id: row.step_id ?? null,
+    parent_execution_id: row.parent_execution_id ?? null,
+    root_execution_id: row.root_execution_id ?? null,
+    attempt: row.attempt ?? null,
+    remote_state: row.remote_state ?? null,
+    quality_score: row.quality_score ?? null,
+    verified: row.verified === true ? 1 : (row.verified === false ? 0 : (row.verified ?? null)),
+    judge_verdict: row.judge_verdict ?? null,
+    result_json: typeof row.result_json === 'string' ? row.result_json : JSON.stringify(row.result_json ?? null),
+  }
+}
+
+function normalizeLeaseRow(row) {
+  return {
+    job_id: row.job_id,
+    owner: row.owner ?? null,
+    expires_at: row.expires_at ?? null,
+  }
+}
+
 function jsonUpsertJob(stateHome, row) {
   const store = readJsonStore(stateHome)
-  store.jobs[row.job_id] = row
+  store.jobs = store.jobs || {}
+  store.jobs[row.job_id] = normalizeJobRow(row)
   writeJsonStore(stateHome, store)
 }
 
 function jsonGetJob(stateHome, jobId) {
   const store = readJsonStore(stateHome)
-  return store.jobs[jobId] ?? null
+  return store.jobs?.[jobId] ?? null
+}
+
+function jsonUpsertLease(stateHome, row) {
+  const store = readJsonStore(stateHome)
+  store.leases = store.leases || {}
+  store.leases[row.job_id] = normalizeLeaseRow(row)
+  writeJsonStore(stateHome, store)
+}
+
+function jsonDeleteLease(stateHome, jobId) {
+  const store = readJsonStore(stateHome)
+  if (store.leases && store.leases[jobId]) {
+    delete store.leases[jobId]
+    writeJsonStore(stateHome, store)
+  }
+}
+
+function jsonGetLease(stateHome, jobId) {
+  const store = readJsonStore(stateHome)
+  return store.leases?.[jobId] ?? null
 }
 
 /* ------------------------------------------------------------------ */
@@ -130,8 +184,20 @@ ON CONFLICT(job_id) DO UPDATE SET
 
 const GET_JOB_SQL = `SELECT * FROM jobs WHERE job_id = ?`
 
+const UPSERT_LEASE_SQL = `
+INSERT INTO leases (job_id, owner, expires_at)
+VALUES (@job_id, @owner, @expires_at)
+ON CONFLICT(job_id) DO UPDATE SET
+  owner = @owner,
+  expires_at = @expires_at
+`
+
+const DELETE_LEASE_SQL = `DELETE FROM leases WHERE job_id = ?`
+
+const GET_LEASE_SQL = `SELECT * FROM leases WHERE job_id = ?`
+
 function sqliteInitDb(stateHome) {
-  const dbPath = path.join(stateHome, 'agent-hub.db')
+  const dbPath = paths({ AGENT_HUB_HOME: stateHome }).dbFile
   ensureDir(stateHome)
   const db = new SqliteDB(dbPath)
   db.pragma('journal_mode = WAL')
@@ -140,11 +206,23 @@ function sqliteInitDb(stateHome) {
 }
 
 function sqliteUpsertJob(db, row) {
-  db.prepare(UPSERT_JOB_SQL).run(row)
+  db.prepare(UPSERT_JOB_SQL).run(normalizeJobRow(row))
 }
 
 function sqliteGetJob(db, jobId) {
   return db.prepare(GET_JOB_SQL).get(jobId) ?? null
+}
+
+function sqliteUpsertLease(db, row) {
+  db.prepare(UPSERT_LEASE_SQL).run(normalizeLeaseRow(row))
+}
+
+function sqliteDeleteLease(db, jobId) {
+  db.prepare(DELETE_LEASE_SQL).run(jobId)
+}
+
+function sqliteGetLease(db, jobId) {
+  return db.prepare(GET_LEASE_SQL).get(jobId) ?? null
 }
 
 /* ------------------------------------------------------------------ */
@@ -152,39 +230,35 @@ function sqliteGetJob(db, jobId) {
 /* ------------------------------------------------------------------ */
 
 /**
- * @param {string} stateHome - Root state directory (from stateHome() in config.mjs)
- * @returns {{ db: import('better-sqlite3').Database | null, backend: 'sqlite' | 'json' }}
+ * @param {string} [stateHome] - Root state directory (defaults to stateHome() in config.mjs)
+ * @returns {{ db: import('better-sqlite3').Database | null, backend: 'sqlite' | 'json', stateHome: string }}
  */
 export function initDb(stateHome) {
+  const home = normalizeHome(stateHome)
   if (SqliteDB) {
-    const db = sqliteInitDb(stateHome)
-    return { db, backend: 'sqlite' }
+    const db = sqliteInitDb(home)
+    return { db, backend: 'sqlite', stateHome: home }
   }
-  jsonInitDb(stateHome)
-  return { db: null, backend: 'json' }
+  jsonInitDb(home)
+  return { db: null, backend: 'json', stateHome: home }
 }
 
 /**
  * Insert or update a job row. `result_json` is the full job record as a string.
- * @param {{ db: import('better-sqlite3').Database | null, backend: 'sqlite' | 'json' }} ctx
+ * @param {{ db: import('better-sqlite3').Database | null, backend: 'sqlite' | 'json', stateHome?: string }} ctx
  * @param {object} row - Must include job_id; all other columns are nullable.
  */
 export function upsertJob(ctx, row) {
   if (ctx.backend === 'sqlite') {
     sqliteUpsertJob(ctx.db, row)
   } else {
-    // JSON fallback: store under stateHome inferred from the ctx shape.
-    // For the JSON path we store the raw row keyed by job_id.
-    const storePath = jsonStoragePath(process.env.AGENT_HUB_HOME || path.join(process.env.HOME || '', '.local', 'share', 'agent-hub'))
-    const stateHome = path.dirname(storePath)
-    const store = readJsonStore(stateHome)
-    store.jobs[row.job_id] = row
-    writeJsonStore(stateHome, store)
+    const home = normalizeHome(ctx?.stateHome)
+    jsonUpsertJob(home, row)
   }
 }
 
 /**
- * @param {{ db: import('better-sqlite3').Database | null, backend: 'sqlite' | 'json' }} ctx
+ * @param {{ db: import('better-sqlite3').Database | null, backend: 'sqlite' | 'json', stateHome?: string }} ctx
  * @param {string} jobId
  * @returns {object | null}
  */
@@ -192,8 +266,50 @@ export function getJob(ctx, jobId) {
   if (ctx.backend === 'sqlite') {
     return sqliteGetJob(ctx.db, jobId)
   }
-  const storePath = jsonStoragePath(process.env.AGENT_HUB_HOME || path.join(process.env.HOME || '', '.local', 'share', 'agent-hub'))
-  const stateHome = path.dirname(storePath)
-  const store = readJsonStore(stateHome)
-  return store.jobs[jobId] ?? null
+  const home = normalizeHome(ctx?.stateHome)
+  return jsonGetJob(home, jobId)
 }
+
+/**
+ * Insert or update a lease row.
+ * @param {{ db: import('better-sqlite3').Database | null, backend: 'sqlite' | 'json', stateHome?: string }} ctx
+ * @param {{ job_id: string, owner: string, expires_at: string }} row
+ */
+export function upsertLease(ctx, row) {
+  if (ctx.backend === 'sqlite') {
+    sqliteUpsertLease(ctx.db, row)
+  } else {
+    const home = normalizeHome(ctx?.stateHome)
+    jsonUpsertLease(home, row)
+  }
+}
+
+/**
+ * Delete a lease row by job_id.
+ * @param {{ db: import('better-sqlite3').Database | null, backend: 'sqlite' | 'json', stateHome?: string }} ctx
+ * @param {string} jobId
+ */
+export function deleteLease(ctx, jobId) {
+  if (ctx.backend === 'sqlite') {
+    sqliteDeleteLease(ctx.db, jobId)
+  } else {
+    const home = normalizeHome(ctx?.stateHome)
+    jsonDeleteLease(home, jobId)
+  }
+}
+
+/**
+ * Get a lease row by job_id.
+ * @param {{ db: import('better-sqlite3').Database | null, backend: 'sqlite' | 'json', stateHome?: string }} ctx
+ * @param {string} jobId
+ * @returns {object | null}
+ */
+export function getLease(ctx, jobId) {
+  if (ctx.backend === 'sqlite') {
+    return sqliteGetLease(ctx.db, jobId)
+  }
+  const home = normalizeHome(ctx?.stateHome)
+  return jsonGetLease(home, jobId)
+}
+
+export { getDb, closeDb } from './db.mjs'

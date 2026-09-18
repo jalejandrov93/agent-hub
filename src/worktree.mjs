@@ -3,6 +3,7 @@ import path from 'node:path'
 import crypto from 'node:crypto'
 import { execFileSync } from 'node:child_process'
 import { paths } from './config.mjs'
+import { getDb, upsertLease, deleteLease } from './storage/index.mjs'
 
 function gitDirs(cwd) {
   try {
@@ -98,6 +99,45 @@ function writeHolderAtomic(file, holder) {
   fs.renameSync(tmp, file)
 }
 
+function mirrorLeaseAcquire({ jobId, token, expiresAt, env = process.env }) {
+  try {
+    const ctx = getDb(env)
+    if (!ctx || ctx.backend !== 'sqlite' || !ctx.db) return
+    upsertLease(ctx, {
+      job_id: jobId ?? token,
+      owner: token,
+      expires_at: expiresAt,
+    })
+  } catch {
+    // Best-effort: file lock is authoritative until C1
+  }
+}
+
+function mirrorLeaseHeartbeat({ jobId, token, expiresAt, env = process.env }) {
+  try {
+    const ctx = getDb(env)
+    if (!ctx || ctx.backend !== 'sqlite' || !ctx.db) return
+    upsertLease(ctx, {
+      job_id: jobId ?? token,
+      owner: token,
+      expires_at: expiresAt,
+    })
+  } catch {
+    // Best-effort
+  }
+}
+
+function mirrorLeaseRelease({ jobId, token, env = process.env }) {
+  try {
+    const ctx = getDb(env)
+    if (!ctx || ctx.backend !== 'sqlite' || !ctx.db) return
+    if (jobId) deleteLease(ctx, jobId)
+    if (token && token !== jobId) deleteLease(ctx, token)
+  } catch {
+    // Best-effort
+  }
+}
+
 /**
  * Lease record stored in the lock file: { pid, jobId, token, cwd,
  * acquiredAt, heartbeatAt, expiresAt }. The random `token` is the ownership
@@ -132,6 +172,7 @@ export function acquireWriteLock({ cwd, jobId, env = process.env, ttlMs = LEASE_
     const fd = fs.openSync(file, 'wx')
     fs.writeSync(fd, JSON.stringify(lease))
     fs.closeSync(fd)
+    mirrorLeaseAcquire({ jobId, token, expiresAt: lease.expiresAt, env })
     return { acquired: true, file, token }
   } catch (error) {
     if (error.code !== 'EEXIST') throw error
@@ -213,12 +254,14 @@ export function heartbeatWriteLock({ cwd, token, env = process.env, ttlMs = LEAS
   if (holder.token !== token) return false
   const ttl = normalizeTtlMs(ttlMs)
   const now = new Date()
+  const expiresAt = new Date(now.getTime() + ttl).toISOString()
   try {
     writeHolderAtomic(file, {
       ...holder,
       heartbeatAt: now.toISOString(),
-      expiresAt: new Date(now.getTime() + ttl).toISOString(),
+      expiresAt,
     })
+    mirrorLeaseHeartbeat({ jobId: holder.jobId, token, expiresAt, env })
   } catch {
     return false
   }
@@ -280,6 +323,7 @@ export function adoptWriteLock({ cwd, token, jobId, env = process.env, ttlMs = L
   }
   try {
     writeHolderAtomic(file, updatedHolder)
+    mirrorLeaseAcquire({ jobId: updatedHolder.jobId, token, expiresAt: updatedHolder.expiresAt, env })
     return { adopted: true, token, file }
   } catch (error) {
     return { adopted: false, reason: String(error?.message ?? error) }
@@ -305,6 +349,7 @@ export function releaseWriteLock({ cwd, token, jobId, env = process.env }) {
   try {
     raw = fs.readFileSync(file, 'utf8')
   } catch {
+    mirrorLeaseRelease({ jobId, token, env })
     return true // already gone — nothing to release
   }
 
@@ -321,6 +366,7 @@ export function releaseWriteLock({ cwd, token, jobId, env = process.env }) {
     } catch {
       // Vanished under us — the outcome (no lock) is what we wanted.
     }
+    mirrorLeaseRelease({ jobId: holder.jobId ?? jobId, token, env })
     return true
   }
 
@@ -330,14 +376,17 @@ export function releaseWriteLock({ cwd, token, jobId, env = process.env }) {
       holder = JSON.parse(raw)
     } catch {
       fs.rmSync(file, { force: true })
+      mirrorLeaseRelease({ jobId, token, env })
       return true
     }
     if (holder.jobId !== jobId || holder.pid !== process.pid) return false
     fs.rmSync(file, { force: true })
+    mirrorLeaseRelease({ jobId, token: holder.token ?? token, env })
     return true
   }
 
   // DEPRECATED fully-legacy path: unconditional delete.
   fs.rmSync(file, { force: true })
+  mirrorLeaseRelease({ jobId, token, env })
   return true
 }

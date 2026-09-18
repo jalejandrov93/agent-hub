@@ -13,6 +13,7 @@ export function paths(env = process.env) {
   const home = stateHome(env)
   return {
     home,
+    dbFile: path.join(home, 'agent-hub.db'),
     eventsFile: path.join(home, 'events.jsonl'),
     preflightCacheFile: path.join(home, 'preflight-cache.json'),
     discoveryFile: path.join(home, 'discovery.json'),

@@ -3,6 +3,7 @@ import path from 'node:path'
 import crypto from 'node:crypto'
 import { paths } from './config.mjs'
 import { updateJsonLocked } from './fsutil.mjs'
+import { getDb, upsertJob } from './storage/index.mjs'
 
 function ensureDir(dir) {
   fs.mkdirSync(dir, { recursive: true })
@@ -49,6 +50,39 @@ export function promptPath(jobId, env = process.env) {
 function newJobId() {
   const ts = new Date().toISOString().replace(/[:.]/g, '-')
   return `${ts}-${crypto.randomBytes(4).toString('hex')}`
+}
+
+let sqliteMirrorWarned = false
+
+function mirrorJobToDb(job, env = process.env) {
+  try {
+    const ctx = getDb(env)
+    if (!ctx || ctx.backend !== 'sqlite' || !ctx.db) {
+      if (!sqliteMirrorWarned) {
+        console.warn('[agent-hub] better-sqlite3 unavailable; skipping SQLite job mirror')
+        sqliteMirrorWarned = true
+      }
+      return
+    }
+    upsertJob(ctx, {
+      job_id: job.jobId,
+      workflow_id: job.workflow_id ?? null,
+      step_id: job.step_id ?? null,
+      parent_execution_id: job.parent_execution_id ?? null,
+      root_execution_id: job.root_execution_id ?? null,
+      attempt: job.attempt ?? null,
+      remote_state: job.remote_state ?? (job.remote?.state ?? null),
+      quality_score: job.quality_score ?? null,
+      verified: job.verified === true ? 1 : (job.verified === false ? 0 : (job.verified ?? null)),
+      judge_verdict: job.judge_verdict ?? null,
+      result_json: JSON.stringify(job),
+    })
+  } catch (error) {
+    if (!sqliteMirrorWarned) {
+      console.warn('[agent-hub] SQLite job mirror failed:', error?.message ?? error)
+      sqliteMirrorWarned = true
+    }
+  }
 }
 
 /**
@@ -140,6 +174,7 @@ export function createJob({
     result.remote = { state: remote_state }
   }
   fs.writeFileSync(resultPath(jobId, env), JSON.stringify(result, null, 2), 'utf8')
+  mirrorJobToDb(result, env)
   return result
 }
 
@@ -173,6 +208,7 @@ export function updateResult(jobId, patchOrUpdater, env = process.env) {
       next.errorKind = current.errorKind
       next.error = current.error
     }
+    mirrorJobToDb(next, env)
     return next
   })
 }

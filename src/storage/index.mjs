@@ -1,1 +1,1 @@
-export { initDb, upsertJob, getJob } from './sqlite.mjs'
+export { initDb, upsertJob, getJob, upsertLease, deleteLease, getLease, getDb, closeDb } from './sqlite.mjs'
