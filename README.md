@@ -500,6 +500,17 @@ A dispatch result carrying a `jobId` is always waited on (`pendingJobHandle`;
 a bare pending record never counts as success), and `dispatchKey` is scoped
 by `workflowId` so identical steps in different runs never share a job.
 
+### C1.2 workflow↔supervisor link (`src/workflow/resume.mjs`)
+
+A waiting node resumes only via `resumeWorkflowNodeFromExecution(jobId)`:
+it reads the record's `workflow_id/step_id` (C0), no-ops unless the node is
+`WAITING` (`not-waiting:<estado>`), and CASes `WAITING→RUNNING` without
+stealing a live owner's claim (`owned-elsewhere` otherwise). Both
+`jules_supervise` and `jules_interact` call it best-effort after every
+successful interaction — the engine never polls Jules itself. Harness
+session origin (`_meta.sessionId` → `harness_origins`, mapping only,
+`supportsWake:false`) is recorded for the future lifecycle bridge.
+
 ### Harness profiles (`src/harness/`)
 
 `delegate()` starts a job and returns — but harnesses behave differently
