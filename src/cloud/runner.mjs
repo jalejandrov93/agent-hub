@@ -123,7 +123,7 @@ export function finishRemoteJob({
   if (outcome === 'completed') {
     updateResultFn(jobId, { status: 'succeeded', ...remotePatch }, env)
     appendEventFn(
-      { kind: 'job.finished', agent: current.agent, model: current.model, cwd: current.cwd, title: current.title, jobId, taskType: current.taskType ?? null, summary: summarize(responseText) },
+      { kind: 'job.finished', agent: current.agent, model: current.model, cwd: current.cwd, title: current.title, jobId, taskType: current.taskType ?? null, summary: summarize(responseText), harness: current.harness ?? null, waitMode: current.waitMode ?? null },
       { env }
     )
     return
@@ -142,7 +142,7 @@ export function finishRemoteJob({
   }
   updateResultFn(jobId, { status: 'failed', errorKind: error.kind, error: error.message, ...remotePatch }, env)
   appendEventFn(
-    { kind: 'job.failed', agent: current.agent, model: current.model, cwd: current.cwd, title: current.title, jobId, errorKind: error.kind, taskType: current.taskType ?? null, summary: summarize(error.message) },
+    { kind: 'job.failed', agent: current.agent, model: current.model, cwd: current.cwd, title: current.title, jobId, errorKind: error.kind, taskType: current.taskType ?? null, summary: summarize(error.message), harness: current.harness ?? null, waitMode: current.waitMode ?? null },
     { env }
   )
 }
@@ -268,6 +268,10 @@ export function startRemoteJob({
   attempt,
   workflow_id,
   step_id,
+  // Harness profile id + dispatch waitMode (informational: persisted on the
+  // record and events, never gates/locks/routes — see harness/registry.mjs).
+  harness = null,
+  waitMode = null,
 }) {
   // Mirrors startJob: only a root turn gets curated learnings prepended. A
   // Jules job never resumes via a local sessionId (job_reply talks to the
@@ -314,8 +318,10 @@ export function startRemoteJob({
     attempt,
     workflow_id,
     step_id,
+    harness,
+    waitMode,
   })
-  appendEventFn({ kind: 'job.queued', agent, model, cwd, title, jobId: job.jobId, taskType }, { env })
+  appendEventFn({ kind: 'job.queued', agent, model, cwd, title, jobId: job.jobId, taskType, harness: harness ?? null, waitMode: waitMode ?? null }, { env })
 
   const fail = (errorKind, message) => {
     // A job canceled (or already finalized) while this async chain was in
@@ -324,7 +330,7 @@ export function startRemoteJob({
     const current = readResultFn(job.jobId, env)
     if (TERMINAL_STATUSES.has(current.status)) return
     updateResultFn(job.jobId, { status: 'failed', errorKind, error: message }, env)
-    appendEventFn({ kind: 'job.failed', agent, model, cwd, title, jobId: job.jobId, errorKind, taskType, summary: summarize(message) }, { env })
+    appendEventFn({ kind: 'job.failed', agent, model, cwd, title, jobId: job.jobId, errorKind, taskType, summary: summarize(message), harness: harness ?? null, waitMode: waitMode ?? null }, { env })
   }
 
   const configuredAccounts = listAccountsFn(env)
@@ -480,7 +486,7 @@ export function startRemoteJob({
         },
         env
       )
-      appendEventFn({ kind: 'job.started', agent, model, cwd, title, jobId: job.jobId, taskType }, { env })
+      appendEventFn({ kind: 'job.started', agent, model, cwd, title, jobId: job.jobId, taskType, harness: harness ?? null, waitMode: waitMode ?? null }, { env })
 
       const pollResult = await pollFn({
         jobId: job.jobId,

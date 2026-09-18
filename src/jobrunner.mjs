@@ -119,6 +119,10 @@ export function startJob({
   reservationToken,
   adoptWriteLockFn = adoptWriteLock,
   acquireWriteLockFn = acquireWriteLock,
+  // Harness profile id + dispatch waitMode (informational: persisted on the
+  // record and events, never gates/locks/routes — see harness/registry.mjs).
+  harness = null,
+  waitMode = null,
 }) {
   // Resolved BEFORE anything else — including learnings/timeout/createJob —
   // because a remote adapter (Jules) edits a branch on GitHub via its own
@@ -204,8 +208,10 @@ export function startJob({
     attempt,
     workflow_id,
     step_id,
+    harness,
+    waitMode,
   })
-  appendEvent({ kind: 'job.queued', agent, model, cwd, title, jobId: job.jobId, taskType }, { env })
+  appendEvent({ kind: 'job.queued', agent, model, cwd, title, jobId: job.jobId, taskType, harness: harness ?? null, waitMode: waitMode ?? null }, { env })
 
   // Token of the lease THIS job acquired (null for read mode / remote /
   // gate failures). Every later release/heartbeat for this job must use it,
@@ -216,7 +222,7 @@ export function startJob({
     const gate = checkWriteAllowed({ cwd, allowlist })
     if (!gate.allowed) {
       updateResult(job.jobId, { status: 'failed', errorKind: 'worktree_denied', error: gate.reason }, env)
-      appendEvent({ kind: 'job.failed', agent, model, cwd, title, jobId: job.jobId, errorKind: 'worktree_denied', taskType, summary: gate.reason }, { env })
+      appendEvent({ kind: 'job.failed', agent, model, cwd, title, jobId: job.jobId, errorKind: 'worktree_denied', taskType, summary: gate.reason, harness: harness ?? null, waitMode: waitMode ?? null }, { env })
       return { job: readResult(job.jobId, env), done: Promise.resolve() }
     }
     leaseTtlMs = resolveLeaseTtlMs(env, leaseTtlMs)
@@ -224,7 +230,7 @@ export function startJob({
       const adoption = adoptWriteLockFn({ cwd, token: reservationToken, jobId: job.jobId, env, ttlMs: leaseTtlMs })
       if (!adoption.adopted) {
         updateResult(job.jobId, { status: 'failed', errorKind: 'locked', error: `Reservation invalid: ${adoption.reason}` }, env)
-        appendEvent({ kind: 'job.failed', agent, model, cwd, title, jobId: job.jobId, errorKind: 'locked', taskType, summary: `Reservation invalid: ${adoption.reason}` }, { env })
+        appendEvent({ kind: 'job.failed', agent, model, cwd, title, jobId: job.jobId, errorKind: 'locked', taskType, summary: `Reservation invalid: ${adoption.reason}`, harness: harness ?? null, waitMode: waitMode ?? null }, { env })
         return { job: readResult(job.jobId, env), done: Promise.resolve() }
       }
       leaseToken = adoption.token
@@ -232,7 +238,7 @@ export function startJob({
       const lock = acquireWriteLockFn({ cwd, jobId: job.jobId, env, ttlMs: leaseTtlMs })
       if (!lock.acquired) {
         updateResult(job.jobId, { status: 'failed', errorKind: 'locked', error: lock.reason }, env)
-        appendEvent({ kind: 'job.failed', agent, model, cwd, title, jobId: job.jobId, errorKind: 'locked', taskType, summary: lock.reason }, { env })
+        appendEvent({ kind: 'job.failed', agent, model, cwd, title, jobId: job.jobId, errorKind: 'locked', taskType, summary: lock.reason, harness: harness ?? null, waitMode: waitMode ?? null }, { env })
         return { job: readResult(job.jobId, env), done: Promise.resolve() }
       }
       leaseToken = lock.token
@@ -260,14 +266,14 @@ export function startJob({
     child = spawn(adapter.cmd, argv, { cwd, env: childEnv })
   } catch (error) {
     updateResult(job.jobId, { status: 'failed', errorKind: 'crash', error: String(error?.message ?? error) }, env)
-    appendEvent({ kind: 'job.failed', agent, model, cwd, title, jobId: job.jobId, errorKind: 'crash', taskType, summary: String(error?.message ?? error) }, { env })
+    appendEvent({ kind: 'job.failed', agent, model, cwd, title, jobId: job.jobId, errorKind: 'crash', taskType, summary: String(error?.message ?? error), harness: harness ?? null, waitMode: waitMode ?? null }, { env })
     if (mode === 'write') releaseWriteLock({ cwd, token: leaseToken, jobId: job.jobId, env })
     return { job: readResult(job.jobId, env), done: Promise.resolve() }
   }
 
   updateResult(job.jobId, { status: 'running', pid: child.pid, pgid: child.pid }, env)
   const sandbox = sandboxTelemetry(childEnv, process.env, sandboxProfile)
-  appendEvent({ kind: 'job.started', agent, model, cwd, title, jobId: job.jobId, taskType, sandbox }, { env })
+  appendEvent({ kind: 'job.started', agent, model, cwd, title, jobId: job.jobId, taskType, sandbox, harness: harness ?? null, waitMode: waitMode ?? null }, { env })
   active.set(job.jobId, { pgid: child.pid, leaseToken })
   if (mode === 'write') startHeartbeat({ jobId: job.jobId, cwd, token: leaseToken, ttlMs: leaseTtlMs, env })
 
@@ -283,7 +289,7 @@ export function startJob({
   })
 
   const done = exitPromise
-    .then(({ timedOut }) => finishJob({ jobId: job.jobId, agent, model, cwd, title, adapter, mode, env, timedOut, taskType, snapshot, takeSnapshotFn, diffSnapshotsFn, formatViolationFn }))
+    .then(({ timedOut }) => finishJob({ jobId: job.jobId, agent, model, cwd, title, adapter, mode, env, timedOut, taskType, snapshot, takeSnapshotFn, diffSnapshotsFn, formatViolationFn, harness, waitMode }))
     .finally(() => {
       stopHeartbeat(job.jobId)
       active.delete(job.jobId)
@@ -311,9 +317,13 @@ function finishJob({
   takeSnapshotFn = defaultTakeSnapshot,
   diffSnapshotsFn = defaultDiffSnapshots,
   formatViolationFn = defaultFormatViolation,
+  harness = null,
+  waitMode = null,
 }) {
   const current = readResult(jobId, env)
   if (current.status === 'canceled') return // cancelJob already finalized this job
+  const eventHarness = harness ?? current.harness ?? null
+  const eventWaitMode = waitMode ?? current.waitMode ?? null
 
   let stdout = ''
   try {
@@ -353,7 +363,7 @@ function finishJob({
       env
     )
     appendEvent(
-      { kind: 'job.failed', agent, model, cwd, title, jobId, errorKind: error.kind, taskType, summary: summarize(error.message) },
+      { kind: 'job.failed', agent, model, cwd, title, jobId, errorKind: error.kind, taskType, summary: summarize(error.message), harness: eventHarness, waitMode: eventWaitMode },
       { env }
     )
     return
@@ -380,7 +390,7 @@ function finishJob({
       env
     )
     appendEvent(
-      { kind: 'job.failed', agent, model, cwd, title, jobId, errorKind: 'read_mode_violation', taskType, summary: summarize(violation) },
+      { kind: 'job.failed', agent, model, cwd, title, jobId, errorKind: 'read_mode_violation', taskType, summary: summarize(violation), harness: eventHarness, waitMode: eventWaitMode },
       { env }
     )
     return
@@ -398,7 +408,7 @@ function finishJob({
     env
   )
   appendEvent(
-    { kind: 'job.finished', agent, model, cwd, title, jobId, taskType, tokens: result.tokens ?? null, costUsd: result.costUsd ?? null, summary: summarize(result.text) },
+    { kind: 'job.finished', agent, model, cwd, title, jobId, taskType, tokens: result.tokens ?? null, costUsd: result.costUsd ?? null, summary: summarize(result.text), harness: eventHarness, waitMode: eventWaitMode },
     { env }
   )
 }
@@ -428,7 +438,7 @@ export async function cancelJob(jobId, { env = process.env } = {}) {
     // either: doing so would release a lock a concurrent LOCAL write-mode
     // job on the same cwd actually holds.
     appendEvent(
-      { kind: 'job.canceled', agent: result.agent, model: result.model, cwd: result.cwd, title: result.title, jobId, taskType: result.taskType ?? null },
+      { kind: 'job.canceled', agent: result.agent, model: result.model, cwd: result.cwd, title: result.title, jobId, taskType: result.taskType ?? null, harness: result.harness ?? null, waitMode: result.waitMode ?? null },
       { env }
     )
     active.delete(jobId)
@@ -442,7 +452,7 @@ export async function cancelJob(jobId, { env = process.env } = {}) {
     await killProcessGroup(pgid, {})
   }
   appendEvent(
-    { kind: 'job.canceled', agent: result.agent, model: result.model, cwd: result.cwd, title: result.title, jobId, taskType: result.taskType ?? null },
+    { kind: 'job.canceled', agent: result.agent, model: result.model, cwd: result.cwd, title: result.title, jobId, taskType: result.taskType ?? null, harness: result.harness ?? null, waitMode: result.waitMode ?? null },
     { env }
   )
   active.delete(jobId)

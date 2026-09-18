@@ -10,6 +10,7 @@ import {
   publishWorkflowNodeReady,
 } from '../storage/index.mjs'
 import { appendEvent } from '../eventlog.mjs'
+import { resolveHarness } from '../harness/registry.mjs'
 import { calculateDispatchTimeoutS, dispatch, waitExecution as defaultWaitExecution } from '../dispatch.mjs'
 import { readResult as readJobResult } from '../jobstore.mjs'
 import { createWorkflow } from './schema.mjs'
@@ -172,6 +173,15 @@ async function executeNode({
   let attempt = nodeStates.get(node.id)?.attempt || 1
   let lastError = null
   const readRecord = readResultFn ?? ((jobId) => readJobResult(jobId, env))
+  // Harness defaults from env for the started event (emitted before the
+  // dispatch returns); once dispatchFn answers, its harness/waitMode win.
+  const defaultProfile = resolveHarness({ env })
+  let nodeHarness = defaultProfile.id
+  let nodeWaitMode = defaultProfile.delegation.defaultWaitMode
+  const adoptHarness = (value) => {
+    nodeHarness = value?.harness ?? value?.job?.harness ?? nodeHarness
+    nodeWaitMode = value?.waitMode ?? value?.job?.waitMode ?? nodeWaitMode
+  }
 
   appendEvent(
     {
@@ -183,6 +193,8 @@ async function executeNode({
       model: node.model,
       cwd: node.cwd,
       title: node.task ?? node.id,
+      harness: nodeHarness,
+      waitMode: nodeWaitMode,
     },
     { env }
   )
@@ -241,6 +253,7 @@ async function executeNode({
         const dispatched = await Promise.race([dispatchPromise, timeoutPromise])
         // Evita unhandled rejection si el dispatch pierde la carrera y falla tarde.
         dispatchPromise.catch(() => {})
+        adoptHarness(dispatched)
 
         const handle = unwrapHandle(dispatched)
         if (!handle) {
@@ -306,6 +319,7 @@ async function executeNode({
             })
 
             const childHandle = unwrapHandle(childRes)
+            adoptHarness(childRes)
             let finalChild = childRes
             if (childHandle) {
               finalChild = await waitForHandleTerminal({
@@ -381,6 +395,8 @@ async function executeNode({
           model: node.model,
           cwd: node.cwd,
           title: node.task ?? node.id,
+          harness: nodeHarness,
+          waitMode: nodeWaitMode,
         },
         { env }
       )
@@ -443,6 +459,8 @@ async function executeNode({
       cwd: node.cwd,
       title: node.task ?? node.id,
       summary: lastError?.message,
+      harness: nodeHarness,
+      waitMode: nodeWaitMode,
     },
     { env }
   )

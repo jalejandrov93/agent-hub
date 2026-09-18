@@ -120,6 +120,10 @@ export function createJob({
   execution_id = null,
   dispatchKey = null,
   dispatch_key = null,
+  // Harness profile id + dispatch waitMode that created this job (nullable
+  // so every pre-existing record and caller stays valid).
+  harness = null,
+  waitMode = null,
 }) {
   const jobId = newJobId()
   const dir = jobDir(jobId, env)
@@ -168,6 +172,10 @@ export function createJob({
     execution_id: resolvedExecutionId,
     dispatchKey: resolvedDispatchKey,
     dispatch_key: resolvedDispatchKey,
+    // Harness profile + waitMode that created this job (informational only:
+    // never gates, locks, or routes — see src/harness/registry.mjs).
+    harness: harness ?? null,
+    waitMode: waitMode ?? null,
   }
   // Dual state: if remote_state is provided, mirror it into remote.state for compat.
   if (remote_state != null) {

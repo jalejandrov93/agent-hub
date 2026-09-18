@@ -145,6 +145,10 @@ export const JobRecord = z
     executionId: z.string().nullable().optional(),
     dispatch_key: z.string().nullable().optional(),
     dispatchKey: z.string().nullable().optional(),
+    // Harness profile id + dispatch waitMode (informational only: never
+    // gates, locks, or routes — see src/harness/registry.mjs).
+    harness: z.string().nullable().optional(),
+    waitMode: z.enum(['none', 'attention', 'terminal']).nullable().optional(),
   })
   .passthrough()
 
@@ -224,6 +228,9 @@ export const HubEvent = z
     taskType: nullableString,
     tokens: nullableNumber,
     costUsd: nullableNumber,
+    // Harness profile id + dispatch waitMode on job.* events (informational).
+    harness: nullableString,
+    waitMode: nullableString,
   })
   .passthrough()
 
@@ -442,6 +449,9 @@ export const DispatchResponse = z
         mode: z.string().optional(),
       })
       .passthrough(),
+    // Resolved harness profile id + effective waitMode for this dispatch.
+    harness: z.string().optional(),
+    waitMode: z.enum(['none', 'attention', 'terminal']).optional(),
   })
   .passthrough()
 
