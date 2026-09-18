@@ -29,7 +29,7 @@ function jobDir(jobId, env = process.env) {
   return path.join(paths(env).runsDir, jobId)
 }
 
-function resultPath(jobId, env = process.env) {
+export function resultPath(jobId, env = process.env) {
   return path.join(jobDir(jobId, env), 'result.json')
 }
 
@@ -158,16 +158,17 @@ export function readResult(jobId, env = process.env) {
  * through updateJsonLocked (not a plain writeFileSync) to make the whole
  * sequence atomic across processes, never just the final write.
  */
-export function updateResult(jobId, patch, env = process.env) {
+export function updateResult(jobId, patchOrUpdater, env = process.env) {
   readResult(jobId, env) // throws `job not found: ${jobId}` if result.json does not exist
   const updatedAt = new Date().toISOString()
   return updateJsonLocked(resultPath(jobId, env), (current) => {
+    const patch = typeof patchOrUpdater === 'function' ? patchOrUpdater(current) : patchOrUpdater
     const next = { ...current, ...patch, updatedAt }
     // cancelJob (dashboard process) and finishJob (MCP process) race: a finish
     // computed from a record read before the cancel must not resurrect the job
     // as succeeded/failed. Cancellation wins on status; everything else may
     // still merge (tokens, sessionId, costUsd, ...).
-    if (current.status === 'canceled' && patch.status && patch.status !== 'canceled') {
+    if (current.status === 'canceled' && patch?.status && patch.status !== 'canceled') {
       next.status = 'canceled'
       next.errorKind = current.errorKind
       next.error = current.error

@@ -486,6 +486,7 @@ export function buildServer() {
         autoApprovePlan: z.boolean().optional().default(true).describe('Automatically approve plans when AWAITING_PLAN_APPROVAL.'),
         autoResolveFeedback: z.boolean().optional().default(true).describe('Automatically reply to unambiguous questions when AWAITING_USER_FEEDBACK.'),
         maxAutoReplies: z.number().int().nonnegative().optional().default(2).describe('Maximum number of auto-replies across the session.'),
+        maxSafeContinues: z.number().int().nonnegative().optional().default(3).describe('Maximum number of safe continues across the session.'),
         pauseAfterAmbiguity: z.boolean().optional().default(true).describe('Pause and request user attention if feedback cannot be safely auto-resolved.'),
         timeoutS: z.number().int().positive().max(600).optional().default(300).describe('Supervision timeout in seconds.'),
         pollIntervalS: z.number().int().positive().max(60).optional().describe('Poll interval in seconds between checks.'),
@@ -493,13 +494,14 @@ export function buildServer() {
       outputSchema: JulesSuperviseResponse,
       annotations: { readOnlyHint: false, openWorldHint: true },
     },
-    guard(({ jobId, sessionId, autoApprovePlan, autoResolveFeedback, maxAutoReplies, pauseAfterAmbiguity, timeoutS, pollIntervalS }) =>
+    guard(({ jobId, sessionId, autoApprovePlan, autoResolveFeedback, maxAutoReplies, maxSafeContinues, pauseAfterAmbiguity, timeoutS, pollIntervalS }) =>
       julesSuperviseTool({
         jobId,
         sessionId,
         autoApprovePlan,
         autoResolveFeedback,
         maxAutoReplies,
+        maxSafeContinues,
         pauseAfterAmbiguity,
         timeoutS,
         pollIntervalS,

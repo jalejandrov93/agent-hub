@@ -1,3 +1,4 @@
+import crypto from 'node:crypto'
 import { checkRemoteSession as defaultCheckRemoteSession } from '../check.mjs'
 import { interactWithSession as defaultInteractWithSession } from '../../tools/jules.mjs'
 import { readResult as defaultReadResult, updateResult as defaultUpdateResult } from '../../jobstore.mjs'
@@ -5,65 +6,223 @@ import { listJobs as defaultListJobs } from '../../jobstore.mjs'
 import * as defaultClient from './client.mjs'
 import * as defaultAdapter from './adapter.mjs'
 
-// ─── Watch lease ─────────────────────────────────────────────────────────────
+// ─── Watch lease & CAS ───────────────────────────────────────────────────────
 
 /**
- * Acquire observation ownership of a remote session. The lease lives at
- * `remote.watch = {owner, generation}` and prevents a supervisor and a
- * concurrent jules_wait from driving the same session.
- *
- * Rules:
- * - watch==null (no lease) or watch.owner matches: acquire, bump generation.
- * - watch.owner is a different owner: fail (another actor is driving).
+ * Sentinel error thrown by the atomic updater inside updateJsonLocked when
+ * the watch lease is currently held by a different active owner.
  */
-export function acquireWatch({ record, owner = 'supervisor', updateResultFn = defaultUpdateResult, jobId, env }) {
-  const remote = record?.remote ?? {}
-  const current = remote.watch ?? null
-
-  if (current != null && current.owner != null && current.owner !== owner) {
-    return { acquired: false, reason: `watch owned by '${current.owner}' (generation ${current.generation})` }
+export class LeaseConflictError extends Error {
+  constructor(message) {
+    super(message)
+    this.name = 'LeaseConflictError'
   }
-
-  const generation = (current?.generation ?? 0) + 1
-  const watch = { owner, generation }
-  if (jobId && updateResultFn) {
-    updateResultFn(jobId, { remote: { ...remote, watch } }, env)
-  }
-  return { acquired: true, generation, watch }
 }
 
 /**
- * Release the watch lease. Only succeeds when the caller still owns the
- * current generation — a stale release (after someone else acquired) is a
- * no-op, never an error.
+ * Acquire observation ownership of a remote session via compare-and-swap (CAS)
+ * on result.json.
+ *
+ * Rules:
+ * - Inside updateJsonLocked (via updateResultFn):
+ *   - If watch belongs to another active owner: throw LeaseConflictError (never write).
+ *   - If watch is null or owned by this owner: bump monotonic generation and acquire.
+ * - Monotonic generation:
+ *   Saved in remote.watchGenerationCounter and NEVER resets to 1 on subsequent acquires,
+ *   even after watch is released (watch: null). Each acquire bumps:
+ *   generation = max(remote.watchGenerationCounter ?? 0, currentWatch.generation ?? 0) + 1
+ * - Owner: UUID per supervisor instance (generated via crypto.randomUUID()), NOT a fixed string.
+ *
+ * Catches LeaseConflictError and returns { acquired: false, reason }.
  */
-export function releaseWatch({ record, owner = 'supervisor', generation, updateResultFn = defaultUpdateResult, jobId, env }) {
-  const remote = record?.remote ?? {}
-  const current = remote.watch ?? null
+export function acquireWatch({
+  record,
+  owner,
+  jobId,
+  env = process.env,
+  updateResultFn = defaultUpdateResult,
+  readResultFn = defaultReadResult,
+} = {}) {
+  const resolvedOwner = owner ?? crypto.randomUUID()
+  let acquiredGeneration = null
+  let acquiredWatch = null
 
-  if (current?.owner !== owner || current?.generation !== generation) {
-    return { released: false, reason: 'stale generation or different owner' }
+  const updater = (current) => {
+    const remote = current?.remote ?? {}
+    const currentWatch = remote.watch ?? null
+
+    if (currentWatch != null && currentWatch.owner != null && currentWatch.owner !== resolvedOwner) {
+      throw new LeaseConflictError(`watch owned by '${currentWatch.owner}' (generation ${currentWatch.generation})`)
+    }
+
+    const storedCounter = typeof remote.watchGenerationCounter === 'number'
+      ? remote.watchGenerationCounter
+      : 0
+    const currentGen = typeof currentWatch?.generation === 'number'
+      ? currentWatch.generation
+      : 0
+    const generation = Math.max(storedCounter, currentGen) + 1
+
+    const watch = { owner: resolvedOwner, generation }
+    acquiredGeneration = generation
+    acquiredWatch = watch
+
+    return {
+      ...current,
+      remote: {
+        ...remote,
+        watch,
+        watchGenerationCounter: generation,
+      },
+    }
+  }
+
+  try {
+    if (jobId && updateResultFn) {
+      let executedInside = false
+      const wrappedUpdater = (current) => {
+        executedInside = true
+        return updater(current)
+      }
+      updateResultFn(jobId, wrappedUpdater, env)
+      if (!executedInside) {
+        // Fallback for mocks that do not execute functional updaters
+        let current = null
+        if (readResultFn) {
+          try { current = readResultFn(jobId, env) } catch { /* ignore if not on disk */ }
+        }
+        current = current ?? record ?? {}
+        const next = updater(current)
+        updateResultFn(jobId, { remote: next.remote }, env)
+        if (record && record.remote) {
+          record.remote.watch = next.remote.watch
+          record.remote.watchGenerationCounter = next.remote.watchGenerationCounter
+        }
+      }
+    } else if (record) {
+      const res = updater(record)
+      record.remote = {
+        ...(record.remote ?? {}),
+        watch: res.remote.watch,
+        watchGenerationCounter: res.remote.watchGenerationCounter,
+      }
+    }
+    return {
+      acquired: true,
+      generation: acquiredGeneration,
+      watch: acquiredWatch,
+      owner: resolvedOwner,
+    }
+  } catch (err) {
+    if (err instanceof LeaseConflictError || err?.name === 'LeaseConflictError') {
+      return { acquired: false, reason: err.message }
+    }
+    throw err
+  }
+}
+
+/**
+ * Release the watch lease.
+ * Only succeeds when the caller still owns the EXACT owner and generation.
+ * A stale release is a no-op that returns { released: false, reason }.
+ * Preserves remote.watchGenerationCounter so generations never reset.
+ */
+export function releaseWatch({
+  record,
+  owner,
+  generation,
+  jobId,
+  env = process.env,
+  updateResultFn = defaultUpdateResult,
+  readResultFn = defaultReadResult,
+} = {}) {
+  let released = false
+  let reason = null
+
+  const updater = (current) => {
+    const remote = current?.remote ?? {}
+    const currentWatch = remote.watch ?? null
+
+    if (currentWatch?.owner !== owner || currentWatch?.generation !== generation) {
+      reason = 'stale generation or different owner'
+      return current
+    }
+
+    released = true
+    return {
+      ...current,
+      remote: {
+        ...remote,
+        watch: null,
+      },
+    }
   }
 
   if (jobId && updateResultFn) {
-    updateResultFn(jobId, { remote: { ...remote, watch: null } }, env)
+    let executedInside = false
+    const wrappedUpdater = (current) => {
+      executedInside = true
+      return updater(current)
+    }
+    updateResultFn(jobId, wrappedUpdater, env)
+    if (!executedInside) {
+      let current = null
+      if (readResultFn) {
+        try { current = readResultFn(jobId, env) } catch { /* ignore if not on disk */ }
+      }
+      current = current ?? record ?? {}
+      updater(current)
+      updateResultFn(jobId, { remote: { ...current.remote, watch: null } }, env)
+      if (record && record.remote) {
+        record.remote.watch = null
+      }
+    }
+  } else if (record) {
+    updater(record)
+  }
+
+  if (!released) {
+    return { released: false, reason: reason ?? 'stale generation or different owner' }
   }
   return { released: true }
 }
 
-// ─── Feedback classification (6 hard gates) ──────────────────────────────────
+// ─── Feedback classification (3 levels) ──────────────────────────────────────
 
 /**
- * Classify an AWAITING_USER_FEEDBACK message: can the supervisor auto-reply,
- * or must a human decide? Six hard gates that ALL must pass for auto_reply;
- * any failure → request_user.
+ * 3-Level Feedback Classifier for AWAITING_USER_FEEDBACK:
  *
- * 1. Unambiguous: a single concrete question with an obvious answer.
- * 2. Does not alter the original objectives.
- * 3. Not a product/business decision (UX, pricing, naming, branding).
- * 4. Does not involve secrets, credentials, or sensitive data.
- * 5. Does not expand or reduce the scope.
- * 6. attempts < max (auto-reply budget not exhausted).
+ * 1. REQUEST_USER (10 escalations + budget exhausted):
+ *    - secrets: passwords, tokens, API keys, private keys, SSH keys, credentials
+ *    - auth: authentication, authorization, login, OAuth, RBAC, SSO, permissions
+ *    - architecture: re-architecture, system design, architectural patterns, new layers
+ *    - api_changes: breaking API changes, contract alterations, public endpoints
+ *    - migrations: database or schema migrations, table alters, column changes
+ *    - data: data loss, database wipes, deleting user records, PII
+ *    - product: pricing, branding, UX decisions, color palette, product requirements
+ *    - code_deletion: deleting features, removing modules/services, dropping functionality
+ *    - impactful_dependencies: major dependency additions, framework switches, breaking upgrades
+ *    - scope: altering goals/objectives, expanding/reducing scope, out of scope features
+ *    - ambiguous_functional: unclear requirements, multi-part questions, open-ended feedback
+ *    - budget_exhausted: auto-reply or safe-continue budget reached
+ *
+ * 2. SAFE_CONTINUE (Conditional operational blocks with explicit conditions):
+ *    - obsolete_dependency: deprecated/outdated dependency ONLY if no API/scope change
+ *    - foreign_warning: third-party, compiler, or external library warning outside change scope
+ *    - preexisting_test_failure: pre-existing failure on unrelated test
+ *    - lint_blocks_pipeline: styling/lint/formatting error blocking pipeline execution
+ *    - transient_retry: flaky network, 429 rate limit, socket timeout, transient build failure
+ *
+ * 3. AUTO_REPLY (Strict mechanical allowlist):
+ *    - formato: tabs/spaces, indentation, quotes, semicolons, trailing commas
+ *    - naming: naming convention, snake_case vs camelCase, already defined name
+ *    - test_command: test execution command (npm test, pytest, go test, etc.)
+ *    - existing_convention: unambiguous existing codebase convention
+ *    - mechanical_detail: import ordering, type annotations, standard mechanical details
+ *    - rerun_tests: re-executing/rerunning test suite
+ *    - same_pattern: follow same pattern as existing file X
+ *
+ * Returns { decision, category, confidence, evidence, reason, gate, response }
  */
 export function classifyFeedback({
   lastAgentMessage,
@@ -71,75 +230,280 @@ export function classifyFeedback({
   plan,
   attempts = 0,
   maxAttempts = 2,
+  autoReplies,
+  maxAutoReplies,
+  safeContinues = 0,
+  maxSafeContinues = 3,
 } = {}) {
-  const msg = (lastAgentMessage ?? '').toLowerCase()
+  const msg = (lastAgentMessage ?? '').trim()
+  const lower = msg.toLowerCase()
 
-  // Gate 6: budget exhausted
-  if (attempts >= maxAttempts) {
-    return { decision: 'request_user', gate: 'budget_exhausted', response: null }
+  const effectiveAutoReplies = autoReplies ?? attempts ?? 0
+  const effectiveMaxAutoReplies = maxAutoReplies ?? maxAttempts ?? 2
+  const effectiveSafeContinues = safeContinues ?? 0
+  const effectiveMaxSafeContinues = maxSafeContinues ?? 3
+
+  const makeResult = (decision, category, confidence, reason, evidence, response = null) => ({
+    decision,
+    category,
+    gate: decision === 'auto_reply' ? null : category, // mandatory b expects null on auto_reply, category on gates
+    confidence,
+    reason,
+    evidence: evidence ?? reason,
+    response,
+  })
+
+  // ─── 1. REQUEST_USER: 10 Escalations ─────────────────────────────────────────
+
+  // Secrets & credentials
+  const secretMatch = lower.match(/\b(password|secret|credential|api[_-]?key|token|private[_-]?key|ssh[_-]?key|env(?:ironment)?\s*var|oauth|bearer)\b/i)
+  if (secretMatch) {
+    return makeResult('request_user', 'secrets', 0.99, 'Feedback involves secrets, credentials, or sensitive tokens', secretMatch[0])
   }
 
-  // Gate 4: secrets / credentials / sensitive data
-  const secretPatterns = /\b(password|secret|credential|api[_-]?key|token|private[_-]?key|ssh[_-]?key|env(?:ironment)?\s*var|oauth|bearer)\b/i
-  if (secretPatterns.test(msg)) {
-    return { decision: 'request_user', gate: 'secrets', response: null }
+  // Auth & permissions
+  const authMatch = lower.match(/\b(authenticat(?:e|ion)|authoriz(?:e|ation)|login|signup|sign-in|logout|rbac|sso|permissions?|access\s+control)\b/i)
+  if (authMatch) {
+    return makeResult('request_user', 'auth', 0.95, 'Feedback involves authentication, authorization, or access control', authMatch[0])
   }
 
-  // Gate 3: product / business decision
-  const businessPatterns = /\b(pricing|brand|marketing|business|stakeholder|product\s*(?:owner|manager|decision)|ux\s*(?:decision|direction)|naming\s*convention|color\s*(?:scheme|palette)|user\s*(?:experience|interface)\s*(?:decision|choice))\b/i
-  if (businessPatterns.test(msg)) {
-    return { decision: 'request_user', gate: 'business_decision', response: null }
+  // Architecture
+  const archMatch = lower.match(/\b(re-?architect(?:ure)?|design\s+pattern|architectural\s+(?:pattern|decision|change)|new\s+architectural\s+layer|system\s+design|major\s+refactor(?:ing)?)\b/i)
+  if (archMatch) {
+    return makeResult('request_user', 'architecture', 0.95, 'Feedback involves architectural changes or design patterns', archMatch[0])
   }
 
-  // Gate 2: alters original objectives
-  const objectivePatterns = /\b(instead\s+of|different\s+goal|change\s+(?:the\s+)?(?:goal|objective|requirements)|pivot|re-?architect|abandon\s+(?:the\s+)?(?:original|initial))\b/i
-  if (objectivePatterns.test(msg)) {
-    return { decision: 'request_user', gate: 'objective_change', response: null }
+  // API contract changes
+  const apiMatch = lower.match(/\b(breaking\s+change|change\s+(?:the\s+)?public\s+api|modify\s+(?:the\s+)?api\s+signature|break(?:ing)?\s+contract|deprecat(?:e|ing)\s+public\s+endpoint|api\s+versioning)\b/i)
+  if (apiMatch) {
+    return makeResult('request_user', 'api_changes', 0.95, 'Feedback involves breaking API changes or contract alterations', apiMatch[0])
   }
 
-  // Gate 5: changes scope
-  const scopePatterns = /\b(should\s+(?:i|we)\s+(?:also|additionally)|(?:expand|reduce|change)\s+(?:the\s+)?scope|add(?:ing)?\s+(?:a\s+)?(?:new|additional|extra)\s+feature|out\s+of\s+scope)\b/i
-  if (scopePatterns.test(msg)) {
-    return { decision: 'request_user', gate: 'scope_change', response: null }
+  // Database / Schema migrations
+  const migMatch = lower.match(/\b(database\s+migration|db\s+migration|schema\s+migration|alter\s+table|drop\s+column|add\s+column|run\s+migration|flyway|alembic|prisma\s+migrate)\b/i)
+  if (migMatch) {
+    return makeResult('request_user', 'migrations', 0.95, 'Feedback involves database or schema migrations', migMatch[0])
   }
 
-  // Gate 1: must be unambiguous — a concrete question with a clear technical answer.
-  // Heuristic: short clarification questions about implementation details that
-  // the original task already answers (or that have an obvious default) pass.
-  // Multi-part questions, open-ended questions, or questions without an obvious
-  // answer fail.
-  const hasQuestion = /\?/.test(msg)
-  const multiQuestion = (msg.match(/\?/g) || []).length > 1
-  if (!hasQuestion || multiQuestion) {
-    return { decision: 'request_user', gate: 'ambiguous', response: null }
+  // Data loss / PII
+  const dataMatch = lower.match(/\b(data\s+loss|drop\s+database|delete\s+records?|user\s+data|pii|customer\s+data|database\s+wipe|truncate\s+table)\b/i)
+  if (dataMatch) {
+    return makeResult('request_user', 'data', 0.98, 'Feedback involves critical data operations or potential data loss', dataMatch[0])
   }
 
-  // All gates passed — auto-reply with a reference to the original task.
-  return {
-    decision: 'auto_reply',
-    gate: null,
-    response: 'Please proceed with the approach that best matches the original task requirements. Use your best judgment for implementation details.',
+  // Product / Business decisions
+  const bizMatch = lower.match(/\b(pricing|brand|marketing|business|stakeholder|product\s*(?:owner|manager|decision)|ux\s*(?:decision|direction)|color\s*(?:scheme|palette)|user\s*(?:experience|interface)\s*(?:decision|choice))\b/i)
+  if (bizMatch) {
+    return makeResult('request_user', 'business_decision', 0.95, 'Feedback involves product, business, or UX decisions', bizMatch[0])
   }
+
+  // Code or feature deletion
+  const delMatch = lower.match(/\b(delete\s+(?:the\s+)?feature|remove\s+(?:the\s+)?feature|deprecat(?:e|ing)\s+feature|delete\s+(?:the\s+)?entire\s+(?:module|component|service)|drop\s+(?:support\s+for|feature))\b/i)
+  if (delMatch) {
+    return makeResult('request_user', 'code_deletion', 0.95, 'Feedback involves code or feature deletion', delMatch[0])
+  }
+
+  // Impactful dependency changes
+  const depMatch = lower.match(/\b(add(?:ing)?\s+(?:a\s+)?(?:new\s+)?.*?(?:heavy|major|core|risky)\s+dependency|replace\s+(?:the\s+)?framework|switch\s+(?:from\s+\w+\s+to|to\s+another\s+framework|framework)|dependency\s+(?:with\s+breaking|upgrade\s+major|with\s+impact)|major\s+version\s+bump)\b/i)
+  if (depMatch) {
+    return makeResult('request_user', 'impactful_dependencies', 0.92, 'Feedback involves major or impactful dependency changes', depMatch[0])
+  }
+
+  // Objectives change
+  const objMatch = lower.match(/\b(instead\s+of|different\s+goal|change\s+(?:the\s+)?(?:goal|objective|requirements)|pivot|abandon\s+(?:the\s+)?(?:original|initial))\b/i)
+  if (objMatch) {
+    return makeResult('request_user', 'objective_change', 0.95, 'Feedback alters original task objectives', objMatch[0])
+  }
+
+  // Scope change
+  const scopeMatch = lower.match(/\b(should\s+(?:i|we)\s+(?:also|additionally)|(?:expand|reduce|change)\s+(?:the\s+)?scope|add(?:ing)?\s+(?:a\s+)?(?:new|additional|extra)\s+feature|out\s+of\s+scope)\b/i)
+  if (scopeMatch) {
+    return makeResult('request_user', 'scope_change', 0.95, 'Feedback expands or alters task scope', scopeMatch[0])
+  }
+
+  // ─── 2. SAFE_CONTINUE: Conditional operational blocks ───────────────────────
+
+  // Obsolete dependency warning (ONLY if no API/scope change)
+  const obsDepMatch = lower.match(/\b(deprecated\s+dependency|obsolete\s+dependency|outdated\s+package|npm\s+warn\s+deprecated|dependency\s+is\s+deprecated|peer\s+dependency\s+warning)\b/i)
+  if (obsDepMatch) {
+    if (effectiveSafeContinues >= effectiveMaxSafeContinues) {
+      return makeResult('request_user', 'budget_exhausted', 0.95, 'Safe-continue budget exhausted', `safeContinues ${effectiveSafeContinues} >= ${effectiveMaxSafeContinues}`)
+    }
+    return makeResult(
+      'safe_continue',
+      'obsolete_dependency',
+      0.9,
+      'Conditional operational block: obsolete/deprecated dependency without API or scope changes',
+      obsDepMatch[0],
+      'Safe to continue: proceed with the current dependency without altering public APIs or task scope.'
+    )
+  }
+
+  // Foreign / third-party / compiler warning
+  const foreignWarnMatch = lower.match(/\b(foreign\s+warning|third[_-]?party\s+warning|compiler\s+warning|unrelated\s+warning|external\s+library\s+warning|warning\s+in\s+node_modules)\b/i)
+  if (foreignWarnMatch) {
+    if (effectiveSafeContinues >= effectiveMaxSafeContinues) {
+      return makeResult('request_user', 'budget_exhausted', 0.95, 'Safe-continue budget exhausted', `safeContinues ${effectiveSafeContinues} >= ${effectiveMaxSafeContinues}`)
+    }
+    return makeResult(
+      'safe_continue',
+      'foreign_warning',
+      0.9,
+      'Conditional operational block: foreign/third-party warning outside modified code scope',
+      foreignWarnMatch[0],
+      'Safe to continue: the warning originates outside the task scope. Proceed with implementation.'
+    )
+  }
+
+  // Pre-existing test failure
+  const preTestMatch = lower.match(/\b(pre-?existing\s+(?:failing\s+test|test\s+failure)|test\s+already\s+fails?\s+on\s+main|unrelated\s+test\s+fail(?:ing|ure)|test\s+broken\s+before)\b/i)
+  if (preTestMatch) {
+    if (effectiveSafeContinues >= effectiveMaxSafeContinues) {
+      return makeResult('request_user', 'budget_exhausted', 0.95, 'Safe-continue budget exhausted', `safeContinues ${effectiveSafeContinues} >= ${effectiveMaxSafeContinues}`)
+    }
+    return makeResult(
+      'safe_continue',
+      'preexisting_test_failure',
+      0.9,
+      'Conditional operational block: pre-existing test failure unrelated to current task',
+      preTestMatch[0],
+      'Safe to continue: focus on the changes for this task and ignore pre-existing unrelated test failures.'
+    )
+  }
+
+  // Lint / formatting blocking pipeline
+  const lintMatch = lower.match(/\b(lint(?:ing)?\s+(?:error|failure|check)|format(?:ting)?\s+blocks?\s+(?:ci|pipeline|build)|eslint\s+blocks?|prettier\s+blocks?|style\s+check\s+fails?)\b/i)
+  if (lintMatch) {
+    if (effectiveSafeContinues >= effectiveMaxSafeContinues) {
+      return makeResult('request_user', 'budget_exhausted', 0.95, 'Safe-continue budget exhausted', `safeContinues ${effectiveSafeContinues} >= ${effectiveMaxSafeContinues}`)
+    }
+    return makeResult(
+      'safe_continue',
+      'lint_blocks_pipeline',
+      0.9,
+      'Conditional operational block: formatting/lint error blocking pipeline',
+      lintMatch[0],
+      'Safe to continue: resolve the lint/formatting error to unblock the pipeline without altering runtime behavior.'
+    )
+  }
+
+  // Transient retry
+  const retryMatch = lower.match(/\b(transient\s+(?:error|failure)|flaky\s+test|network\s+timeout|socket\s+hang\s+up|429\s+too\s+many\s+requests|rate\s+limit(?:ed)?|temporary\s+glitch|retry\s+(?:the\s+)?(?:build|command|network))\b/i)
+  if (retryMatch) {
+    if (effectiveSafeContinues >= effectiveMaxSafeContinues) {
+      return makeResult('request_user', 'budget_exhausted', 0.95, 'Safe-continue budget exhausted', `safeContinues ${effectiveSafeContinues} >= ${effectiveMaxSafeContinues}`)
+    }
+    return makeResult(
+      'safe_continue',
+      'transient_retry',
+      0.9,
+      'Conditional operational block: transient failure suitable for retry',
+      retryMatch[0],
+      'Safe to continue: this failure appears transient. Please retry the operation.'
+    )
+  }
+
+  // ─── 3. AUTO_REPLY: Strict mechanical allowlist ─────────────────────────────
+
+  // Question validation: must have exactly 1 question mark
+  const questionCount = (msg.match(/\?/g) || []).length
+  if (questionCount === 0 || questionCount > 1) {
+    return makeResult('request_user', 'ambiguous', 0.8, 'Feedback is ambiguous (not a single concrete question)', msg)
+  }
+
+  // Allowlist category 1: formato
+  const formatMatch = lower.match(/\b(format(?:ting)?|indent(?:ation)?|tabs?\s+or\s+spaces?|single\s+or\s+double\s+quotes?|trailing\s+commas?|semicolons?|line\s+breaks?)\b/i)
+  if (formatMatch) {
+    if (effectiveAutoReplies >= effectiveMaxAutoReplies) {
+      return makeResult('request_user', 'budget_exhausted', 0.95, 'Auto-reply budget exhausted', `attempts ${effectiveAutoReplies} >= ${effectiveMaxAutoReplies}`)
+    }
+    return makeResult('auto_reply', 'formato', 0.95, 'Strict mechanical allowlist: formatting convention', formatMatch[0],
+      'Please proceed using the formatting conventions and style established in the repository.')
+  }
+
+  // Allowlist category 2: naming ya definido
+  const namingMatch = lower.match(/\b(naming\s+convention|snake_case|camelcase|pascalcase|kebab-case|variable\s+names?|function\s+names?|file\s+names?|already\s+defined\s+name)\b/i)
+  if (namingMatch) {
+    if (effectiveAutoReplies >= effectiveMaxAutoReplies) {
+      return makeResult('request_user', 'budget_exhausted', 0.95, 'Auto-reply budget exhausted', `attempts ${effectiveAutoReplies} >= ${effectiveMaxAutoReplies}`)
+    }
+    return makeResult('auto_reply', 'naming', 0.95, 'Strict mechanical allowlist: naming convention already defined', namingMatch[0],
+      'Please proceed using the existing naming conventions established in the surrounding code.')
+  }
+
+  // Allowlist category 3: comando de tests
+  const testCmdMatch = lower.match(/\b(test\s+command|command\s+to\s+run\s+tests?|npm\s+test|pytest|go\s+test|how\s+to\s+run\s+(?:the\s+)?tests?|run\s+unit\s+tests?\s+with)\b/i)
+  if (testCmdMatch) {
+    if (effectiveAutoReplies >= effectiveMaxAutoReplies) {
+      return makeResult('request_user', 'budget_exhausted', 0.95, 'Auto-reply budget exhausted', `attempts ${effectiveAutoReplies} >= ${effectiveMaxAutoReplies}`)
+    }
+    return makeResult('auto_reply', 'test_command', 0.95, 'Strict mechanical allowlist: test execution command', testCmdMatch[0],
+      'Please use the project standard test command (e.g. npm test or equivalent test runner configured in package.json).')
+  }
+
+  // Allowlist category 4: convención existente inequívoca
+  const convMatch = lower.match(/\b(existing\s+convention|established\s+convention|repo\s+convention|project\s+convention|consistent\s+with\s+(?:the\s+)?codebase)\b/i)
+  if (convMatch) {
+    if (effectiveAutoReplies >= effectiveMaxAutoReplies) {
+      return makeResult('request_user', 'budget_exhausted', 0.95, 'Auto-reply budget exhausted', `attempts ${effectiveAutoReplies} >= ${effectiveMaxAutoReplies}`)
+    }
+    return makeResult('auto_reply', 'existing_convention', 0.95, 'Strict mechanical allowlist: unequivocal existing convention', convMatch[0],
+      'Please follow the unequivocal existing convention in the repository.')
+  }
+
+  // Allowlist category 5: detalle mecánico
+  const mechMatch = lower.match(/\b(mechanical\s+detail|import\s+order|export\s+style|type\s+annotation|error\s+message\s+format|standard\s+error\s+handling)\b/i)
+  if (mechMatch) {
+    if (effectiveAutoReplies >= effectiveMaxAutoReplies) {
+      return makeResult('request_user', 'budget_exhausted', 0.95, 'Auto-reply budget exhausted', `attempts ${effectiveAutoReplies} >= ${effectiveMaxAutoReplies}`)
+    }
+    return makeResult('auto_reply', 'mechanical_detail', 0.95, 'Strict mechanical allowlist: mechanical detail', mechMatch[0],
+      'Please proceed with the standard implementation detail matching the existing codebase pattern.')
+  }
+
+  // Allowlist category 6: re-ejecutar tests
+  const rerunMatch = lower.match(/\b(re-?run\s+(?:the\s+)?tests?|run\s+(?:the\s+)?tests?\s+again|execute\s+tests?\s+again)\b/i)
+  if (rerunMatch) {
+    if (effectiveAutoReplies >= effectiveMaxAutoReplies) {
+      return makeResult('request_user', 'budget_exhausted', 0.95, 'Auto-reply budget exhausted', `attempts ${effectiveAutoReplies} >= ${effectiveMaxAutoReplies}`)
+    }
+    return makeResult('auto_reply', 'rerun_tests', 0.95, 'Strict mechanical allowlist: re-run tests', rerunMatch[0],
+      'Please re-run the tests to verify the latest changes.')
+  }
+
+  // Allowlist category 7: mismo patrón que archivo X
+  const patternMatch = lower.match(/\b(same\s+pattern\s+as\s+(?:file\s+)?\S+|follow\s+(?:the\s+)?pattern\s+(?:of|in)\s+\S+|mirror\s+(?:file\s+)?\S+|match\s+(?:the\s+)?style\s+of\s+\S+)\b/i)
+  if (patternMatch) {
+    if (effectiveAutoReplies >= effectiveMaxAutoReplies) {
+      return makeResult('request_user', 'budget_exhausted', 0.95, 'Auto-reply budget exhausted', `attempts ${effectiveAutoReplies} >= ${effectiveMaxAutoReplies}`)
+    }
+    return makeResult('auto_reply', 'same_pattern', 0.95, 'Strict mechanical allowlist: same pattern as referenced file', patternMatch[0],
+      'Please follow the exact pattern of the referenced file in the codebase.')
+  }
+
+  // Fallback if none of the allowlists or conditional categories matched
+  return makeResult('request_user', 'ambiguous_functional', 0.85, 'Question does not match strict mechanical allowlist or safe-continue categories', msg)
 }
 
 // ─── Supervisor loop ─────────────────────────────────────────────────────────
 
 /**
  * Supervisor loop: observe → decide → interact → resume-observation, owning
- * the watch lease for the entire cycle. The loop runs until the session
- * reaches a terminal state, a PAUSED state, a timeout, or an unresolvable
- * attention need.
+ * the watch lease for the entire cycle.
  *
- * Uses autoReplyCount (never turnDepth) for the auto-reply budget.
+ * Tracks independent budgets:
+ * - autoReplyCount / maxAutoReplies (default 2)
+ * - safeContinueCount / maxSafeContinues (default 3)
  */
 export async function supervise({
   jobId,
   sessionId,
-  owner = 'supervisor',
+  owner,
   policy: {
     autoApprovePlan = true,
     autoResolveFeedback = true,
     maxAutoReplies = 2,
+    maxSafeContinues = 3,
     pauseAfterAmbiguity = true,
   } = {},
   timeoutMs,
@@ -157,6 +521,7 @@ export async function supervise({
   nowFn = Date.now,
   classifyFn = classifyFeedback,
 } = {}) {
+  const resolvedOwner = owner ?? crypto.randomUUID()
   const effectiveTimeoutMs = timeoutMs ?? (timeoutS * 1000)
   const start = nowFn()
 
@@ -179,11 +544,11 @@ export async function supervise({
     throw new Error('jules_supervise requires either jobId or sessionId')
   }
 
-  // Acquire the watch lease
+  // Acquire the watch lease via CAS
   let watchGeneration = null
   if (resolvedJobId) {
     const record = readResultFn(resolvedJobId, env)
-    const result = acquireWatch({ record, owner, updateResultFn, jobId: resolvedJobId, env })
+    const result = acquireWatch({ record, owner: resolvedOwner, updateResultFn, readResultFn, jobId: resolvedJobId, env })
     if (!result.acquired) {
       throw new Error(`cannot acquire watch: ${result.reason}`)
     }
@@ -191,6 +556,7 @@ export async function supervise({
   }
 
   let localAutoReplies = 0
+  let localSafeContinues = 0
   let localPlanApprovals = 0
 
   const buildResult = (check, outcome) => {
@@ -214,6 +580,7 @@ export async function supervise({
       attentionReason: check.attentionReason ?? null,
       recommendedAction: check.recommendedAction ?? null,
       autoReplyCount: currentRecord?.remote?.autoReplyCount ?? localAutoReplies,
+      safeContinueCount: currentRecord?.remote?.safeContinueCount ?? localSafeContinues,
       planApprovalCount: currentRecord?.remote?.planApprovalCount ?? localPlanApprovals,
     }
   }
@@ -221,8 +588,8 @@ export async function supervise({
   const release = () => {
     if (resolvedJobId && watchGeneration != null) {
       try {
-        const record = readResultFn(resolvedJobId, env)
-        releaseWatch({ record, owner, generation: watchGeneration, updateResultFn, jobId: resolvedJobId, env })
+        const record = readResultFn ? readResultFn(resolvedJobId, env) : null
+        releaseWatch({ record, owner: resolvedOwner, generation: watchGeneration, updateResultFn, readResultFn, jobId: resolvedJobId, env })
       } catch { /* best-effort */ }
     }
   }
@@ -264,12 +631,12 @@ export async function supervise({
             let cur = null
             try { cur = readResultFn(resolvedJobId, env) } catch { /* ignore */ }
             const curWatch = cur?.remote?.watch
-            if (curWatch?.owner !== owner || curWatch?.generation !== watchGeneration) {
+            if (curWatch?.owner !== resolvedOwner || curWatch?.generation !== watchGeneration) {
               return buildResult(check, 'attention')
             }
           }
 
-          // Approve the plan — does NOT consume autoReplyCount
+          // Approve the plan — does NOT consume autoReplyCount or safeContinueCount
           await interactFn({
             jobId: resolvedJobId,
             sessionId: resolvedSessionId,
@@ -281,11 +648,9 @@ export async function supervise({
             listJobsFn,
           })
           localPlanApprovals++
-          // Continue observing after interaction
           await sleepFn(intervalMs)
           continue
         }
-        // Manual plan approval requested
         return buildResult(check, 'attention')
       }
 
@@ -295,7 +660,6 @@ export async function supervise({
           return buildResult(check, 'attention')
         }
 
-        // Read current autoReplyCount from the record (budget: always autoReplyCount, never turnDepth)
         let currentRecord = null
         if (resolvedJobId) {
           try {
@@ -303,38 +667,46 @@ export async function supervise({
           } catch { /* ignore */ }
         }
         const currentAutoReplies = currentRecord?.remote?.autoReplyCount ?? localAutoReplies
+        const currentSafeContinues = currentRecord?.remote?.safeContinueCount ?? localSafeContinues
 
-        // Budget check: autoReplyCount (never turnDepth)
-        if (currentAutoReplies >= maxAutoReplies) {
-          return buildResult(check, 'budget_exhausted')
-        }
-
-        // Classify feedback through the 6 hard gates
+        // Classify feedback through 3-level classifier
         const classification = classifyFn({
           lastAgentMessage: check.lastMessage,
           originalTask: currentRecord?.task ?? null,
           plan: null,
           attempts: currentAutoReplies,
           maxAttempts: maxAutoReplies,
+          autoReplies: currentAutoReplies,
+          maxAutoReplies,
+          safeContinues: currentSafeContinues,
+          maxSafeContinues,
         })
 
+        if (classification.category === 'budget_exhausted') {
+          return buildResult(check, 'budget_exhausted')
+        }
+
         if (classification.decision === 'auto_reply') {
+          if (currentAutoReplies >= maxAutoReplies) {
+            return buildResult(check, 'budget_exhausted')
+          }
           // Check for stale generation before writing (execution contract §7)
           if (resolvedJobId && watchGeneration != null) {
             let cur = null
             try { cur = readResultFn(resolvedJobId, env) } catch { /* ignore */ }
             const curWatch = cur?.remote?.watch
-            if (curWatch?.owner !== owner || curWatch?.generation !== watchGeneration) {
+            if (curWatch?.owner !== resolvedOwner || curWatch?.generation !== watchGeneration) {
               return buildResult(check, 'attention')
             }
           }
 
-          // Auto-reply — increments autoReplyCount via interactWithSession
+          // Auto-reply — increments autoReplyCount
           await interactFn({
             jobId: resolvedJobId,
             sessionId: resolvedSessionId,
             action: 'reply',
             message: classification.response,
+            feedbackDecision: 'auto_reply',
             env,
             client,
             readResultFn,
@@ -342,12 +714,43 @@ export async function supervise({
             listJobsFn,
           })
           localAutoReplies++
-          // Continue observing
           await sleepFn(intervalMs)
           continue
         }
 
-        // Gates failed → needs human
+        if (classification.decision === 'safe_continue') {
+          if (currentSafeContinues >= maxSafeContinues) {
+            return buildResult(check, 'budget_exhausted')
+          }
+          // Check for stale generation before writing (execution contract §7)
+          if (resolvedJobId && watchGeneration != null) {
+            let cur = null
+            try { cur = readResultFn(resolvedJobId, env) } catch { /* ignore */ }
+            const curWatch = cur?.remote?.watch
+            if (curWatch?.owner !== resolvedOwner || curWatch?.generation !== watchGeneration) {
+              return buildResult(check, 'attention')
+            }
+          }
+
+          // Safe-continue — increments safeContinueCount
+          await interactFn({
+            jobId: resolvedJobId,
+            sessionId: resolvedSessionId,
+            action: 'reply',
+            message: classification.response,
+            feedbackDecision: 'safe_continue',
+            env,
+            client,
+            readResultFn,
+            updateResultFn,
+            listJobsFn,
+          })
+          localSafeContinues++
+          await sleepFn(intervalMs)
+          continue
+        }
+
+        // REQUEST_USER or gates failed → needs human attention
         if (pauseAfterAmbiguity) {
           return buildResult(check, 'attention')
         }
@@ -375,6 +778,7 @@ export async function julesSuperviseTool({
   autoApprovePlan = true,
   autoResolveFeedback = true,
   maxAutoReplies = 2,
+  maxSafeContinues = 3,
   pauseAfterAmbiguity = true,
   policy,
   timeoutS = 300,
@@ -396,6 +800,7 @@ export async function julesSuperviseTool({
     autoApprovePlan: policy?.autoApprovePlan ?? autoApprovePlan,
     autoResolveFeedback: policy?.autoResolveFeedback ?? autoResolveFeedback,
     maxAutoReplies: policy?.maxAutoReplies ?? maxAutoReplies,
+    maxSafeContinues: policy?.maxSafeContinues ?? maxSafeContinues,
     pauseAfterAmbiguity: policy?.pauseAfterAmbiguity ?? pauseAfterAmbiguity,
   }
   return supervise({
@@ -420,4 +825,3 @@ export async function julesSuperviseTool({
 }
 
 export const jules_supervise = julesSuperviseTool
-

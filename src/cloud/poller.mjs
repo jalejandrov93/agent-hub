@@ -1,5 +1,6 @@
 import crypto from 'node:crypto'
 import { appendStdout, updateResult, readResult } from '../jobstore.mjs'
+import { applyRemoteObservation } from './remote-observation.mjs'
 
 export const MIN_INTERVAL_MS = 5000
 export const MAX_INTERVAL_MS = 60000
@@ -185,40 +186,25 @@ export async function pollOnce({
   const prUrl = summary?.prUrl ?? adapter.prUrlFromSession?.(session) ?? null
 
   const nowIso = new Date(nowFn()).toISOString()
-  const stateChanged = session.state !== (currentRemote.state ?? null)
-  const remoteUpdate = {
-    ...currentRemote,
-    state: session.state,
-    // First observation of the current state — lets callers distinguish a
-    // session waiting 30s from one waiting 3h. Preserved across ticks that
-    // report the same state.
-    stateSince: stateChanged ? nowIso : (currentRemote.stateSince ?? nowIso),
-    // Last tick that surfaced genuinely new remote activity (not merely a
-    // poll that re-read the same session). Sticky: never erased by quiet ticks.
-    lastActivityAt: sawNewActivity ? nowIso : (currentRemote.lastActivityAt ?? null),
-    branch: branch ?? currentRemote.branch ?? null,
-    prUrl: prUrl ?? currentRemote.prUrl ?? null,
-    activityCursor: lastToken,
-    seenActivityIds: cappedSeenActivityIds,
-    lastPolledAt: nowIso,
-  }
-  if (isWaiting) {
-    remoteUpdate.pollingStoppedReason = 'awaiting_interaction'
-  } else if (currentRemote.pollingStoppedReason === 'awaiting_interaction') {
-    remoteUpdate.pollingStoppedReason = null
-  }
-
-  updateResultFn(
+  applyRemoteObservation({
     jobId,
-    {
-      // remote_state mirrors remote.state as a top-level SQL-friendly index.
-      // The semantic source of truth stays remote.state; readers must not
-      // treat the two as independent fields that can legitimately diverge.
-      remote_state: session.state,
-      remote: remoteUpdate,
+    state: session.state,
+    isWaiting,
+    sawNewActivity,
+    patch: {
+      branch: branch ?? currentRemote.branch ?? null,
+      prUrl: prUrl ?? currentRemote.prUrl ?? null,
+      activityCursor: lastToken,
+      seenActivityIds: cappedSeenActivityIds,
+      lastPolledAt: nowIso,
+      ...(isWaiting ? { pollingStoppedReason: 'awaiting_interaction' } : {}),
     },
-    env
-  )
+    currentRemote,
+    updateResultFn,
+    readResultFn,
+    env,
+    nowFn,
+  })
 
   return { state: session.state, cursor: lastToken, sawNewActivity, lines, summary, session }
 }

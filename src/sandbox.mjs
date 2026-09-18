@@ -11,11 +11,16 @@ import { SANDBOX } from './config.mjs'
  * IMPORTANT: compatibility is NOT a security sandbox. It inherits the real HOME
  * directory and only redacts well-known secret env vars. Use 'isolated-home' or
  * 'isolated' for stronger credential isolation.
+ *
+ * Note on 'isolated': currently `isolated = isolated-home + reserved extension point`
+ * until real filesystem and network isolation (e.g. bubblewrap/cgroups/namespaces)
+ * is implemented.
  */
 
 export const SANDBOX_PROFILES = Object.freeze({
   compatibility: { inheritHome: true, redactEnv: true },
   'isolated-home': { inheritHome: false, redactEnv: true },
+  // isolated = isolated-home + reserved extension point until real filesystem/network
   isolated: { inheritHome: false, redactEnv: true },
 })
 

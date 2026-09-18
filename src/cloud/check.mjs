@@ -3,6 +3,7 @@ import { listAccounts as defaultListAccounts, getAccountSecret as defaultGetAcco
 import { appendEvent as defaultAppendEvent } from '../eventlog.mjs'
 import { finishRemoteJob as defaultFinishRemoteJob } from './runner.mjs'
 import { keyForJob, keyForAccount, NO_KEY_MESSAGE } from './credentials.mjs'
+import { applyRemoteObservation } from './remote-observation.mjs'
 import * as defaultClient from './jules/client.mjs'
 import * as defaultAdapter from './jules/adapter.mjs'
 
@@ -169,28 +170,22 @@ export async function checkRemoteSession({
     // not clobber a state learned while the machine was up.
     const freshState = typeof session?.state === 'string' && session.state.length > 0 ? session.state : null
     const observedWaiting = freshState === 'PAUSED' || (typeof freshState === 'string' && freshState.startsWith('AWAITING_'))
-    updateResultFn(
-      resolvedJobId,
-      {
-        // remote_state mirrors remote.state as a top-level SQL-friendly index
-        // (same write the poller does) — the semantic source of truth stays
-        // remote.state. Without this, the reboot-recovery path left a stale
-        // index behind (e.g. remote.state=COMPLETED beside remote_state=IN_PROGRESS).
-        remote_state: freshState ?? currentRemote.state ?? null,
-        remote: {
-          ...currentRemote,
-          state: freshState ?? currentRemote.state ?? null,
-          prUrl: prUrl ?? currentRemote.prUrl ?? null,
-          branch: branch ?? currentRemote.branch ?? null,
-          // Model A: only an observation that sees a NON-waiting state may
-          // clear pollingStoppedReason. jules_interact deliberately leaves it
-          // (no watcher exists after an interaction), so a stale null here
-          // would falsely claim polling is active.
-          ...(!observedWaiting ? { pollingStoppedReason: null } : {}),
-        },
+    const sawNewActivity = Array.isArray(activities) && activities.length > 0 && !currentRemote.lastActivityAt
+    applyRemoteObservation({
+      jobId: resolvedJobId,
+      state: freshState,
+      isWaiting: observedWaiting,
+      sawNewActivity,
+      patch: {
+        prUrl: prUrl ?? currentRemote.prUrl ?? null,
+        branch: branch ?? currentRemote.branch ?? null,
       },
-      env
-    )
+      currentRecord: current,
+      currentRemote,
+      updateResultFn,
+      readResultFn,
+      env,
+    })
 
     // A remote job has no local process, so it can never genuinely be
     // orphaned. An 'orphaned' failure on one was written by a reconcile that

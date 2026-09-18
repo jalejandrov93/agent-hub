@@ -1,3 +1,6 @@
+import fs from 'node:fs'
+import path from 'node:path'
+import os from 'node:os'
 import { test } from 'node:test'
 import assert from 'node:assert/strict'
 import {
@@ -6,7 +9,9 @@ import {
   classifyFeedback,
   supervise,
   julesSuperviseTool,
+  LeaseConflictError,
 } from '../../src/cloud/jules/supervisor.mjs'
+import { resultPath } from '../../src/jobstore.mjs'
 import { julesWait, interactWithSession } from '../../src/tools/jules.mjs'
 import { RemoteInfo, JulesSuperviseResponse } from '../../src/schemas.mjs'
 
@@ -52,13 +57,14 @@ test('mandatory a) A adquiere gen1, B falla, A interactua, B no sobrescribe', as
     },
   }
 
-  const updateResultFn = (jobId, patch) => {
+  const updateResultFn = (jobId, patchOrUpdater) => {
+    const patch = typeof patchOrUpdater === 'function' ? patchOrUpdater(record) : patchOrUpdater
     record = {
       ...record,
       ...patch,
       remote: {
         ...record.remote,
-        ...(patch.remote ?? {}),
+        ...(patch?.remote ?? {}),
       },
     }
   }
@@ -113,11 +119,12 @@ test('mandatory a) A adquiere gen1, B falla, A interactua, B no sobrescribe', as
   assert.equal(resARelease.released, true)
   assert.equal(record.remote.watch, null)
 
-  // Now B can acquire
+  // Now B can acquire -> monotonic generation bumps from 2 to 3, NEVER resets to 1!
   const resB2 = acquireWatch({ record, owner: 'B', updateResultFn, jobId: 'job-1' })
   assert.equal(resB2.acquired, true)
-  assert.equal(resB2.generation, 1)
-  assert.deepEqual(record.remote.watch, { owner: 'B', generation: 1 })
+  assert.equal(resB2.generation, 3)
+  assert.deepEqual(record.remote.watch, { owner: 'B', generation: 3 })
+  assert.equal(record.remote.watchGenerationCounter, 3)
 })
 
 // ─── 3. Mandatory Test b: 6 Hard gates classifyFeedback ────────────────────────
@@ -523,3 +530,271 @@ test('supervise detects stale generation during loop and stops writing', async (
   assert.equal(interactCalled, false, 'must not interact when generation is stale')
   assert.equal(res.outcome, 'attention')
 })
+
+// ─── 9. B4.1 Interleaved CAS Tests ──────────────────────────────────────────
+
+test('mandatory interleaved CAS: read of B occurs between read and write of A -> only one wins', () => {
+  let store = {
+    jobId: 'job-cas-interleave',
+    remote: {
+      watch: null,
+      watchGenerationCounter: 0,
+    },
+  }
+
+  const ownerA = 'uuid-actor-A'
+  const ownerB = 'uuid-actor-B'
+
+  let bObservedSnapshot = null
+
+  // A's updateResultFn simulates:
+  // 1. A reads store (watch: null)
+  // 2. Before A writes, B also reads store (watch: null)
+  // 3. A writes to store (watch: ownerA, gen 1)
+  const updateResultFnA = (jobId, updater) => {
+    const aReadSnapshot = structuredClone(store)
+    bObservedSnapshot = structuredClone(store) // B reads here (between read and write of A)
+    const nextA = updater(aReadSnapshot)
+    store = {
+      ...store,
+      ...nextA,
+      remote: { ...store.remote, ...nextA.remote },
+    }
+  }
+
+  // When B's updater runs in CAS, it evaluates against live/locked store
+  const updateResultFnB = (jobId, updater) => {
+    const nextB = updater(store) // store already has ownerA!
+    store = {
+      ...store,
+      ...nextB,
+      remote: { ...store.remote, ...nextB.remote },
+    }
+  }
+
+  // 1. A executes acquireWatch
+  const resA = acquireWatch({
+    jobId: 'job-cas-interleave',
+    owner: ownerA,
+    updateResultFn: updateResultFnA,
+  })
+
+  assert.equal(resA.acquired, true)
+  assert.equal(resA.generation, 1)
+  assert.equal(store.remote.watch.owner, ownerA)
+
+  // Verify B's read indeed observed null before A's write took effect
+  assert.equal(bObservedSnapshot.remote.watch, null)
+
+  // 2. B attempts acquireWatch
+  const resB = acquireWatch({
+    jobId: 'job-cas-interleave',
+    owner: ownerB,
+    updateResultFn: updateResultFnB,
+  })
+
+  // Only A wins! B's updater threw LeaseConflictError and acquireWatch caught it
+  assert.equal(resB.acquired, false)
+  assert.match(resB.reason, new RegExp(`watch owned by '${ownerA}'`))
+  assert.equal(store.remote.watch.owner, ownerA, 'Owner A must not be overwritten')
+  assert.equal(store.remote.watch.generation, 1)
+})
+
+test('real concurrent acquireWatch with updateJsonLocked on disk: only one winner', () => {
+  const tmpDir = fs.mkdtempSync(path.join(os.tmpdir(), 'agent-hub-cas-test-'))
+  const env = { AGENT_HUB_HOME: tmpDir }
+  const jobId = 'job-disk-cas'
+  const file = resultPath(jobId, env)
+  fs.mkdirSync(path.dirname(file), { recursive: true })
+  fs.writeFileSync(file, JSON.stringify({ jobId, status: 'running', remote: { watch: null, watchGenerationCounter: 0 } }), 'utf8')
+
+  const res1 = acquireWatch({ jobId, owner: 'owner-1', env })
+  assert.equal(res1.acquired, true)
+  assert.equal(res1.generation, 1)
+
+  const res2 = acquireWatch({ jobId, owner: 'owner-2', env })
+  assert.equal(res2.acquired, false)
+  assert.match(res2.reason, /watch owned by 'owner-1'/)
+
+  // release by owner-1
+  const rel = releaseWatch({ jobId, owner: 'owner-1', generation: 1, env })
+  assert.equal(rel.released, true)
+
+  // Now owner-2 acquires -> monotonic generation 2 (never resets to 1)
+  const res3 = acquireWatch({ jobId, owner: 'owner-2', env })
+  assert.equal(res3.acquired, true)
+  assert.equal(res3.generation, 2)
+
+  fs.rmSync(tmpDir, { recursive: true, force: true })
+})
+
+// ─── 10. B4.1 3-Level Feedback Classifier ───────────────────────────────────
+
+test('classifyFeedback: AUTO_REPLY allowlist (all 7 categories)', () => {
+  const cases = [
+    { msg: 'Should I use tabs or spaces for indentation?', category: 'formato' },
+    { msg: 'Should I use snake_case or camelCase for the function name?', category: 'naming' },
+    { msg: 'What test command should I run: npm test?', category: 'test_command' },
+    { msg: 'Should I follow the existing convention in this repo?', category: 'existing_convention' },
+    { msg: 'Is the standard import order mechanical detail acceptable?', category: 'mechanical_detail' },
+    { msg: 'Should I re-run the tests to verify the suite?', category: 'rerun_tests' },
+    { msg: 'Should I follow the same pattern as file src/client.mjs?', category: 'same_pattern' },
+  ]
+
+  for (const { msg, category } of cases) {
+    const res = classifyFeedback({ lastAgentMessage: msg })
+    assert.equal(res.decision, 'auto_reply', `Expected auto_reply for "${msg}"`)
+    assert.equal(res.category, category)
+    assert.equal(typeof res.confidence, 'number')
+    assert.ok(res.confidence > 0.8)
+    assert.ok(res.reason.length > 0)
+    assert.ok(res.evidence.length > 0)
+    assert.ok(res.response && res.response.length > 0)
+  }
+})
+
+test('classifyFeedback: SAFE_CONTINUE conditional operational blocks (all 5 categories)', () => {
+  const cases = [
+    { msg: 'Npm warn deprecated dependency found for old package. Proceed?', category: 'obsolete_dependency' },
+    { msg: 'Got a foreign warning from external compiler in node_modules. Can I continue?', category: 'foreign_warning' },
+    { msg: 'Found pre-existing failing test on main branch unrelated to task. Should I ignore?', category: 'preexisting_test_failure' },
+    { msg: 'Eslint blocks CI pipeline on trailing comma style check. Should I fix?', category: 'lint_blocks_pipeline' },
+    { msg: 'Received 429 rate limit transient failure from API, should we retry?', category: 'transient_retry' },
+  ]
+
+  for (const { msg, category } of cases) {
+    const res = classifyFeedback({ lastAgentMessage: msg })
+    assert.equal(res.decision, 'safe_continue', `Expected safe_continue for "${msg}"`)
+    assert.equal(res.category, category)
+    assert.equal(typeof res.confidence, 'number')
+    assert.ok(res.confidence >= 0.9)
+    assert.ok(res.reason.length > 0)
+    assert.ok(res.evidence.length > 0)
+    assert.ok(res.response && res.response.length > 0)
+  }
+})
+
+test('classifyFeedback: REQUEST_USER 10 escalations', () => {
+  const escalations = [
+    { msg: 'Should we refactor and re-architect the service layer?', category: 'architecture' },
+    { msg: 'What authentication or login credentials should we use?', category: 'auth' },
+    { msg: 'Please provide the database password and secret api_key?', category: 'secrets' },
+    { msg: 'Should we introduce a breaking change in public API signature?', category: 'api_changes' },
+    { msg: 'Should I run a database migration to alter table and drop column?', category: 'migrations' },
+    { msg: 'Is it safe to delete records or truncate table with user data?', category: 'data' },
+    { msg: 'What pricing model and UX decision should we choose?', category: 'business_decision' },
+    { msg: 'Should I delete the feature and remove the deprecated module?', category: 'code_deletion' },
+    { msg: 'Should we add a heavy major dependency and switch framework?', category: 'impactful_dependencies' },
+    { msg: 'Should we also add a new payment gateway feature out of scope?', category: 'scope_change' },
+    { msg: 'What do you think we should do next with this code?', category: 'ambiguous_functional' },
+  ]
+
+  for (const { msg, category } of escalations) {
+    const res = classifyFeedback({ lastAgentMessage: msg })
+    assert.equal(res.decision, 'request_user', `Expected request_user for "${msg}"`)
+    assert.equal(res.category, category)
+    assert.equal(typeof res.confidence, 'number')
+    assert.ok(res.reason.length > 0)
+    assert.ok(res.evidence.length > 0)
+    assert.equal(res.response, null)
+  }
+})
+
+test('classifyFeedback: budget exhausted transitions to request_user', () => {
+  // auto-reply budget exhausted
+  const autoExhausted = classifyFeedback({
+    lastAgentMessage: 'Should I use snake_case or camelCase for function names?',
+    attempts: 2,
+    maxAttempts: 2,
+  })
+  assert.equal(autoExhausted.decision, 'request_user')
+  assert.equal(autoExhausted.category, 'budget_exhausted')
+
+  // safe-continue budget exhausted
+  const safeExhausted = classifyFeedback({
+    lastAgentMessage: 'Transient network failure 429 rate limit encountered, retry?',
+    safeContinues: 3,
+    maxSafeContinues: 3,
+  })
+  assert.equal(safeExhausted.decision, 'request_user')
+  assert.equal(safeExhausted.category, 'budget_exhausted')
+})
+
+test('supervise: separate budgets autoReplyCount/maxAutoReplies=2 and safeContinueCount/maxSafeContinues=3', async () => {
+  let record = {
+    jobId: 'job-split-budgets',
+    status: 'running',
+    remote: {
+      sessionId: 's-split-budgets',
+      autoReplyCount: 0,
+      safeContinueCount: 0,
+      planApprovalCount: 0,
+      watch: null,
+    },
+  }
+
+  const readResultFn = () => record
+  const updateResultFn = (id, patchOrUpdater) => {
+    const patch = typeof patchOrUpdater === 'function' ? patchOrUpdater(record) : patchOrUpdater
+    record = { ...record, ...patch, remote: { ...record.remote, ...(patch?.remote ?? {}) } }
+  }
+
+  let step = 0
+  const checkRemoteSessionFn = async () => {
+    step++
+    if (step <= 2) {
+      return {
+        state: 'AWAITING_USER_FEEDBACK',
+        terminal: false,
+        lastMessage: 'Should I use snake_case or camelCase for helper function names?',
+      }
+    }
+    if (step <= 5) {
+      return {
+        state: 'AWAITING_USER_FEEDBACK',
+        terminal: false,
+        lastMessage: 'Received 429 rate limit transient failure from API, should we retry?',
+      }
+    }
+    return {
+      state: 'COMPLETED',
+      terminal: true,
+      prUrl: 'https://github.com/org/repo/pull/123',
+    }
+  }
+
+  const interactCalls = []
+  const interactFn = async (args) => {
+    interactCalls.push(args)
+    if (args.feedbackDecision === 'auto_reply') {
+      record.remote.autoReplyCount = (record.remote.autoReplyCount ?? 0) + 1
+    } else if (args.feedbackDecision === 'safe_continue') {
+      record.remote.safeContinueCount = (record.remote.safeContinueCount ?? 0) + 1
+    }
+  }
+
+  const result = await supervise({
+    jobId: 'job-split-budgets',
+    policy: {
+      maxAutoReplies: 2,
+      maxSafeContinues: 3,
+    },
+    timeoutS: 10,
+    intervalMs: 10,
+    checkRemoteSessionFn,
+    interactFn,
+    readResultFn,
+    updateResultFn,
+    sleepFn: async () => {},
+  })
+
+  // 2 auto-replies + 3 safe-continues occurred without mutual interference
+  assert.equal(result.autoReplyCount, 2)
+  assert.equal(result.safeContinueCount, 3)
+  assert.equal(record.remote.autoReplyCount, 2)
+  assert.equal(record.remote.safeContinueCount, 3)
+  assert.equal(interactCalls.length, 5)
+  assert.equal(result.outcome, 'terminal')
+  JulesSuperviseResponse.parse(result)
+})
+

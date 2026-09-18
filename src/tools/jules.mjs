@@ -353,6 +353,7 @@ export async function interactWithSession({
   sessionId,
   action,
   message,
+  feedbackDecision,
   env = process.env,
   client = defaultClient,
   listJobsFn = defaultListJobs,
@@ -429,6 +430,8 @@ export async function interactWithSession({
       // after this call (Model A), so null would falsely claim polling is
       // active. The next observation that sees a non-waiting state clears it.
       const newAttempts = (currentRemote.attempts ?? current?.turnDepth ?? 0) + 1
+      const isSafeContinue = feedbackDecision === 'safe_continue'
+      const isAutoReply = action === 'reply' && !isSafeContinue
       updateResultFn(
         resolvedJobId,
         {
@@ -436,7 +439,8 @@ export async function interactWithSession({
             ...currentRemote,
             attempts: newAttempts,
             interventionCount: (currentRemote.interventionCount ?? 0) + 1,
-            autoReplyCount: (currentRemote.autoReplyCount ?? 0) + (action === 'reply' ? 1 : 0),
+            autoReplyCount: (currentRemote.autoReplyCount ?? 0) + (isAutoReply ? 1 : 0),
+            safeContinueCount: (currentRemote.safeContinueCount ?? 0) + (isSafeContinue ? 1 : 0),
             planApprovalCount: (currentRemote.planApprovalCount ?? 0) + (action === 'approve_plan' ? 1 : 0),
           },
         },
