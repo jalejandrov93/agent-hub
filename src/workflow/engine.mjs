@@ -7,12 +7,15 @@ import {
   getWorkflowNode,
   listWorkflowNodes,
   claimWorkflowNode,
+  publishWorkflowNodeReady,
 } from '../storage/index.mjs'
 import { appendEvent } from '../eventlog.mjs'
-import { calculateDispatchTimeoutS, dispatch } from '../dispatch.mjs'
+import { calculateDispatchTimeoutS, dispatch, waitExecution as defaultWaitExecution } from '../dispatch.mjs'
+import { readResult as readJobResult } from '../jobstore.mjs'
 import { createWorkflow } from './schema.mjs'
-import { NODE_STATUS, isTerminalStatus, assertValidTransition } from './state.mjs'
+import { NODE_STATUS, WAITING_REASONS, isTerminalStatus, assertValidTransition } from './state.mjs'
 import { resolveDependencies, evaluateCondition } from './resolver.mjs'
+import { evaluateValue } from './dsl.mjs'
 
 const sleep = (ms) => new Promise((resolve) => setTimeout(resolve, ms))
 
@@ -33,6 +36,10 @@ const sleep = (ms) => new Promise((resolve) => setTimeout(resolve, ms))
  * 3. Idempotent re-entry: If the same scheduler worker retries after transient failure, `claimed_by = @claimedBy`
  *    safely allows continuation without deadlock.
  */
+
+/** Default claim-lease TTL: a running node owned by someone else may only be
+ * revived after this long without an update. */
+export const CLAIM_LEASE_TTL_MS = 30_000
 
 function refreshNodeStates(ctx, workflowId, nodeStates) {
   const rows = listWorkflowNodes(ctx, workflowId)
@@ -56,7 +63,95 @@ function refreshNodeStates(ctx, workflowId, nodeStates) {
 }
 
 /**
+ * C1.1: única vía ready→running. Asserts the transition, then performs the
+ * atomic CAS. Returns true when this worker now owns the node.
+ * A node still PENDING is not claimed here: the wave publishes it READY
+ * first through the conditional publish (which never clobbers a claim).
+ */
+export function claimNode(ctx, { workflowId, stepId, claimedBy, attempt }) {
+  const row = getWorkflowNode(ctx, workflowId, stepId)
+  const current = row?.status ?? NODE_STATUS.PENDING
+  if (current !== NODE_STATUS.READY) return false
+  assertValidTransition(current, NODE_STATUS.RUNNING, stepId)
+  return claimWorkflowNode(ctx, { workflowId, stepId, claimedBy, attempt })
+}
+
+/**
+ * C1.1: vía para el resto de transiciones. Always asserts validity first.
+ */
+export function transitionNode(ctx, { workflowId, stepId, from, to, attempt, resultJson = null, claimedBy = null }) {
+  const row = getWorkflowNode(ctx, workflowId, stepId)
+  const current = from ?? row?.status
+  assertValidTransition(current, to, stepId)
+  const now = new Date().toISOString()
+  upsertWorkflowNode(ctx, {
+    workflow_id: workflowId,
+    step_id: stepId,
+    status: to,
+    attempt: attempt ?? row?.attempt ?? 0,
+    updated_at: now,
+    claimed_by: claimedBy ?? row?.claimed_by ?? null,
+    ...(resultJson !== null ? { result_json: resultJson } : {}),
+  })
+  return getWorkflowNode(ctx, workflowId, stepId)
+}
+
+function isHandleLike(value) {
+  if (!value || typeof value !== 'object') return false
+  if (typeof value.abort === 'function' && typeof value.jobId === 'string') return true
+  if (value.__handle && typeof value.__handle?.jobId === 'string') return true
+  return false
+}
+
+function unwrapHandle(value) {
+  if (!value || typeof value !== 'object') return null
+  if (value.__handle && typeof value.__handle?.jobId === 'string') return value.__handle
+  if (typeof value.abort === 'function' && typeof value.jobId === 'string') return value
+  if (value.job && typeof value.job.jobId === 'string' && typeof value.abort === 'function') return value
+  return null
+}
+
+/**
+ * Resolves a fanout `items` expression without `new Function`/`eval`.
+ * Array => as-is; string => C1.1 DSL value expression evaluated against
+ * current step states (must yield an array); otherwise falls back to the
+ * parent result items when dependsOn is set.
+ */
+export function resolveFanoutItems({ node, nodeStates }) {
+  if (Array.isArray(node.items)) return node.items
+  if (typeof node.items === 'string') {
+    const rawSteps = {}
+    for (const [id, s] of nodeStates.entries()) {
+      rawSteps[id] = s
+    }
+    try {
+      const value = evaluateValue(node.items, { steps: rawSteps })
+      if (Array.isArray(value)) return value
+    } catch {
+      // fall through to empty
+    }
+    return []
+  }
+  if (node.dependsOn && node.dependsOn.length > 0) {
+    const parentState = nodeStates.get(node.dependsOn[0])
+    if (Array.isArray(parentState?.result?.items)) {
+      return parentState.result.items
+    } else if (Array.isArray(parentState?.result)) {
+      return parentState.result
+    }
+  }
+  return []
+}
+
+/**
  * Executes a single node with retry backoff and timeout enforcement.
+ *
+ * C1.1 delegate semantics: dispatch() returns a handle; waitExecution()
+ * observes the job record until a REAL terminal status. SUCCEEDED is
+ * persisted only after terminal success — a still-pending job never
+ * advances the node. Timeouts abort the handle, confirm the record, and
+ * retry with attempt+1. Waiting (AWAITING_* / PAUSED) persists WAITING and
+ * resumes without re-dispatching.
  */
 async function executeNode({
   workflow,
@@ -67,10 +162,16 @@ async function executeNode({
   nodeStates,
   claimedBy,
   backoffMs,
+  waitExecutionFn = defaultWaitExecution,
+  readResultFn = null,
+  onWaiting = null,
+  waitingTimeoutS = 300,
+  pollIntervalMs = 25,
 }) {
   const maxAttempts = node.maxAttempts ?? 1
   let attempt = nodeStates.get(node.id)?.attempt || 1
   let lastError = null
+  const readRecord = readResultFn ?? ((jobId) => readJobResult(jobId, env))
 
   appendEvent(
     {
@@ -108,7 +209,26 @@ async function executeNode({
           }
         }
         timeoutS = timeoutS || 30
+        const attemptDeadline = Date.now() + timeoutS * 1000
 
+        // Sin await previo: el timeout cubre el dispatch mismo (los mocks
+        // legacy cuelgan dentro del dispatch, igual que antes).
+        const dispatchPromise = Promise.resolve().then(() =>
+          dispatchFn({
+            task: node.task,
+            taskType: node.taskType,
+            agent: node.agent,
+            model: node.model,
+            cwd: node.cwd,
+            mode: node.mode,
+            workflowStep: node.id,
+            workflow_id: workflow.id,
+            step_id: node.id,
+            attempt,
+            timeoutS,
+            env,
+          })
+        )
         const timeoutPromise = new Promise((_, reject) => {
           const timer = setTimeout(() => {
             const err = new Error(`Node "${node.id}" timed out after ${timeoutS}s (attempt ${attempt}/${maxAttempts})`)
@@ -118,47 +238,39 @@ async function executeNode({
           if (timer.unref) timer.unref()
         })
 
-        const execPromise = dispatchFn({
-          task: node.task,
-          taskType: node.taskType,
-          agent: node.agent,
-          model: node.model,
-          cwd: node.cwd,
-          mode: node.mode,
-          workflowStep: node.id,
-          workflow_id: workflow.id,
-          step_id: node.id,
-          attempt,
-          timeoutS,
-          env,
-        })
+        const dispatched = await Promise.race([dispatchPromise, timeoutPromise])
+        // Evita unhandled rejection si el dispatch pierde la carrera y falla tarde.
+        dispatchPromise.catch(() => {})
 
-        result = await Promise.race([execPromise, timeoutPromise])
-      } else if (node.type === 'fanout') {
-        // C1.5 Fanout node generates N children
-        let items = []
-        if (Array.isArray(node.items)) {
-          items = node.items
-        } else if (typeof node.items === 'string') {
-          const rawSteps = {}
-          for (const [id, s] of nodeStates.entries()) {
-            rawSteps[id] = s
-          }
-          try {
-            const fn = new Function('steps', `"use strict"; return (${node.items});`)
-            const evalItems = fn(rawSteps)
-            if (Array.isArray(evalItems)) items = evalItems
-          } catch {
-            items = []
-          }
-        } else if (node.dependsOn && node.dependsOn.length > 0) {
-          const parentState = nodeStates.get(node.dependsOn[0])
-          if (Array.isArray(parentState?.result?.items)) {
-            items = parentState.result.items
-          } else if (Array.isArray(parentState?.result)) {
-            items = parentState.result
-          }
+        const handle = unwrapHandle(dispatched)
+        if (!handle) {
+          // Legacy dispatch (valor plano): el resultado ya está aquí.
+          result = dispatched
+        } else {
+          // C1.1: espera el record terminal REAL con el presupuesto restante
+          // del intento; nunca avanza sobre un pendiente.
+          const remainingS = Math.max(0.05, (attemptDeadline - Date.now()) / 1000)
+          result = await waitForHandleTerminal({
+            workflow,
+            node,
+            ctx,
+            env,
+            handle,
+            timeoutS: remainingS,
+            attempt,
+            maxAttempts,
+            nodeStates,
+            claimedBy,
+            waitExecutionFn,
+            readRecord,
+            onWaiting,
+            waitingTimeoutS,
+            pollIntervalMs,
+          })
         }
+      } else if (node.type === 'fanout') {
+        // C1.5 Fanout node generates N children (C1.1: no new Function)
+        const items = resolveFanoutItems({ node, nodeStates })
 
         // Execute N children in parallel with distinct workflowStep -> distinct dispatchKey
         const childResults = await Promise.all(
@@ -193,16 +305,38 @@ async function executeNode({
               env,
             })
 
+            const childHandle = unwrapHandle(childRes)
+            let finalChild = childRes
+            if (childHandle) {
+              finalChild = await waitForHandleTerminal({
+                workflow,
+                node: { ...node, id: childStepId },
+                ctx,
+                env,
+                handle: childHandle,
+                timeoutS: node.timeoutS || 30,
+                attempt: 1,
+                maxAttempts: 1,
+                nodeStates,
+                claimedBy,
+                waitExecutionFn,
+                readRecord,
+                onWaiting,
+                waitingTimeoutS,
+                pollIntervalMs,
+              })
+            }
+
             upsertWorkflowNode(ctx, {
               workflow_id: workflow.id,
               step_id: childStepId,
               status: NODE_STATUS.SUCCEEDED,
               attempt: 1,
               updated_at: new Date().toISOString(),
-              result_json: JSON.stringify(childRes ?? { success: true }),
+              result_json: JSON.stringify(finalChild ?? { success: true }),
             })
 
-            return childRes
+            return finalChild
           })
         )
 
@@ -219,7 +353,7 @@ async function executeNode({
         result = { notified: true, stepId: node.id }
       }
 
-      // Transition to SUCCEEDED
+      // Transition to SUCCEEDED (only reachable after a real terminal outcome)
       const now = new Date().toISOString()
       upsertWorkflowNode(ctx, {
         workflow_id: workflow.id,
@@ -315,6 +449,145 @@ async function executeNode({
 }
 
 /**
+ * Waits for a dispatch handle until terminal, handling waiting/timeout.
+ * - terminal succeeded -> returns the record (node may advance)
+ * - terminal failed/canceled -> throws (retry/fail path)
+ * - waiting -> persists WAITING, blocks until external resume to running
+ *   (no re-dispatch), then waits again
+ * - local timeout -> abort + confirm + throw ETIMEDOUT (retry attempt+1)
+ */
+async function waitForHandleTerminal({
+  workflow,
+  node,
+  ctx,
+  env,
+  handle,
+  timeoutS,
+  attempt,
+  maxAttempts,
+  nodeStates,
+  claimedBy,
+  waitExecutionFn,
+  readRecord,
+  onWaiting,
+  waitingTimeoutS,
+  pollIntervalMs,
+}) {
+  const jobId = handle.jobId ?? handle?.job?.jobId
+  const waitStart = Date.now()
+  for (;;) {
+    const elapsedS = (Date.now() - waitStart) / 1000
+    const remainingS = Math.max(1, timeoutS - elapsedS)
+    const outcome = await waitExecutionFn(handle, {
+      timeoutS: remainingS,
+      pollIntervalMs,
+      readResultFn: readRecord,
+      onWaiting: async ({ record, reason }) => {
+        await onWaiting?.({ workflowId: workflow.id, stepId: node.id, record, reason })
+      },
+    })
+
+    if (outcome?.aborted) {
+      const err = new Error(`Node "${node.id}" aborted (attempt ${attempt}/${maxAttempts})`)
+      err.code = 'EABORTED'
+      throw err
+    }
+
+    if (outcome?.waiting) {
+      const reason = outcome.reason ?? 'external_event'
+      // running -> waiting (persisted; scheduler holds the claim)
+      assertValidTransition(NODE_STATUS.RUNNING, NODE_STATUS.WAITING, node.id)
+      const now = new Date().toISOString()
+      upsertWorkflowNode(ctx, {
+        workflow_id: workflow.id,
+        step_id: node.id,
+        status: NODE_STATUS.WAITING,
+        attempt,
+        updated_at: now,
+        claimed_by: claimedBy,
+        result_json: JSON.stringify({ waiting: true, waitReason: reason, jobId, remoteState: outcome.remoteState ?? null }),
+      })
+      nodeStates.set(node.id, {
+        ...nodeStates.get(node.id),
+        status: NODE_STATUS.WAITING,
+        attempt,
+        result: { waiting: true, waitReason: reason, jobId },
+      })
+      await onWaiting?.({ workflowId: workflow.id, stepId: node.id, record: outcome.record, reason })
+
+      // Block until an external actor resumes (waiting -> running) without
+      // dispatching again. Bounded so a forgotten wait still surfaces.
+      const resumeDeadline = Date.now() + Math.max(1, waitingTimeoutS) * 1000
+      for (;;) {
+        await sleep(Math.max(10, pollIntervalMs))
+        const row = getWorkflowNode(ctx, workflow.id, node.id)
+        if (!row || row.status !== NODE_STATUS.WAITING) {
+          const current = row?.status
+          if (current === NODE_STATUS.RUNNING) break // resumed: wait on the same handle again
+          if (current === NODE_STATUS.CANCELED) {
+            const err = new Error(`Node "${node.id}" canceled while waiting`)
+            err.code = 'ECANCELED'
+            throw err
+          }
+          if (current === NODE_STATUS.FAILED) {
+            const err = new Error(`Node "${node.id}" failed while waiting`)
+            err.code = 'EWAITFAILED'
+            throw err
+          }
+          break
+        }
+        if (Date.now() >= resumeDeadline) {
+          try { await handle.abort?.() } catch {}
+          const err = new Error(`Node "${node.id}" waiting timed out after ${waitingTimeoutS}s (attempt ${attempt}/${maxAttempts})`)
+          err.code = 'ETIMEDOUT'
+          throw err
+        }
+      }
+      continue
+    }
+
+    if (outcome?.timedOut) {
+      // Local deadline: abort the handle, confirm the record, retry attempt+1.
+      let confirmed = null
+      try {
+        await handle.abort?.()
+      } catch {}
+      try {
+        confirmed = readRecord(jobId)
+      } catch {}
+      if (confirmed && ['succeeded', 'failed', 'canceled'].includes(confirmed.status)) {
+        if (confirmed.status === 'succeeded') return confirmed
+        const err = new Error(`Node "${node.id}" confirmed ${confirmed.status} after abort: ${confirmed.error ?? ''}`)
+        err.code = confirmed.status === 'canceled' ? 'ECANCELED' : 'EABORTED'
+        err.record = confirmed
+        throw err
+      }
+      const err = new Error(`Node "${node.id}" timed out after ${timeoutS}s (attempt ${attempt}/${maxAttempts})`)
+      err.code = 'ETIMEDOUT'
+      throw err
+    }
+
+    const status = outcome?.status ?? outcome?.record?.status
+    const record = outcome?.record ?? null
+    if (status === 'succeeded') {
+      return record ?? { success: true, jobId }
+    }
+    if (status === 'failed' || status === 'canceled') {
+      const err = new Error(
+        `Node "${node.id}" execution ${status}: ${record?.error ?? record?.errorKind ?? 'unknown'} (attempt ${attempt}/${maxAttempts})`
+      )
+      err.code = status === 'canceled' ? 'ECANCELED' : 'EEXECFAILED'
+      err.record = record
+      throw err
+    }
+    // Unknown outcome shape: treat as timeout so the retry path engages.
+    const err = new Error(`Node "${node.id}" wait returned unknown outcome (attempt ${attempt}/${maxAttempts})`)
+    err.code = 'ETIMEDOUT'
+    throw err
+  }
+}
+
+/**
  * Runs a workflow DAG to completion.
  *
  * @param {object} params
@@ -337,10 +610,25 @@ export async function runWorkflow({
   claimedBy = `scheduler_${crypto.randomUUID()}`,
   pollIntervalMs = 25,
   backoffMs = 50,
+  waitExecutionFn = defaultWaitExecution,
+  readResultFn = null,
+  onWaiting = null,
+  waitingTimeoutS = 300,
+  leaseTtlMs = CLAIM_LEASE_TTL_MS,
+  isOwnerAlive = null,
 } = {}) {
   const dbCtx = ctx || getDb(env)
   let workflow = null
   const isResume = Boolean(!inputWorkflow && inputWorkflowId)
+  // Liveness probe: by default any foreign owner is assumed dead (a resume
+  // means this process restarted and the old holder is gone). Pass an
+  // explicit isOwnerAlive(owner, me) for precise AND semantics with the
+  // lease check below.
+  const ownerAlive = typeof isOwnerAlive === 'function' ? isOwnerAlive : () => false
+  // Sin probe explícito, un dueño foráneo se asume muerto (resume tras
+  // reinicio: el holder anterior desapareció con el proceso). Con probe
+  // explícito rige el AND estricto: lease expirado Y dueño muerto.
+  const hasExplicitProbe = typeof isOwnerAlive === 'function'
 
   if (inputWorkflow) {
     workflow = createWorkflow(inputWorkflow)
@@ -378,18 +666,32 @@ export async function runWorkflow({
       }
 
       let status = row.status
+      let claimed = row.claimed_by
 
-      // On resume after restart: orphaned running nodes are reset to ready
+      // On resume: orphaned running nodes revive to ready ONLY when the
+      // lease expired AND the owner is dead; otherwise re-adopt without
+      // re-executing. Waiting nodes are always re-adopted (never reset).
       if (isResume && status === NODE_STATUS.RUNNING) {
-        status = NODE_STATUS.READY
-        upsertWorkflowNode(dbCtx, {
-          workflow_id: workflow.id,
-          step_id: node.id,
-          status: NODE_STATUS.READY,
-          attempt: row.attempt,
-          claimed_by: null,
-          updated_at: new Date().toISOString(),
-        })
+        const owner = row.claimed_by
+        if (owner && owner !== claimedBy && !ownerAlive(owner, claimedBy)) {
+          const updatedAt = Date.parse(row.updated_at ?? '') || 0
+          const leaseExpired = Date.now() - updatedAt > leaseTtlMs
+          if (leaseExpired || !hasExplicitProbe) {
+            assertValidTransition(NODE_STATUS.RUNNING, NODE_STATUS.READY, node.id)
+            status = NODE_STATUS.READY
+            upsertWorkflowNode(dbCtx, {
+              workflow_id: workflow.id,
+              step_id: node.id,
+              status: NODE_STATUS.READY,
+              attempt: row.attempt,
+              claimed_by: null,
+              updated_at: new Date().toISOString(),
+            })
+            claimed = null
+          }
+        } else if (!owner || owner === claimedBy) {
+          // Same owner (or unclaimed): keep running, re-adopt silently.
+        }
       }
 
       nodeStates.set(node.id, {
@@ -397,7 +699,7 @@ export async function runWorkflow({
         attempt: row.attempt || 0,
         result,
         error: null,
-        claimed_by: isResume && status === NODE_STATUS.READY ? null : row.claimed_by,
+        claimed_by: status === NODE_STATUS.READY ? null : (status === row.status ? claimed : claimed),
       })
     } else {
       const now = new Date().toISOString()
@@ -455,8 +757,10 @@ export async function runWorkflow({
     const readyNodes = resolution.ready
 
     if (readyNodes.length === 0) {
-      const anyRunning = Array.from(nodeStates.values()).some((s) => s.status === NODE_STATUS.RUNNING)
-      if (anyRunning) {
+      const anyActive = Array.from(nodeStates.values()).some(
+        (s) => s.status === NODE_STATUS.RUNNING || s.status === NODE_STATUS.WAITING
+      )
+      if (anyActive) {
         await sleep(pollIntervalMs)
         continue
       }
@@ -466,9 +770,17 @@ export async function runWorkflow({
     // 4. Parallel wave execution via Promise.all
     await Promise.all(
       readyNodes.map(async (node) => {
-        // Atomic CAS Claim: only one scheduler worker acquires this node (C1.8 / C1.9)
+        // Publish PENDING -> READY through a CONDITIONAL update (only from
+        // pending): it can never overwrite another scheduler's running
+        // claim, so the CAS claim below stays the single winner gate.
+        publishWorkflowNodeReady(dbCtx, { workflowId: workflow.id, stepId: node.id })
+        const published = getWorkflowNode(dbCtx, workflow.id, node.id)
+        if (published?.status === NODE_STATUS.READY) {
+          nodeStates.set(node.id, { ...nodeStates.get(node.id), status: NODE_STATUS.READY })
+        }
+        // Atomic CAS Claim via claimNode: única vía ready→running (C1.8 / C1.9)
         const currentAttempt = (nodeStates.get(node.id)?.attempt || 0) + 1
-        const claimed = claimWorkflowNode(dbCtx, {
+        const claimed = claimNode(dbCtx, {
           workflowId: workflow.id,
           stepId: node.id,
           claimedBy,
@@ -496,6 +808,11 @@ export async function runWorkflow({
           nodeStates,
           claimedBy,
           backoffMs,
+          waitExecutionFn,
+          readResultFn,
+          onWaiting,
+          waitingTimeoutS,
+          pollIntervalMs,
         })
       })
     )
@@ -523,3 +840,5 @@ export async function runWorkflow({
     nodes: Object.fromEntries(nodeStates.entries()),
   }
 }
+
+export { isHandleLike }

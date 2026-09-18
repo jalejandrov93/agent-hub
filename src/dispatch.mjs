@@ -10,6 +10,108 @@ import { resolveEffectiveTimeoutS } from './timeouts.mjs'
 import { ADAPTIVE_TIMEOUT } from './config.mjs'
 import { classifyError } from './policy/taxonomy.mjs'
 import { adapterFor as defaultAdapterFor } from './adapters/index.mjs'
+import { cancelJob as defaultCancelJob } from './jobrunner.mjs'
+
+/** Terminal job statuses: only these count as a real terminal outcome. */
+export const TERMINAL_JOB_STATUSES = Object.freeze(['succeeded', 'failed', 'canceled'])
+
+/** Remote states that mean "waiting for interaction", never terminal. */
+export function isWaitingJobState(state) {
+  return (
+    typeof state === 'string' &&
+    (state.startsWith('AWAITING_') || state === 'PAUSED')
+  )
+}
+
+export function waitingReasonForState(state) {
+  if (state === 'AWAITING_USER_FEEDBACK') return 'user_feedback'
+  if (state === 'AWAITING_PLAN_APPROVAL') return 'plan_approval'
+  return 'external_event'
+}
+
+/**
+ * Creates an execution handle for a dispatched job.
+ *
+ * Local jobs: abort() calls cancelJob and confirms the terminal record.
+ * Remote jobs: abort() only stops the local wait — the remote session
+ * keeps running (REMOTE NO-GUARANTEE, see docs/execution-contract.md §2).
+ */
+export function createExecutionHandle({ job, sessionId = null, env = process.env, cancelJobFn = defaultCancelJob, isRemote = false } = {}) {
+  const jobId = job?.jobId ?? null
+  const resolvedSessionId = sessionId ?? job?.sessionId ?? job?.remote?.sessionId ?? null
+  const handle = {
+    jobId,
+    sessionId: resolvedSessionId,
+    job,
+    remote: isRemote,
+    _aborted: false,
+    async abort() {
+      if (handle._aborted) return { alreadyAborted: true, jobId }
+      handle._aborted = true
+      if (isRemote || job?.remote) {
+        return { stoppedWaiting: true, remoteContinuing: true, jobId }
+      }
+      try {
+        const record = await cancelJobFn(jobId, { env })
+        return { canceled: true, jobId, status: record?.status ?? 'canceled' }
+      } catch (error) {
+        return { abortError: String(error?.message ?? error), jobId }
+      }
+    },
+  }
+  return handle
+}
+
+export function isExecutionHandle(value) {
+  return Boolean(value && typeof value === 'object' && typeof value?.jobId === 'string' && typeof value?.abort === 'function')
+}
+
+/**
+ * Waits for an execution handle until the job record reaches a terminal
+ * status or a waiting state (AWAITING_* / PAUSED).
+ *
+ * Returns:
+ *   { done:true, status, record } on terminal,
+ *   { done:true, waiting:true, status:'waiting', record, reason } on waiting,
+ *   { done:true, aborted:true } when handle.abort() was called,
+ *   { done:false, timedOut:true, record } on local budget expiry.
+ */
+export async function waitExecution(handleOrJobId, { timeoutS = 60, pollIntervalMs = 100, onWaiting = null, readResultFn = null, nowFn = Date.now } = {}) {
+  const handle = typeof handleOrJobId === 'string' ? { jobId: handleOrJobId, _aborted: false } : (handleOrJobId ?? {})
+  const jobId = handle.jobId ?? handle?.job?.jobId
+  if (!jobId) throw new Error('waitExecution requires a jobId')
+  let readFn = readResultFn
+  if (!readFn) {
+    const { readResult } = await import('./jobstore.mjs')
+    readFn = (id) => readResult(id)
+  }
+  const deadline = nowFn() + Math.max(1, timeoutS) * 1000
+  for (;;) {
+    if (handle._aborted) return { done: true, aborted: true, jobId }
+    let record = null
+    try {
+      record = readFn(jobId)
+    } catch {
+      record = handle.job ?? null
+    }
+    const status = record?.status
+    if (status && TERMINAL_JOB_STATUSES.includes(status)) {
+      return { done: true, aborted: false, timedOut: false, waiting: false, status, record }
+    }
+    const remoteState = record?.remote?.state ?? record?.remote_state ?? null
+    if (status === 'running' && isWaitingJobState(remoteState)) {
+      const reason = waitingReasonForState(remoteState)
+      try {
+        await onWaiting?.({ record, reason, remoteState })
+      } catch {}
+      return { done: true, waiting: true, timedOut: false, aborted: false, status: 'waiting', record, reason, remoteState }
+    }
+    if (nowFn() >= deadline) {
+      return { done: false, timedOut: true, waiting: false, jobId, record }
+    }
+    await new Promise((r) => setTimeout(r, Math.max(10, pollIntervalMs)))
+  }
+}
 
 /** Default window for deduplicating recent dispatches: 10 minutes */
 export const DISPATCH_WINDOW_MS = 10 * 60 * 1000
@@ -217,7 +319,8 @@ async function isCandidateUsable(candidate, { cwd, env, runPreflightFn, circuitB
  * Main dispatch entrypoint:
  * route() → primer candidato usable → policyFor() → reserva writeLock →
  * createJob con dispatchKey + executionId → executeWithPolicy → fallback automático →
- * retorna { job, dispatchKey, executionId, candidate }.
+ * retorna { job, dispatchKey, executionId, candidate, jobId, sessionId, abort }
+ * (jobId/sessionId/abort = C1.1 execution handle; compat total con callers viejos).
  */
 export async function dispatch({
   task,
@@ -251,9 +354,33 @@ export async function dispatch({
   adoptWriteLockFn = adoptWriteLock,
   classifyErrorFn = classifyError,
   adapterForFn = defaultAdapterFor,
+  cancelJobFn = defaultCancelJob,
   ...restDeps
 } = {}) {
   const key = dispatchKey ?? computeDispatchKey({ task, cwd, taskType, workflowStep })
+  // Wraps a { job, dispatchKey, executionId, candidate } result with the
+  // C1.1 execution handle (compat: old fields untouched).
+  const withHandle = (result, candidateForRemote) => {
+    const remoteFlag = Boolean(
+      candidateForRemote?.agent === 'jules' ||
+      candidateForRemote?.remote === true ||
+      result?.job?.remote
+    )
+    const handle = createExecutionHandle({
+      job: result.job,
+      sessionId: result.sessionId ?? result.job?.sessionId ?? result.job?.remote?.sessionId ?? null,
+      env,
+      cancelJobFn,
+      isRemote: remoteFlag,
+    })
+    return {
+      ...result,
+      jobId: handle.jobId,
+      sessionId: handle.sessionId,
+      abort: (...args) => handle.abort(...args),
+      __handle: handle,
+    }
+  }
 
   // 1. Check recent runs for existing job with same dispatchKey
   const existingJob = findRecentJobByDispatchKey({
@@ -264,7 +391,7 @@ export async function dispatch({
     now: nowFn(),
   })
   if (existingJob) {
-    return {
+    return withHandle({
       job: existingJob,
       dispatchKey: key,
       executionId: existingJob.executionId ?? existingJob.execution_id ?? null,
@@ -273,7 +400,7 @@ export async function dispatch({
         model: existingJob.model,
         mode: existingJob.mode,
       },
-    }
+    }, existingJob)
   }
 
   // 2. Concurrency control: synchronize concurrent dispatches with the same key
@@ -287,7 +414,7 @@ export async function dispatch({
       now: nowFn(),
     })
     if (existing) {
-      return {
+      return withHandle({
         job: existing,
         dispatchKey: key,
         executionId: existing.executionId ?? existing.execution_id ?? null,
@@ -296,7 +423,7 @@ export async function dispatch({
           model: existing.model,
           mode: existing.mode,
         },
-      }
+      }, existing)
     }
   }
 
@@ -395,12 +522,12 @@ export async function dispatch({
         if (jobSessId) matchedSessionId = jobSessId
         if (matched.job.status !== 'failed' && matched.job.status !== 'canceled') {
           recentDispatches.set(key, { job: matched.job, timestamp: nowFn() })
-          return {
+          return withHandle({
             job: matched.job,
             dispatchKey: key,
             executionId: matched.job.executionId ?? matched.job.execution_id ?? execId,
             candidate: primaryCandidate,
-          }
+          }, primaryCandidate)
         }
       } else if (matched?.session && !matched?.job) {
         const adoptedJob = createJobFn({
@@ -420,12 +547,12 @@ export async function dispatch({
           env,
         })
         recentDispatches.set(key, { job: adoptedJob, timestamp: nowFn() })
-        return {
+        return withHandle({
           job: adoptedJob,
           dispatchKey: key,
           executionId: execId,
           candidate: primaryCandidate,
-        }
+        }, primaryCandidate)
       }
     }
 
@@ -555,12 +682,15 @@ export async function dispatch({
 
     recentDispatches.set(key, { job: finalJob, timestamp: nowFn() })
 
-    return {
+    const finalSessionId =
+      execResult?.sessionId ?? finalJob?.sessionId ?? finalJob?.remote?.sessionId ?? resolvedSessionId ?? null
+    return withHandle({
       job: finalJob,
       dispatchKey: key,
       executionId: execId,
       candidate: finalCandidate,
-    }
+      sessionId: finalSessionId,
+    }, finalCandidate)
   } finally {
     if (reservationToken && !reservationAdopted) {
       try {

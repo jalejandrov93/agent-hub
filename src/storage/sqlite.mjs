@@ -196,8 +196,20 @@ function jsonListWorkflowNodes(stateHome, workflowId) {
   return result
 }
 
-function jsonClaimWorkflowNode(stateHome, { workflowId, stepId, claimedBy, attempt }) {
+function jsonPublishWorkflowNodeReady(stateHome, { workflowId, stepId }) {
   const store = readJsonStore(stateHome)
+  store.workflow_nodes = store.workflow_nodes || {}
+  const key = `${workflowId}:${stepId}`
+  const existing = store.workflow_nodes[key]
+  if (!existing || existing.status !== 'pending') return false
+  existing.status = 'ready'
+  existing.updated_at = new Date().toISOString()
+  existing.updatedAt = existing.updated_at
+  writeJsonStore(stateHome, store)
+  return true
+}
+
+function jsonClaimWorkflowNode(stateHome, { workflowId, stepId, claimedBy, attempt }) {  const store = readJsonStore(stateHome)
   store.workflow_nodes = store.workflow_nodes || {}
   const key = `${workflowId}:${stepId}`
   const existing = store.workflow_nodes[key]
@@ -334,11 +346,34 @@ WHERE workflow_id = @workflow_id
   AND (claimed_by IS NULL OR claimed_by = '' OR claimed_by = @claimed_by)
 `
 
+const PUBLISH_READY_SQL = `
+UPDATE workflow_nodes
+SET status = 'ready',
+    updated_at = @updated_at
+WHERE workflow_id = @workflow_id
+  AND step_id = @step_id
+  AND status = 'pending'
+`
+
 function sqliteInitDb(stateHome) {
   const dbPath = paths({ AGENT_HUB_HOME: stateHome }).dbFile
   ensureDir(stateHome)
-  const db = new SqliteDB(dbPath)
-  db.pragma('journal_mode = WAL')
+  // C1.1: dos schedulers (incluso en procesos distintos) pueden crear el DB
+  // a la vez. El `timeout` del constructor no siempre cubre el DDL inicial,
+  // así que se reintenta con backoff ante SQLITE_BUSY.
+  const attempts = Number(process.env.AGENT_HUB_DB_INIT_RETRIES ?? 10)
+  let lastError = null
+  for (let i = 0; i < Math.max(1, attempts); i++) {
+    let db = null
+    try {
+      // C1.1: timeout de busy desde el constructor para que TAMBIÉN cubra los
+      // pragmas/DDL iniciales cuando dos procesos crean el DB a la vez.
+      db = new SqliteDB(dbPath, { timeout: 5000 })
+      db.pragma('journal_mode = WAL')
+  // C1.1: dos schedulers (incluso en procesos distintos) escriben sobre el
+  // mismo DB. Sin busy_timeout, better-sqlite3 falla de inmediato con
+  // SQLITE_BUSY ante cualquier solape de escritura.
+  db.pragma('busy_timeout = 5000')
   db.exec(SCHEMA_SQL)
   try { db.exec("ALTER TABLE workflows ADD COLUMN definition_json TEXT") } catch {}
   try { db.exec("ALTER TABLE workflows ADD COLUMN status TEXT") } catch {}
@@ -349,6 +384,17 @@ function sqliteInitDb(stateHome) {
   try { db.exec("ALTER TABLE workflow_nodes ADD COLUMN claimed_by TEXT") } catch {}
   try { db.exec("ALTER TABLE workflow_nodes ADD COLUMN result_json TEXT") } catch {}
   return db
+    } catch (error) {
+      lastError = error
+      try { db?.close() } catch {}
+      const busy = error?.code === 'SQLITE_BUSY' || /database is locked/i.test(String(error?.message ?? ''))
+      if (!busy || i === Math.max(1, attempts) - 1) throw error
+      const delayMs = Math.min(1000, 25 * 2 ** i)
+      const start = Date.now()
+      while (Date.now() - start < delayMs) { /* backoff síncrono: initDb es síncrono */ }
+    }
+  }
+  throw lastError
 }
 
 function sqliteUpsertJob(db, row) {
@@ -423,8 +469,17 @@ function sqliteListWorkflowNodes(db, workflowId) {
   }))
 }
 
-function sqliteClaimWorkflowNode(db, { workflowId, stepId, claimedBy, attempt }) {
+function sqlitePublishWorkflowNodeReady(db, { workflowId, stepId }) {
   const now = new Date().toISOString()
+  const info = db.prepare(PUBLISH_READY_SQL).run({
+    workflow_id: workflowId,
+    step_id: stepId,
+    updated_at: now,
+  })
+  return info.changes > 0
+}
+
+function sqliteClaimWorkflowNode(db, { workflowId, stepId, claimedBy, attempt }) {  const now = new Date().toISOString()
   const info = db.prepare(CLAIM_WORKFLOW_NODE_SQL).run({
     workflow_id: workflowId,
     step_id: stepId,
@@ -605,6 +660,20 @@ export function claimWorkflowNode(ctx, { workflowId, stepId, claimedBy, attempt 
   }
   const home = normalizeHome(ctx?.stateHome)
   return jsonClaimWorkflowNode(home, { workflowId, stepId, claimedBy, attempt })
+}
+
+/**
+ * Atomically publish a pending node as ready (conditional: only from pending).
+ * Never touches claimed/running rows, so it cannot clobber another
+ * scheduler's claim — the CAS claim below stays the single winner gate.
+ * @returns {boolean} true if the row moved pending -> ready
+ */
+export function publishWorkflowNodeReady(ctx, { workflowId, stepId }) {
+  if (ctx.backend === 'sqlite') {
+    return sqlitePublishWorkflowNodeReady(ctx.db, { workflowId, stepId })
+  }
+  const home = normalizeHome(ctx?.stateHome)
+  return jsonPublishWorkflowNodeReady(home, { workflowId, stepId })
 }
 
 export { getDb, closeDb, resetDbInstances } from './db.mjs'

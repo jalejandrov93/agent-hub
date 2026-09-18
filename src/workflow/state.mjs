@@ -5,6 +5,9 @@
  *   pending   - Initial state, waiting for dependencies or condition evaluation.
  *   ready     - Dependencies satisfied and condition passed; ready to be executed.
  *   running   - Claimed by a scheduler worker and actively executing.
+ *   waiting   - Execution dispatched but awaiting interaction
+ *               (user_feedback | plan_approval | external_event).
+ *               Non-terminal: scheduler holds the claim, never re-dispatches.
  *   succeeded - Terminal state: executed successfully.
  *   failed    - Terminal state: execution failed and retry attempts exhausted.
  *   skipped   - Terminal state: condition evaluated to false or upstream dependency failed.
@@ -21,17 +24,33 @@
  *   running -> failed    (attempts exhausted)
  *   running -> ready     (retry when attempts remain)
  *   running -> canceled
+ *   running -> waiting   (remote/local execution waits for interaction)
+ *   waiting -> running   (interaction received, resume without re-dispatch)
+ *   waiting -> failed    (wait aborted or wait outcome failed)
+ *   waiting -> canceled  (wait aborted by user)
  */
 
 export const NODE_STATUS = Object.freeze({
   PENDING: 'pending',
   READY: 'ready',
   RUNNING: 'running',
+  WAITING: 'waiting',
   SUCCEEDED: 'succeeded',
   FAILED: 'failed',
   SKIPPED: 'skipped',
   CANCELED: 'canceled',
 })
+
+/** Reasons a node may enter WAITING. Persisted in result_json.waitReason. */
+export const WAITING_REASONS = Object.freeze({
+  USER_FEEDBACK: 'user_feedback',
+  PLAN_APPROVAL: 'plan_approval',
+  EXTERNAL_EVENT: 'external_event',
+})
+
+export function isWaitingReason(reason) {
+  return Object.values(WAITING_REASONS).includes(reason)
+}
 
 export const VALID_NODE_TRANSITIONS = Object.freeze({
   [NODE_STATUS.PENDING]: Object.freeze([
@@ -48,6 +67,12 @@ export const VALID_NODE_TRANSITIONS = Object.freeze({
     NODE_STATUS.SUCCEEDED,
     NODE_STATUS.FAILED,
     NODE_STATUS.READY,
+    NODE_STATUS.CANCELED,
+    NODE_STATUS.WAITING,
+  ]),
+  [NODE_STATUS.WAITING]: Object.freeze([
+    NODE_STATUS.RUNNING,
+    NODE_STATUS.FAILED,
     NODE_STATUS.CANCELED,
   ]),
   [NODE_STATUS.SUCCEEDED]: Object.freeze([]),

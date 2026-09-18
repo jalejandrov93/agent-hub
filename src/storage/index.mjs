@@ -11,6 +11,7 @@ export {
   getWorkflowNode,
   listWorkflowNodes,
   claimWorkflowNode,
+  publishWorkflowNodeReady,
   getDb,
   closeDb,
   resetDbInstances,

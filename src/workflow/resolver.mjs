@@ -1,4 +1,5 @@
 import { NODE_STATUS, isTerminalStatus } from './state.mjs'
+import { evaluateConditionSafe } from './dsl.mjs'
 
 /**
  * Creates a safe proxy for step outcomes so property lookups do not throw TypeError
@@ -55,8 +56,7 @@ export function evaluateCondition(conditionStr, context = {}) {
 
   const steps = context.steps || {}
   try {
-    const fn = new Function('steps', 'context', `"use strict"; return Boolean(${conditionStr});`)
-    return fn(steps, context)
+    return evaluateConditionSafe(conditionStr, { steps, context })
   } catch {
     return false
   }
