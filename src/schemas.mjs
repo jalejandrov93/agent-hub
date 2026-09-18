@@ -105,6 +105,16 @@ export const JobRecord = z
     timeoutSource: TimeoutSource.optional(),
     learningIds: z.array(z.string()).optional(),
     remote: RemoteInfo.optional(),
+    // C0 workflow/provenance fields — nullable optional so they don't break existing records.
+    workflow_id: z.string().nullable().optional(),
+    step_id: z.string().nullable().optional(),
+    parent_execution_id: z.string().nullable().optional(),
+    root_execution_id: z.string().nullable().optional(),
+    attempt: z.number().int().nullable().optional(),
+    remote_state: z.string().nullable().optional(),
+    quality_score: z.number().nullable().optional(),
+    verified: z.boolean().nullable().optional(),
+    judge_verdict: z.string().nullable().optional(),
   })
   .passthrough()
 

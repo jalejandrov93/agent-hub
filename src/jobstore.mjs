@@ -71,6 +71,16 @@ export function createJob({
   variant,
   sessionId,
   parentJobId,
+  // C0 workflow/provenance params
+  workflow_id = null,
+  step_id = null,
+  parent_execution_id = null,
+  root_execution_id = null,
+  attempt = null,
+  remote_state = null,
+  quality_score = null,
+  verified = null,
+  judge_verdict = null,
 }) {
   const jobId = newJobId()
   const dir = jobDir(jobId, env)
@@ -101,6 +111,20 @@ export function createJob({
     status: 'queued',
     createdAt: new Date().toISOString(),
     updatedAt: new Date().toISOString(),
+    // C0 workflow/provenance fields
+    workflow_id: workflow_id ?? null,
+    step_id: step_id ?? null,
+    parent_execution_id: parent_execution_id ?? null,
+    root_execution_id: root_execution_id ?? null,
+    attempt: attempt ?? null,
+    remote_state: remote_state ?? null,
+    quality_score: quality_score ?? null,
+    verified: verified ?? null,
+    judge_verdict: judge_verdict ?? null,
+  }
+  // Dual state: if remote_state is provided, mirror it into remote.state for compat.
+  if (remote_state != null) {
+    result.remote = { state: remote_state }
   }
   fs.writeFileSync(resultPath(jobId, env), JSON.stringify(result, null, 2), 'utf8')
   return result
