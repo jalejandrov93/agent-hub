@@ -123,3 +123,17 @@ target state for later slices); file:line refs ground what already exists.
 - Exit gate for C1 DAG (not yet landed): `initDb` is not yet called at startup
   and `better-sqlite3` is not yet a runtime dependency. SQLite will eventually
   be in the execution path (dual-write or write-through for jobs/workflows/leases).
+
+## 9. Harness profiles & waitMode
+
+- `src/harness/` maps the calling harness to a default wait contract:
+  `generic` (none — return at create/start), `claude-code` / `opencode`
+  (attention — return at terminal OR waiting/attention).
+- `dispatch()` accepts `waitMode` (`none`|`attention`|`terminal`); an
+  explicit value always beats the profile default. Resolution priority:
+  explicit > `AGENT_HUB_HARNESS` env > MCP client hint > generic.
+- The MCP client hint (from `clientInfo.name` at the handshake) is
+  default-only: it never overrides an explicit harness/env/waitMode and
+  never decides anything security-sensitive. `delegate()` never waits.
+- `harness` + `waitMode` travel on the dispatch result, the job record, and
+  `job.started` / `job.finished` / `job.failed` events (informational only).

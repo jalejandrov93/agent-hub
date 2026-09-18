@@ -8,6 +8,15 @@ and this project adheres to [Semantic Versioning](https://semver.org/).
 
 ### Added
 
+- Harness profiles (`src/harness/`: `generic`, `claude-code`, `opencode`)
+  with a default `dispatch()` wait contract per caller. `dispatch()` accepts
+  `waitMode` (`none` = return at create/start, `attention` = also return on
+  waiting/attention, `terminal` = terminal status only); explicit beats
+  `AGENT_HUB_HARNESS` env beats the MCP client hint (from `clientInfo.name`,
+  default-only) beats generic. `delegate()` still never waits. `harness` +
+  `waitMode` travel on the dispatch result, the job record, and the
+  `job.started`/`job.finished`/`job.failed` events.
+
 - Google Jules as a cloud agent, reachable through its own MCP tools
   (`jules_delegate`, `jules_sources`, `jules_check`, `jules_sessions`). The work
   runs on Google's servers against a connected GitHub repo and produces a pull
