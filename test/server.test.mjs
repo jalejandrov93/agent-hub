@@ -48,6 +48,7 @@ test('the server boots over stdio and exposes the full tool set', async () => {
         'jules_schedules',
         'jules_sessions',
         'jules_sources',
+        'jules_wait',
         'learning_propose',
         'route',
       ]

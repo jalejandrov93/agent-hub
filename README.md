@@ -393,7 +393,11 @@ window/threshold per class, and `src/breakers.mjs` evaluates them
 `src/policy/registry.mjs` (`POLICY_TABLE`, `policyFor`) then maps each class
 to an explicit `{retry, resume, fallback, escalation}` policy executed by
 `executeWithPolicy()` in `src/policy/executor.mjs` — one declarative loop,
-not a chain of `if/else`.
+not a chain of `if/else`. The table covers every taxonomy category
+(`billing`/`auth` never retry and escalate to human; `quota` retries bounded
+then falls back; `crash` gets one retry then an alternate adapter), and
+`ctx.recoveryOrder` lets a remote adapter run resume/reconcile before any
+retry that could duplicate a session (escalation always stays last).
 
 ### Execution contract
 
@@ -492,7 +496,7 @@ read jobs from a disposable worktree when that matters.
 | `agents_status` | `{refresh?: boolean}` | L0-L2 for every pair in the delegation map. Never pings. Rows include `binPath`/`cliVersion` from `discovery.json`. |
 | `route` | `{taskType: enum, mode?: 'read'\|'write', includeCatalog?: boolean}` | Skips unavailable/breaker-open/held pairs; returns `{primary, fallbacks, skipped, discovery, reason, appliedProposal}`. `discovery` holds `{binPath, version, modelCount, checkedAt, error}` per CLI; `includeCatalog: true` returns the full model catalog instead. `appliedProposal` names the accepted proposal whose order was applied, or `null`. |
 | `delegate` | `{agent, model, task, cwd, mode?, timeoutS?, title?, variant?, taskType?}` | Returns `{jobId, status:'queued'}` immediately. `variant` is opencode's reasoning effort (minimal/low/medium/high/max); ignored by agy/copilot. Pass the same `taskType` you gave `route` so metrics, adaptive timeouts and learnings apply. |
-| `job_wait` | `{jobId, timeoutS?<=60}` | Polls until terminal or timeout. |
+| `job_wait` | `{jobId, timeoutS?<=60}` | Polls until terminal (`done`, `waiting:false`), until a remote session waits for interaction (`done` + `waiting:true` with `attentionRequired`, `attentionReason`, `recommendedAction` — act via `jules_interact`, no timeout burned), or until the local budget elapses (`done:false`, `timedOut:true`; job/session keep running). |
 | `job_status` | `{jobId}` | Current status, no waiting. |
 | `job_result` | `{jobId, maxLines?, tailLines?}` | Head of the response (default 20 lines) plus extra `tailLines` from the end (default 10, never repeating a head line) and `fullPath`, `truncated`, `tailTruncated`. |
 | `job_cancel` | `{jobId}` | Kills the whole process group; marks `canceled`. |
@@ -502,7 +506,8 @@ read jobs from a disposable worktree when that matters.
 | `jules_delegate` | `{task, cwd?, source?, startingBranch?, title?, requirePlanApproval?, automationMode?, account?, timeoutS?, taskType?}` | Starts a Jules cloud session. Needs `JULES_API_KEY` and either `cwd` (infers the source and branch from the `origin` remote) or an explicit `source`. Returns `{jobId, status:'queued'}`; the job behaves like any other for `job_status`/`job_wait`/`job_result`. The result is a GitHub pull request. |
 | `jules_sources` | `{account?}` | The GitHub repos connected to the Jules account. Connect new ones in the Jules web UI — the API cannot add them. |
 | `jules_check` | `{jobId?, sessionId?}` | One live read of a session: `state`, `prUrl`, `branch`, `sessionUrl`, last message — plus `attentionRequired`, `attentionReason`, `recommendedAction`, `canAutoResolve`, `attempts` when the session is waiting (`AWAITING_*`/`PAUSED`). Needs no poller, so it works after a reboot, and it finalizes a local job whose session ended while the machine was off. |
-| `jules_interact` | `{jobId?, sessionId?, action: 'reply'\|'approve_plan', message?}` | Talk to a live Jules session: `reply` (needs `message`) or `approve_plan`. Remote `pause`/`resume`/`cancel` are rejected — the API does not offer them; a `PAUSED` session is observed with backoff, not resumed by call. Clears `pollingStoppedReason` and bumps `attempts`. `job_reply` on a Jules parent still works for compatibility. |
+| `jules_interact` | `{jobId?, sessionId?, action: 'reply'\|'approve_plan', message?}` | Talk to a live Jules session: `reply` (needs `message`) or `approve_plan`. Remote `pause`/`resume`/`cancel` are rejected — the API does not offer them; a `PAUSED` session is observed with backoff, not resumed by call. Clears `pollingStoppedReason`, bumps `attempts`/`interventionCount` (`autoReplyCount` for replies, `planApprovalCount` for approvals — never `turnDepth`, so approvals don't consume the auto-reply budget). `job_reply` on a Jules parent still works for compatibility. |
+| `jules_wait` | `{jobId?, sessionId?, timeoutS?<=600, pollIntervalS?}` | Local orchestration only (the API has no wait endpoint). Waits until terminal (`done`+`terminal`) or waiting (`done`+`waiting` with attention fields), else `done:false`+`timedOut:true` on budget expiry. Remote session unaffected. |
 | `jules_sessions` | `{limit?, state?, account?}` | Lists sessions straight from the Jules API, newest first, each with the local `jobId` when this machine has one and `null` when it does not. Without `account` it merges every enabled account, tags each session with its `accountId`, and reports an account that fails in `accountErrors` without failing the call. The recovery path when the local record is gone. |
 | `jules_accounts` | `{}` | The configured Jules accounts, read-only: masked keys (`keyLast4` only), rolling 24-hour and concurrent usage, and each account's source-cache status. Accounts are created and edited in the dashboard. |
 | `jules_schedules` | `{}` | The recurring Jules tasks, read-only, with their next run and last result. Schedules are created and edited in the dashboard. |

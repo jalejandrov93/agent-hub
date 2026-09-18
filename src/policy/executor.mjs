@@ -1,7 +1,8 @@
 import { policyFor } from './registry.mjs'
 
 /**
- * Ordered recovery pipeline stages: retry -> resume -> fallback -> escalate.
+ * Recovery pipeline stages in default order: retry -> resume -> fallback ->
+ * escalate. See recoveryStageOrder() for the adapter-aware override.
  */
 const RECOVERY_STAGES = [
   {
@@ -76,16 +77,33 @@ const RECOVERY_STAGES = [
 /**
  * Executes a task within an execution policy boundary.
  *
- * Drives a single recovery loop (retry -> resume -> fallback -> escalate)
- * when taskFn fails, according to policy rules.
+ * Drives a single recovery loop when taskFn fails, according to policy rules.
+ * Stage order defaults to retry -> resume -> fallback -> escalate, but a
+ * caller may pass ctx.recoveryOrder (e.g. a remote adapter that must
+ * resume/reconcile the existing session BEFORE any retry that would create a
+ * duplicate: ['resume', 'fallback', 'retry', 'escalate']). Unknown names are
+ * ignored; stages missing from the order keep their relative default order
+ * at the end. Escalation always stays last — it ends the loop.
  *
  * @param {Function} taskFn Async task function receiving (context)
  * @param {object|string} policy Policy object or category string
  * @param {object} [ctx={}] Execution context
  * @returns {Promise<any>}
  */
+export function recoveryStageOrder(ctx = {}) {
+  const names = RECOVERY_STAGES.map((s) => s.name)
+  const requested = Array.isArray(ctx?.recoveryOrder) ? ctx.recoveryOrder.filter((n) => names.includes(n) && n !== 'escalate') : []
+  const ordered = [...requested]
+  for (const name of names) {
+    if (name !== 'escalate' && !ordered.includes(name)) ordered.push(name)
+  }
+  ordered.push('escalate')
+  return ordered.map((name) => RECOVERY_STAGES.find((s) => s.name === name))
+}
+
 export async function executeWithPolicy(taskFn, policy, ctx = {}) {
   const resolvedPolicy = typeof policy === 'string' ? (policyFor(policy) ?? {}) : (policy ?? {})
+  const stages = recoveryStageOrder(ctx)
 
   const state = {
     retryCount: 0,
@@ -119,8 +137,10 @@ export async function executeWithPolicy(taskFn, policy, ctx = {}) {
       if (err?.sessionId) state.sessionId = err.sessionId
       if (err?.result?.sessionId) state.sessionId = err.result.sessionId
 
-      // Single loop through recovery stages: retry -> resume -> fallback -> escalate
-      const stage = RECOVERY_STAGES.find((s) => s.isApplicable(resolvedPolicy, ctx, state, err))
+      // Single loop through recovery stages in the caller's (or default)
+      // order: retry -> resume -> fallback -> escalate unless recoveryOrder
+      // says otherwise (remote adapters resume first).
+      const stage = stages.find((s) => s.isApplicable(resolvedPolicy, ctx, state, err))
       if (!stage) {
         throw err
       }

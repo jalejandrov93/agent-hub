@@ -72,7 +72,10 @@ export function computeAttention({ state, activities = [], record } = {}) {
   const interactionCount = Array.isArray(activities)
     ? activities.filter((a) => a?.userMessaged != null || a?.planApproved != null).length
     : 0
-  const recordedAttempts = record?.remote?.attempts ?? record?.turnDepth ?? 0
+  // Prefer the semantic intervention counter; attempts is the legacy
+  // aggregate and turnDepth is conversation depth (kept as last fallback so
+  // old records without counters still report something sane).
+  const recordedAttempts = record?.remote?.interventionCount ?? record?.remote?.attempts ?? record?.turnDepth ?? 0
   const attempts = Math.max(recordedAttempts, interactionCount)
 
   return {

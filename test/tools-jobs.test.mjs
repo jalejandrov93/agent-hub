@@ -553,3 +553,54 @@ test('job_reply rejects a missing message for an opencode parent instead of spaw
   assert.equal(startJobCalls, 0, 'a message-less reply must never spawn a local CLI')
 })
 
+
+test('job_wait returns done immediately on a terminal job', async () => {
+  const home = tmpHome()
+  const env = { AGENT_HUB_HOME: home }
+  const { jobWaitTool } = await fresh(home)
+  const { updateResult } = await import('../src/jobstore.mjs?t=' + Date.now())
+
+  const job = createJob({ agent: 'agy', model: 'x', task: 't', cwd: '/tmp', title: 't', mode: 'read', env })
+  updateResult(job.jobId, { status: 'succeeded' }, env)
+
+  const res = await jobWaitTool({ jobId: job.jobId, timeoutS: 5 })
+  assert.equal(res.status, 'succeeded')
+  assert.equal(res.done, true)
+  assert.equal(res.waiting, false)
+  assert.equal(res.timedOut, false)
+})
+
+test('job_wait returns done+waiting with attention fields when the remote session waits for interaction', async () => {
+  const home = tmpHome()
+  const env = { AGENT_HUB_HOME: home }
+  const { jobWaitTool } = await fresh(home)
+  const { updateResult } = await import('../src/jobstore.mjs?t=' + Date.now() + 1)
+
+  const job = createJob({ agent: 'jules', model: 'jules', task: 't', cwd: null, title: 't', mode: 'write', env })
+  updateResult(job.jobId, { status: 'running', remote_state: 'AWAITING_USER_FEEDBACK', remote: { provider: 'jules', sessionId: 's1', state: 'AWAITING_USER_FEEDBACK' } }, env)
+
+  const res = await jobWaitTool({ jobId: job.jobId, timeoutS: 5 })
+  assert.equal(res.status, 'running')
+  assert.equal(res.done, true)
+  assert.equal(res.waiting, true)
+  assert.equal(res.timedOut, false)
+  assert.equal(res.attentionRequired, true)
+  assert.equal(res.attentionReason, 'user_feedback')
+  assert.equal(res.recommendedAction, 'send_message')
+})
+
+test('job_wait returns timedOut when the budget elapses on a still-working job', async () => {
+  const home = tmpHome()
+  const env = { AGENT_HUB_HOME: home }
+  const { jobWaitTool } = await fresh(home)
+  const { updateResult } = await import('../src/jobstore.mjs?t=' + Date.now() + 2)
+
+  const job = createJob({ agent: 'agy', model: 'x', task: 't', cwd: '/tmp', title: 't', mode: 'read', env })
+  updateResult(job.jobId, { status: 'running' }, env)
+
+  const res = await jobWaitTool({ jobId: job.jobId, timeoutS: 1 })
+  assert.equal(res.status, 'running')
+  assert.equal(res.done, false)
+  assert.equal(res.waiting, false)
+  assert.equal(res.timedOut, true)
+})

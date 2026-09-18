@@ -412,14 +412,20 @@ export async function julesInteractTool({
     try {
       const current = readResultFn(resolvedJobId, env)
       const currentRemote = current?.remote ?? {}
+      // attempts stays incremented for existing records/consumers, but the
+      // semantic counters below are what policies must read: turnDepth is
+      // conversation depth and is deliberately NOT bumped here, so a plan
+      // approval never consumes the auto-reply budget (maxAutoReplies).
       const newAttempts = (currentRemote.attempts ?? current?.turnDepth ?? 0) + 1
       updateResultFn(
         resolvedJobId,
         {
-          turnDepth: newAttempts,
           remote: {
             ...currentRemote,
             attempts: newAttempts,
+            interventionCount: (currentRemote.interventionCount ?? 0) + 1,
+            autoReplyCount: (currentRemote.autoReplyCount ?? 0) + (action === 'reply' ? 1 : 0),
+            planApprovalCount: (currentRemote.planApprovalCount ?? 0) + (action === 'approve_plan' ? 1 : 0),
             pollingStoppedReason: null,
           },
         },

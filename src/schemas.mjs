@@ -68,11 +68,31 @@ export const RemoteInfo = z
     source: nullableString,
     startingBranch: nullableString,
     state: nullableString,
+    // When the current state was first observed (ISO timestamp). Set by the
+    // poller on a state transition; lets callers tell "waiting 30s" apart
+    // from "waiting 3h" without scanning the event log.
+    stateSince: nullableString,
+    // Last time new remote activity (not just a poll tick) was observed.
+    lastActivityAt: nullableString,
     branch: nullableString,
     prUrl: nullableString,
     activityCursor: nullableString,
     seenActivityIds: z.array(z.string()).optional(),
     lastPolledAt: nullableString,
+    // Why the local watcher stopped polling a still-live session, e.g.
+    // 'awaiting_interaction' while the remote state is AWAITING_*/PAUSED.
+    // Null while polling is active. Descriptive only — the state machine in
+    // pollUntilTerminal is what actually returns on waiting states.
+    pollingStoppedReason: nullableString,
+    // Legacy interaction counter, kept for existing records. New code uses
+    // the split counters below; attempts stays incremented for compatibility.
+    attempts: nullableNumber,
+    // Intervention counters (P0.3): turnDepth is conversation depth and must
+    // not be conflated with these. A plan approval must not consume the
+    // auto-reply budget (maxAutoReplies) and vice versa.
+    interventionCount: nullableNumber,
+    autoReplyCount: nullableNumber,
+    planApprovalCount: nullableNumber,
   })
   .passthrough()
 
@@ -436,6 +456,35 @@ export const JulesInteractResponse = z
     action: z.enum(['reply', 'approve_plan']),
     status: z.string().optional(),
     success: z.boolean().optional(),
+  })
+  .passthrough()
+
+/**
+ * Local orchestration result from jules_wait (NOT a remote capability — the
+ * Jules API has no wait endpoint). Same live check fields as jules_check
+ * plus the local outcome: done+terminal (session ended), done+waiting
+ * (session needs interaction — act via jules_interact), or !done+timedOut
+ * (local budget elapsed, session still working).
+ */
+export const JulesWaitResponse = z
+  .object({
+    jobId: nullableString,
+    sessionId: z.string().nullable(),
+    state: z.string(),
+    prUrl: nullableString,
+    branch: nullableString,
+    sessionUrl: nullableString,
+    lastMessage: nullableString,
+    finalized: z.boolean().optional(),
+    terminal: z.boolean(),
+    attentionRequired: z.boolean().optional(),
+    attentionReason: z.enum(['user_feedback', 'plan_approval', 'paused']).nullable().optional(),
+    recommendedAction: z.enum(['send_message', 'approve_plan']).nullable().optional(),
+    canAutoResolve: z.boolean().optional(),
+    attempts: z.number().int().nonnegative().optional(),
+    done: z.boolean(),
+    waiting: z.boolean(),
+    timedOut: z.boolean(),
   })
   .passthrough()
 

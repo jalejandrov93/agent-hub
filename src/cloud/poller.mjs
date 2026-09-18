@@ -13,6 +13,18 @@ const MAX_PAGES_PER_TICK = 20
 const MAX_SEEN_ACTIVITY_IDS = 500
 
 /**
+ * True when a remote session state means "waiting for someone else" rather
+ * than "working". Prefer the adapter's own predicate; the prefix/PAUSED
+ * fallback keeps this correct for adapters that predate isWaitingState.
+ * Exported so job_wait can apply the exact same definition to a stored
+ * record — one definition, two call sites, no drift.
+ */
+export function isWaitingRemoteState(adapter, state) {
+  if (adapter?.isWaitingState?.(state)) return true
+  return typeof state === 'string' && (state.startsWith('AWAITING_') || state === 'PAUSED')
+}
+
+/**
  * A stable identity for an activity. Prefer the API's own name/id; when an
  * activity carries neither, derive one from its content so it is still
  * recognised on the next tick. Without this the activity is "new" forever,
@@ -107,10 +119,7 @@ export async function pollOnce({
     // no persisted record (unit tests) — fall back to the passed snapshot
   }
 
-  const isWaiting = Boolean(
-    adapter?.isWaitingState?.(session.state) ||
-    (typeof session.state === 'string' && (session.state.startsWith('AWAITING_') || session.state === 'PAUSED'))
-  )
+  const isWaiting = isWaitingRemoteState(adapter, session.state)
 
   let pageToken = cursor
   let lastToken = cursor
@@ -175,14 +184,23 @@ export async function pollOnce({
   const branch = adapter.branchFromSession?.(session) ?? null
   const prUrl = summary?.prUrl ?? adapter.prUrlFromSession?.(session) ?? null
 
+  const nowIso = new Date(nowFn()).toISOString()
+  const stateChanged = session.state !== (currentRemote.state ?? null)
   const remoteUpdate = {
     ...currentRemote,
     state: session.state,
+    // First observation of the current state — lets callers distinguish a
+    // session waiting 30s from one waiting 3h. Preserved across ticks that
+    // report the same state.
+    stateSince: stateChanged ? nowIso : (currentRemote.stateSince ?? nowIso),
+    // Last tick that surfaced genuinely new remote activity (not merely a
+    // poll that re-read the same session). Sticky: never erased by quiet ticks.
+    lastActivityAt: sawNewActivity ? nowIso : (currentRemote.lastActivityAt ?? null),
     branch: branch ?? currentRemote.branch ?? null,
     prUrl: prUrl ?? currentRemote.prUrl ?? null,
     activityCursor: lastToken,
     seenActivityIds: cappedSeenActivityIds,
-    lastPolledAt: new Date(nowFn()).toISOString(),
+    lastPolledAt: nowIso,
   }
   if (isWaiting) {
     remoteUpdate.pollingStoppedReason = 'awaiting_interaction'
@@ -193,6 +211,10 @@ export async function pollOnce({
   updateResultFn(
     jobId,
     {
+      // remote_state mirrors remote.state as a top-level SQL-friendly index.
+      // The semantic source of truth stays remote.state; readers must not
+      // treat the two as independent fields that can legitimately diverge.
+      remote_state: session.state,
       remote: remoteUpdate,
     },
     env
@@ -287,6 +309,16 @@ export async function pollUntilTerminal({
       // completed session as failed.
       const outcome = tick.state === 'COMPLETED' ? 'completed' : 'failed'
       return { outcome, state: tick.state, summary: tick.summary, session: tick.session, apiError: null }
+    }
+
+    // P0.2: a waiting state is a real result, not a reason to keep polling.
+    // Returning here (instead of slow-polling forever) hands control to the
+    // supervisor/human via job_wait's waiting signal or jules_check's
+    // attention fields. This is what makes pollingStoppedReason true rather
+    // than descriptive: after this return nothing polls until an interaction
+    // (jules_interact/job_reply) clears the reason and polling resumes.
+    if (isWaitingRemoteState(adapter, tick.state)) {
+      return { outcome: 'waiting', state: tick.state, summary: tick.summary, session: tick.session, apiError: null }
     }
 
     await sleepFn(interval)

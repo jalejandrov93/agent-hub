@@ -8,7 +8,7 @@ import { paths } from './config.mjs'
 import { reconcileOrphans, listJobs, readResult, responsePath } from './jobstore.mjs'
 import { agentsStatusTool, routeTool, knownTaskTypes } from './tools/agents.mjs'
 import { delegateTool, jobWaitTool, jobStatusTool, jobResultTool, jobCancelTool, jobReplyTool } from './tools/jobs.mjs'
-import { julesDelegateTool, julesSourcesTool, julesCheckTool, julesSessionsTool, julesAccountsTool, julesSchedulesTool, julesInteractTool } from './tools/jules.mjs'
+import { julesDelegateTool, julesSourcesTool, julesCheckTool, julesSessionsTool, julesAccountsTool, julesSchedulesTool, julesInteractTool, julesWait } from './tools/jules.mjs'
 import { computeAttention } from './cloud/check.mjs'
 import { agentsQuotaTool } from './tools/agents.mjs'
 import { resumeRemoteJobs } from './cloud/runner.mjs'
@@ -27,6 +27,7 @@ import {
   Learning,
   JulesCheckResponse,
   JulesInteractResponse,
+  JulesWaitResponse,
   AgentQuotaRow,
   JulesSessionsResponse,
   JulesSourcesResponse,
@@ -174,7 +175,11 @@ export function buildServer() {
     'job_wait',
     {
       title: 'Wait for a job to finish',
-      description: 'Poll a job until it reaches a terminal state or timeoutS (max 60s) elapses.',
+      description:
+        'Poll a job until it reaches a terminal state or timeoutS (max 60s) elapses. ' +
+        'A remote (Jules) session waiting for interaction (AWAITING_*/PAUSED) also ends the wait immediately: ' +
+        'done+waiting:true with attentionRequired, attentionReason and recommendedAction — then act via jules_interact. ' +
+        'done+timedOut:true means only the local budget elapsed; the job/session keeps running.',
       inputSchema: { jobId: jobIdArg, timeoutS: z.number().int().positive().max(60).optional().default(30) },
       outputSchema: JobRecord,
       annotations: { readOnlyHint: true, idempotentHint: true },
@@ -381,6 +386,29 @@ export function buildServer() {
       annotations: { readOnlyHint: false, openWorldHint: true },
     },
     guard(({ jobId, sessionId, action, message }) => julesInteractTool({ jobId, sessionId, action, message }))
+  )
+
+  server.registerTool(
+    'jules_wait',
+    {
+      title: 'Wait locally for a Jules session to need you or finish',
+      description:
+        'Local orchestration only — the Jules API has no wait endpoint. Polls with a local budget until the session reaches ' +
+        'a terminal state (done+terminal) or a waiting state AWAITING_*/PAUSED (done+waiting, with attentionRequired, ' +
+        'attentionReason and recommendedAction — then act via jules_interact). Returns done+timedOut:false only when the ' +
+        'local budget elapsed while the session keeps working; the remote session is unaffected.',
+      inputSchema: {
+        jobId: z.string().min(1).optional().describe('Local jobId whose remote.sessionId should be watched.'),
+        sessionId: z.string().min(1).optional().describe('A bare Jules session id.'),
+        timeoutS: z.number().int().positive().max(600).optional().default(30),
+        pollIntervalS: z.number().int().positive().max(60).optional(),
+      },
+      outputSchema: JulesWaitResponse,
+      annotations: { readOnlyHint: true, idempotentHint: true },
+    },
+    guard(({ jobId, sessionId, timeoutS, pollIntervalS }) =>
+      julesWait({ jobId, sessionId, timeoutS, intervalMs: pollIntervalS != null ? pollIntervalS * 1000 : undefined })
+    )
   )
 
   server.registerTool(

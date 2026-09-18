@@ -88,7 +88,8 @@ export function finishRemoteJob({
   const remoteTerminal = outcome === 'completed' || state === 'COMPLETED' || state === 'FAILED' || summary?.failed === true
   if (!remoteTerminal) {
     const reason =
-      outcome === 'timeout' ? 'local_deadline'
+      outcome === 'waiting' ? 'awaiting_interaction'
+      : outcome === 'timeout' ? 'local_deadline'
       : apiError?.status === 401 || apiError?.status === 403 ? 'auth'
       : apiError ? 'api_errors'
       : 'unknown'

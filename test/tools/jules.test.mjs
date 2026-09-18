@@ -713,3 +713,33 @@ test('computeAttention calculates attention fields and recommended action', () =
   assert.equal(comp.attentionReason, null)
   assert.equal(comp.recommendedAction, null)
 })
+
+test('julesInteractTool tracks split intervention counters and leaves turnDepth alone', async () => {
+  const client = {
+    sendMessage: async () => {},
+    approvePlan: async () => {},
+  }
+  const updates = []
+  const store = {
+    readResultFn: () => ({
+      jobId: 'j1',
+      turnDepth: 0,
+      remote: { sessionId: 's1', attempts: 0, interventionCount: 0, autoReplyCount: 0, planApprovalCount: 0 },
+    }),
+    updateResultFn: (id, patch) => updates.push({ id, patch }),
+  }
+  const env = isolated({ JULES_API_KEY: 'k' })
+
+  await julesInteractTool({ jobId: 'j1', action: 'reply', message: 'go on', env, client, ...store })
+  const r1 = updates[0].patch.remote
+  assert.equal(r1.interventionCount, 1)
+  assert.equal(r1.autoReplyCount, 1)
+  assert.equal(r1.planApprovalCount, 0)
+  assert.equal(r1.attempts, 1, 'legacy attempts stays incremented for existing consumers')
+  assert.ok(!('turnDepth' in updates[0].patch), 'a reply must not consume conversation depth')
+
+  await julesInteractTool({ jobId: 'j1', action: 'approve_plan', env, client, ...store })
+  const r2 = updates[1].patch.remote
+  assert.equal(r2.autoReplyCount, 0, 'each interact reads fresh counters from the record')
+  assert.equal(r2.planApprovalCount, 1)
+})

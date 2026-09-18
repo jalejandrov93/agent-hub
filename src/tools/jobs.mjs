@@ -4,7 +4,10 @@ import { readResult, responsePath } from '../jobstore.mjs'
 import { WRITE_ALLOWLIST, TURN_DEPTH_WARNING } from '../config.mjs'
 import { TASK_TYPES } from '../schemas.mjs'
 import { keyForJob, NO_KEY_MESSAGE } from '../cloud/credentials.mjs'
+import { computeAttention } from '../cloud/check.mjs'
+import { isWaitingRemoteState } from '../cloud/poller.mjs'
 import * as defaultJulesClient from '../cloud/jules/client.mjs'
+import * as defaultJulesAdapter from '../cloud/jules/adapter.mjs'
 
 /** Reject a caller-supplied taskType that is not one of schemas.mjs TASK_TYPES. */
 function assertTaskType(taskType) {
@@ -201,11 +204,25 @@ export async function jobWaitTool({ jobId, timeoutS = 30 }) {
   const boundedTimeoutS = Math.min(Math.max(timeoutS, 1), 60)
   const deadline = Date.now() + boundedTimeoutS * 1000
   let result = readResult(jobId)
-  while (!TERMINAL_STATUSES.has(result.status) && Date.now() < deadline) {
+  while (true) {
+    if (TERMINAL_STATUSES.has(result.status)) {
+      return { ...jobStatusView(result), done: true, waiting: false, timedOut: false }
+    }
+    // P0.1: a remote session waiting for interaction (AWAITING_*/PAUSED) is
+    // a result, not a reason to block until timeout. Return immediately with
+    // the waiting signal + attention fields so the caller (supervisor/human)
+    // can act via jules_interact instead of burning its own timeout. This
+    // uses the same isWaitingRemoteState definition as the poller — no drift.
+    if (result.status === 'running' && isWaitingRemoteState(defaultJulesAdapter, result.remote?.state)) {
+      const attention = computeAttention({ state: result.remote.state, record: result })
+      return { ...jobStatusView(result), done: true, waiting: true, timedOut: false, ...attention }
+    }
+    if (Date.now() >= deadline) {
+      return { ...jobStatusView(result), done: false, waiting: false, timedOut: true }
+    }
     await new Promise((r) => setTimeout(r, 300))
     result = readResult(jobId)
   }
-  return jobStatusView(result)
 }
 
 export function jobStatusTool({ jobId }) {
