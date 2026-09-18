@@ -81,12 +81,20 @@ export function createJob({
   quality_score = null,
   verified = null,
   judge_verdict = null,
+  // A1 dispatch params
+  executionId = null,
+  execution_id = null,
+  dispatchKey = null,
+  dispatch_key = null,
 }) {
   const jobId = newJobId()
   const dir = jobDir(jobId, env)
   ensureDir(dir)
 
   fs.writeFileSync(promptPath(jobId, env), task ?? '', 'utf8')
+
+  const resolvedExecutionId = executionId ?? execution_id ?? null
+  const resolvedDispatchKey = dispatchKey ?? dispatch_key ?? null
 
   const result = {
     jobId,
@@ -121,6 +129,11 @@ export function createJob({
     quality_score: quality_score ?? null,
     verified: verified ?? null,
     judge_verdict: judge_verdict ?? null,
+    // A1 dispatch provenance fields
+    executionId: resolvedExecutionId,
+    execution_id: resolvedExecutionId,
+    dispatchKey: resolvedDispatchKey,
+    dispatch_key: resolvedDispatchKey,
   }
   // Dual state: if remote_state is provided, mirror it into remote.state for compat.
   if (remote_state != null) {

@@ -36,6 +36,7 @@ test('the server boots over stdio and exposes the full tool set', async () => {
         'agents_quota',
         'agents_status',
         'delegate',
+        'dispatch',
         'job_cancel',
         'job_reply',
         'job_result',
@@ -77,6 +78,21 @@ test('delegate requires agent, model, task and cwd', async () => {
     const required = delegateTool.inputSchema.required ?? []
     for (const field of ['agent', 'model', 'task', 'cwd']) {
       assert.ok(required.includes(field), `delegate.inputSchema should require "${field}"`)
+    }
+  } finally {
+    await close()
+  }
+})
+
+test('dispatch requires task and cwd', async () => {
+  const { client, close } = await connect()
+  try {
+    const { tools } = await client.listTools()
+    const dispatchTool = tools.find((t) => t.name === 'dispatch')
+    assert.ok(dispatchTool)
+    const required = dispatchTool.inputSchema.required ?? []
+    for (const field of ['task', 'cwd']) {
+      assert.ok(required.includes(field), `dispatch.inputSchema should require "${field}"`)
     }
   } finally {
     await close()
