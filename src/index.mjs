@@ -508,10 +508,11 @@ export function buildServer() {
       description:
         'Autonomous watch-and-interact loop for a Jules session. Acquires the watch lease so concurrent ' +
         'watchers observe read-only. Continuously observes the session, auto-approving plans (if enabled) ' +
-        'and classifying user feedback through 6 hard gates (unambiguous, no objective change, no business decisions, ' +
-        'no secrets, no scope change, attempts < maxAutoReplies). A PAUSED session is never auto-resumed. ' +
+        'and classifying user feedback through hard gates across 3 levels with evidence (AUTO_REPLY: strict mechanical allowlist; ' +
+        'SAFE_CONTINUE: conditional operational blockers; REQUEST_USER: 10 escalation classes), on separate ' +
+        'budgets (maxAutoReplies/maxSafeContinues). A PAUSED session is never auto-resumed. ' +
         'Returns with outcome: terminal (completed/failed), attention (needs human decision), paused, ' +
-        'timeout, or budget_exhausted (maxAutoReplies reached).',
+        'timeout, or budget_exhausted (a budget reached).',
       inputSchema: {
         jobId: z.string().min(1).optional().describe('Local jobId whose remote.sessionId should be supervised.'),
         sessionId: z.string().min(1).optional().describe('A bare Jules session id.'),
