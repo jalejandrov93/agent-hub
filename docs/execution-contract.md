@@ -98,15 +98,17 @@ target state for later slices); file:line refs ground what already exists.
 - Terminal remote = `COMPLETED/FAILED` state, never timeout/error-budget
   (`src/cloud/poller.mjs:226-233` -> `src/cloud/runner.mjs:88-97`).
 
-## 7. Watch ownership (Model A, confirmed — design for B4)
+## 7. Watch ownership (Model A, confirmed — implemented for B4)
 
 - `jules_interact`/`job_reply` on a Jules parent NEVER restart a poller.
-  After an interaction the session is unobserved until the caller observes it
-  (`jules_wait`/`jules_check`) or a supervisor owns it.
-- B4 `jules_supervise` must formally acquire observation ownership, not just
+  Model A (confirmed): `jules_interact`/`job_reply` deliberately DO NOT clear
+  `pollingStoppedReason`; they leave it for the next observation (e.g.
+  `jules_wait`/`jules_check`) to clear. After an interaction the session is
+  unobserved until the caller observes it or a supervisor owns it.
+- B4 `jules_supervise` formally acquires observation ownership, not just
   `check → reply → return`: Supervisor = observe → decide → interact →
   resume-observation.
-- Lease shape (design, not yet implemented):
+- Lease shape:
   `remote.watch = {owner: 'supervisor' | 'jules_wait' | null, generation: N}`.
   A new owner bumps `generation`; a stale generation stops writing. This keeps
   a supervisor and a concurrent `jules_wait` from driving the same session.
@@ -118,7 +120,6 @@ target state for later slices); file:line refs ground what already exists.
 - C0 schema (SQLite WAL tables + nullable `JobRecord` columns) is groundwork,
   not foundation: `src/storage/` is still a parallel layer, `result.json` /
   `jobstore` remains the operational source of truth.
-- Exit gate for C1 DAG: SQLite in the execution path (dual-write or
-  write-through for jobs/workflows/leases), `initDb` at startup, and the
-  `better-sqlite3` packaging decision (native module vs JSON fallback in
-  `install:local`).
+- Exit gate for C1 DAG (not yet landed): `initDb` is not yet called at startup
+  and `better-sqlite3` is not yet a runtime dependency. SQLite will eventually
+  be in the execution path (dual-write or write-through for jobs/workflows/leases).
