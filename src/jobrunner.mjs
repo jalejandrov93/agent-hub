@@ -3,17 +3,60 @@ import { spawnDetached, runWithTimeout as defaultRunWithTimeout, killProcessGrou
 import { createJob, updateResult, appendStdout, stdoutPath, responsePath, readResult } from './jobstore.mjs'
 import { appendEvent } from './eventlog.mjs'
 import { adapterFor as defaultAdapterFor } from './adapters/index.mjs'
-import { checkWriteAllowed, acquireWriteLock, releaseWriteLock } from './worktree.mjs'
+import { checkWriteAllowed, acquireWriteLock, releaseWriteLock, heartbeatWriteLock, LEASE_TTL_MS_DEFAULT } from './worktree.mjs'
 import { resolveVariant, KILL_GRACE_S } from './config.mjs'
 import { resolveEffectiveTimeoutS as defaultResolveEffectiveTimeoutS } from './timeouts.mjs'
 import { selectLearnings as defaultSelectLearnings, augmentTask as defaultAugmentTask } from './learnings.mjs'
 import { takeSnapshot as defaultTakeSnapshot, diffSnapshots as defaultDiffSnapshots, formatViolation as defaultFormatViolation } from './readguard.mjs'
 import { startRemoteJob as defaultStartRemoteJob } from './cloud/runner.mjs'
 
-// jobId -> { pgid } for jobs still running in THIS process. Used by
-// cancelJob for an immediate kill; reconcileOrphans (jobstore.mjs) covers
-// jobs left running by a process that died without ever calling cancelJob.
+// jobId -> { pgid, leaseToken, heartbeatTimer, leaseTtlMs } for jobs still
+// running in THIS process. Used by cancelJob for an immediate kill; the
+// leaseToken lets cancel/finish release ONLY the lease this job acquired —
+// never a new holder's lease after a reclaim. reconcileOrphans
+// (jobstore.mjs) covers jobs left running by a process that died without
+// ever calling cancelJob.
 const active = new Map()
+
+/** Lease TTL for a write job's lock: explicit opt wins, then
+ * AGENT_HUB_LEASE_TTL_MS, then the worktree default. */
+export function resolveLeaseTtlMs(env = process.env, override) {
+  const n = Number(override ?? env?.AGENT_HUB_LEASE_TTL_MS)
+  return Number.isFinite(n) && n > 0 ? n : LEASE_TTL_MS_DEFAULT
+}
+
+function stopHeartbeat(jobId) {
+  const entry = active.get(jobId)
+  if (entry?.heartbeatTimer) {
+    clearInterval(entry.heartbeatTimer)
+    entry.heartbeatTimer = null
+  }
+}
+
+/**
+ * While a write job runs, refresh its lease every ttlMs/3 so a long job
+ * never loses its lock mid-run. If the lease was reclaimed by someone else
+ * (heartbeat returns false — e.g. this process was paused past expiry), the
+ * timer stops itself: beating a dead lease is pointless, and the terminal
+ * release below (token-guarded) will correctly no-op instead of deleting the
+ * new holder's lease.
+ */
+function startHeartbeat({ jobId, cwd, token, ttlMs, env }) {
+  const intervalMs = Math.min(ttlMs, Math.max(50, Math.floor(ttlMs / 3)))
+  const timer = setInterval(() => {
+    let ok = false
+    try {
+      ok = heartbeatWriteLock({ cwd, token, env, ttlMs })
+    } catch {
+      ok = false
+    }
+    if (!ok) clearInterval(timer)
+  }, intervalMs)
+  if (typeof timer.unref === 'function') timer.unref()
+  const entry = active.get(jobId)
+  if (entry) entry.heartbeatTimer = timer
+  else active.set(jobId, { heartbeatTimer: timer })
+}
 
 function summarize(text, max = 300) {
   if (!text) return ''
@@ -59,6 +102,9 @@ export function startJob({
   requirePlanApproval,
   automationMode,
   startRemoteJobFn = defaultStartRemoteJob,
+  // Lease TTL for this job's write lock (ms). Defaults to
+  // AGENT_HUB_LEASE_TTL_MS / LEASE_TTL_MS_DEFAULT via resolveLeaseTtlMs.
+  leaseTtlMs,
 }) {
   // Resolved BEFORE anything else — including learnings/timeout/createJob —
   // because a remote adapter (Jules) edits a branch on GitHub via its own
@@ -133,6 +179,11 @@ export function startJob({
   })
   appendEvent({ kind: 'job.queued', agent, model, cwd, title, jobId: job.jobId, taskType }, { env })
 
+  // Token of the lease THIS job acquired (null for read mode / remote /
+  // gate failures). Every later release/heartbeat for this job must use it,
+  // so a stale holder can never delete a new holder's lease after a reclaim.
+  let leaseToken = null
+
   if (mode === 'write') {
     const gate = checkWriteAllowed({ cwd, allowlist })
     if (!gate.allowed) {
@@ -140,12 +191,14 @@ export function startJob({
       appendEvent({ kind: 'job.failed', agent, model, cwd, title, jobId: job.jobId, errorKind: 'worktree_denied', taskType, summary: gate.reason }, { env })
       return { job: readResult(job.jobId, env), done: Promise.resolve() }
     }
-    const lock = acquireWriteLock({ cwd, jobId: job.jobId, env })
+    leaseTtlMs = resolveLeaseTtlMs(env, leaseTtlMs)
+    const lock = acquireWriteLock({ cwd, jobId: job.jobId, env, ttlMs: leaseTtlMs })
     if (!lock.acquired) {
       updateResult(job.jobId, { status: 'failed', errorKind: 'locked', error: lock.reason }, env)
       appendEvent({ kind: 'job.failed', agent, model, cwd, title, jobId: job.jobId, errorKind: 'locked', taskType, summary: lock.reason }, { env })
       return { job: readResult(job.jobId, env), done: Promise.resolve() }
     }
+    leaseToken = lock.token
   }
 
   const argv = adapter.buildArgv({ model, prompt: effectiveTask, cwd, mode, title, variant: effectiveVariant, timeoutS: effectiveTimeoutS, sessionId, env })
@@ -166,13 +219,14 @@ export function startJob({
   } catch (error) {
     updateResult(job.jobId, { status: 'failed', errorKind: 'crash', error: String(error?.message ?? error) }, env)
     appendEvent({ kind: 'job.failed', agent, model, cwd, title, jobId: job.jobId, errorKind: 'crash', taskType, summary: String(error?.message ?? error) }, { env })
-    if (mode === 'write') releaseWriteLock({ cwd, env })
+    if (mode === 'write') releaseWriteLock({ cwd, token: leaseToken, jobId: job.jobId, env })
     return { job: readResult(job.jobId, env), done: Promise.resolve() }
   }
 
   updateResult(job.jobId, { status: 'running', pid: child.pid, pgid: child.pid }, env)
   appendEvent({ kind: 'job.started', agent, model, cwd, title, jobId: job.jobId, taskType }, { env })
-  active.set(job.jobId, { pgid: child.pid })
+  active.set(job.jobId, { pgid: child.pid, leaseToken })
+  if (mode === 'write') startHeartbeat({ jobId: job.jobId, cwd, token: leaseToken, ttlMs: leaseTtlMs, env })
 
   // Hard-kill at timeoutS + KILL_GRACE_S, not at timeoutS itself: agy is
   // given --print-timeout <timeoutS>s (see buildArgv above) and exits on its
@@ -188,8 +242,12 @@ export function startJob({
   const done = exitPromise
     .then(({ timedOut }) => finishJob({ jobId: job.jobId, agent, model, cwd, title, adapter, mode, env, timedOut, taskType, snapshot, takeSnapshotFn, diffSnapshotsFn, formatViolationFn }))
     .finally(() => {
+      stopHeartbeat(job.jobId)
       active.delete(job.jobId)
-      if (mode === 'write') releaseWriteLock({ cwd, env })
+      // Token-guarded: if this job's lease already expired and was reclaimed
+      // by another holder, the stale token no longer matches and this
+      // correctly no-ops instead of deleting the new holder's lease.
+      if (mode === 'write') releaseWriteLock({ cwd, token: leaseToken, jobId: job.jobId, env })
     })
 
   return { job: readResult(job.jobId, env), done }
@@ -334,7 +392,9 @@ export async function cancelJob(jobId, { env = process.env } = {}) {
     return updated
   }
 
-  const pgid = active.get(jobId)?.pgid ?? result.pgid
+  const entry = active.get(jobId)
+  const pgid = entry?.pgid ?? result.pgid
+  stopHeartbeat(jobId)
   if (pgid) {
     await killProcessGroup(pgid, {})
   }
@@ -343,6 +403,10 @@ export async function cancelJob(jobId, { env = process.env } = {}) {
     { env }
   )
   active.delete(jobId)
-  if (result.mode === 'write') releaseWriteLock({ cwd: result.cwd, env })
+  // Token-guarded like the done.finally above; falls back to the
+  // jobId+pid legacy check when this process never held the token (e.g. a
+  // job started before a restart), which then correctly refuses to release a
+  // lease it cannot prove it owns — the lease expires on its own instead.
+  if (result.mode === 'write') releaseWriteLock({ cwd: result.cwd, token: entry?.leaseToken, jobId, env })
   return updated
 }
