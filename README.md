@@ -467,6 +467,21 @@ the dashboard SSE) and routes first-level events (`job.finished`,
 webhook adapters (`src/notify/adapters.mjs`, never throws, never logs
 secrets). It runs as its own process — never inside the MCP stdio lifecycle.
 
+### C1 workflow DAG (`src/workflow/`)
+
+`runWorkflow({workflow, ctx})` executes delegate/fanout/fanin/notify nodes in
+parallel waves (`Promise.all` per wave), persisting every transition
+(`pending → ready → running → succeeded | failed | skipped | canceled`) to
+SQLite so `runWorkflow({workflowId})` resumes after a restart without
+re-running `succeeded` nodes. Dependencies resolve via `dependsOn` +
+`condition` (safe expression over sibling results) with `onFailure` skip
+propagation by default; `fanout` fans N children with distinct `dispatchKey`s
+and `fanin` aggregates them. Per-node `maxAttempts` (backoff) and `timeoutS`;
+concurrent schedulers can't double-claim a node (`claimed_by` CAS in
+`claimWorkflowNode`). No quality/cost/adaptive scoring yet — nodes carry
+`onSuccess`/`onFailure` hooks for the future judge (C4). Example:
+`examples/software-pipeline.mjs` (research → implementation → review).
+
 ### Write-mode gate
 
 A `delegate()`/`job_reply()` call with `mode: 'write'` requires `cwd` to be
