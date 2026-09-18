@@ -604,3 +604,23 @@ test('job_wait returns timedOut when the budget elapses on a still-working job',
   assert.equal(res.waiting, false)
   assert.equal(res.timedOut, true)
 })
+
+test('job_reply on a jules parent shares bookkeeping with jules_interact (split counters, no turnDepth bump)', async () => {
+  const home = tmpHome()
+  const env = { AGENT_HUB_HOME: home, JULES_API_KEY: 'key-env' }
+  const { updateResult, readResult } = await import('../src/jobstore.mjs?t=' + Date.now() + 100)
+  const { jobReplyTool } = await fresh(home)
+
+  const parent = createJob({ agent: 'jules', model: 'jules', task: 't', cwd: '/repo', title: 't', mode: 'write', env })
+  updateResult(parent.jobId, { status: 'running', remote: { provider: 'jules', sessionId: 'sess-9', state: 'AWAITING_USER_FEEDBACK' } }, env)
+
+  const client = { sendMessage: async () => ({}), approvePlan: async () => ({}) }
+  const result = await jobReplyTool({ jobId: parent.jobId, message: 'go on', client, env })
+  assert.equal(result.errorKind, null)
+
+  const record = readResult(parent.jobId, env)
+  assert.equal(record.remote.interventionCount, 1)
+  assert.equal(record.remote.autoReplyCount, 1)
+  assert.equal(record.remote.planApprovalCount ?? 0, 0)
+  assert.equal(record.turnDepth, 0, 'a jules reply must not consume conversation depth')
+})

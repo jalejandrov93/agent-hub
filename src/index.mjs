@@ -407,7 +407,9 @@ export function buildServer() {
         pollIntervalS: z.number().int().positive().max(60).optional(),
       },
       outputSchema: JulesWaitResponse,
-      annotations: { readOnlyHint: true, idempotentHint: true },
+      // Observation with local side effects: checkRemoteSession persists the
+      // fresh state and may finalize the local job — readOnlyHint:false.
+      annotations: { readOnlyHint: false, openWorldHint: true, idempotentHint: true },
     },
     guard(({ jobId, sessionId, timeoutS, pollIntervalS }) =>
       julesWait({ jobId, sessionId, timeoutS, intervalMs: pollIntervalS != null ? pollIntervalS * 1000 : undefined })

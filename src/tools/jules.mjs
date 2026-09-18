@@ -336,14 +336,18 @@ export function julesSchedulesTool({
 }
 
 /**
- * Interact with an active Jules session: reply with a message or approve a plan.
- * The Jules API runs remotely and does NOT support remote pause, resume, or cancel.
+ * Single implementation of a Jules interaction (reply / approve_plan),
+ * shared by jules_interact, job_reply on a Jules parent, and the future
+ * supervisor. One implementation means one place for reply/approve_plan
+ * semantics, counter updates and policy accounting.
  *
- * Model A (confirmed): interacting only modifies the remote session — it clears
- * pollingStoppedReason but NEVER restarts a poller. Post-interaction observation
- * belongs to the caller (jules_wait/jules_check) or the supervisor watch lease.
+ * Model A (confirmed): this only modifies the remote session plus local
+ * counters. It NEVER clears pollingStoppedReason (a null reason means
+ * "polling active", and no watcher exists here) and NEVER restarts a
+ * poller — only an observation that sees a non-waiting state
+ * (jules_wait/supervisor/jules_check, or a poller tick) may clear it.
  */
-export async function julesInteractTool({
+export async function interactWithSession({
   jobId,
   sessionId,
   action,
@@ -420,6 +424,9 @@ export async function julesInteractTool({
       // semantic counters below are what policies must read: turnDepth is
       // conversation depth and is deliberately NOT bumped here, so a plan
       // approval never consumes the auto-reply budget (maxAutoReplies).
+      // pollingStoppedReason is deliberately NOT cleared: no watcher exists
+      // after this call (Model A), so null would falsely claim polling is
+      // active. The next observation that sees a non-waiting state clears it.
       const newAttempts = (currentRemote.attempts ?? current?.turnDepth ?? 0) + 1
       updateResultFn(
         resolvedJobId,
@@ -430,7 +437,6 @@ export async function julesInteractTool({
             interventionCount: (currentRemote.interventionCount ?? 0) + 1,
             autoReplyCount: (currentRemote.autoReplyCount ?? 0) + (action === 'reply' ? 1 : 0),
             planApprovalCount: (currentRemote.planApprovalCount ?? 0) + (action === 'approve_plan' ? 1 : 0),
-            pollingStoppedReason: null,
           },
         },
         env
@@ -447,6 +453,22 @@ export async function julesInteractTool({
     status: 'ok',
     success: true,
   }
+}
+
+/**
+ * MCP tool wrapper around interactWithSession (same behavior, MCP defaults).
+ */
+export async function julesInteractTool(args = {}) {
+  return interactWithSession({
+    env: process.env,
+    client: defaultClient,
+    listJobsFn: defaultListJobs,
+    readResultFn: defaultReadResult,
+    updateResultFn: defaultUpdateResult,
+    listAccountsFn: defaultListAccounts,
+    getAccountSecretFn: defaultGetAccountSecret,
+    ...args,
+  })
 }
 
 /**

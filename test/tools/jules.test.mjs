@@ -633,7 +633,8 @@ test('julesInteractTool sends message on reply and approves plan on approve_plan
   assert.equal(sent[0].prompt, 'proceed with option A')
   assert.equal(updates.length, 1)
   assert.equal(updates[0].patch.remote.attempts, 2)
-  assert.equal(updates[0].patch.remote.pollingStoppedReason, null)
+  assert.equal(updates[0].patch.remote.pollingStoppedReason, 'awaiting_interaction',
+    'Model A: interact must NOT clear pollingStoppedReason — no watcher exists after this call')
 
   const approveRes = await julesInteractTool({
     sessionId: 's1',

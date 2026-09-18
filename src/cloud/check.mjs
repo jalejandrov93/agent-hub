@@ -168,14 +168,25 @@ export async function checkRemoteSession({
     // Only a real state string is fresh; the adapter's 'UNKNOWN' fallback must
     // not clobber a state learned while the machine was up.
     const freshState = typeof session?.state === 'string' && session.state.length > 0 ? session.state : null
+    const observedWaiting = freshState === 'PAUSED' || (typeof freshState === 'string' && freshState.startsWith('AWAITING_'))
     updateResultFn(
       resolvedJobId,
       {
+        // remote_state mirrors remote.state as a top-level SQL-friendly index
+        // (same write the poller does) — the semantic source of truth stays
+        // remote.state. Without this, the reboot-recovery path left a stale
+        // index behind (e.g. remote.state=COMPLETED beside remote_state=IN_PROGRESS).
+        remote_state: freshState ?? currentRemote.state ?? null,
         remote: {
           ...currentRemote,
           state: freshState ?? currentRemote.state ?? null,
           prUrl: prUrl ?? currentRemote.prUrl ?? null,
           branch: branch ?? currentRemote.branch ?? null,
+          // Model A: only an observation that sees a NON-waiting state may
+          // clear pollingStoppedReason. jules_interact deliberately leaves it
+          // (no watcher exists after an interaction), so a stale null here
+          // would falsely claim polling is active.
+          ...(!observedWaiting ? { pollingStoppedReason: null } : {}),
         },
       },
       env

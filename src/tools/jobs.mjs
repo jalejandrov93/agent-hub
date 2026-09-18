@@ -6,6 +6,7 @@ import { TASK_TYPES } from '../schemas.mjs'
 import { keyForJob, NO_KEY_MESSAGE } from '../cloud/credentials.mjs'
 import { computeAttention } from '../cloud/check.mjs'
 import { isWaitingRemoteState } from '../cloud/poller.mjs'
+import { interactWithSession } from './jules.mjs'
 import * as defaultJulesClient from '../cloud/jules/client.mjs'
 import * as defaultJulesAdapter from '../cloud/jules/adapter.mjs'
 
@@ -48,9 +49,11 @@ const REPLYABLE_AGENTS = new Set(['agy', 'opencode', 'codex', 'jules'])
 
 /**
  * job_reply for a jules parent: unlike agy/opencode, this never spawns a new
- * local job — it talks directly to the existing remote session via
- * client.sendMessage/approvePlan, using the SAME jobId (the poller already
- * started by startRemoteJob keeps tracking that one job/session).
+ * local job — it talks directly to the existing remote session through the
+ * shared interactWithSession() implementation (same as jules_interact: one
+ * place for reply/approve_plan semantics, counters and accounting), using
+ * the SAME jobId. Model A: like jules_interact, this never restarts a
+ * poller — observe afterwards with jules_wait/jules_check.
  */
 async function julesReply({ jobId, parent, message, action, client, env, turnDepth, warning }) {
   const sessionId = parent.remote?.sessionId
@@ -75,21 +78,22 @@ async function julesReply({ jobId, parent, message, action, client, env, turnDep
     }
   }
 
-  // The session belongs to the account that STARTED the job, so reply with
-  // that account's key (credentials.mjs), not whatever env holds. Sending
-  // unkeyed produced a real 401 on /sessions/<id>:sendMessage once keys moved
-  // into accounts.json and JULES_API_KEY was gone.
+  // The session belongs to the account that STARTED the job: fail fast here
+  // with 'auth' when no key exists anywhere (same NO_KEY_MESSAGE contract as
+  // before), so a missing key never reaches the shared implementation.
   const apiKey = keyForJob(parent, { env })
   if (!apiKey) {
     return { jobId: null, status: 'failed', parentJobId: jobId, errorKind: 'auth', error: NO_KEY_MESSAGE, turnDepth, warning }
   }
 
   try {
-    if (resolvedAction === 'approve_plan') {
-      await client.approvePlan({ apiKey, sessionId })
-    } else {
-      await client.sendMessage({ apiKey, sessionId, prompt: message })
-    }
+    await interactWithSession({
+      jobId,
+      action: resolvedAction === 'approve_plan' ? 'approve_plan' : 'reply',
+      message,
+      client,
+      env,
+    })
   } catch (error) {
     // Mirrors the createSession error mapping in src/cloud/runner.mjs: 429 is
     // quota exhaustion, 401/403 is a rejected/missing key, anything else is an
