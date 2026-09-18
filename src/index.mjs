@@ -8,7 +8,7 @@ import { paths } from './config.mjs'
 import { reconcileOrphans, listJobs, readResult, responsePath } from './jobstore.mjs'
 import { agentsStatusTool, routeTool, knownTaskTypes } from './tools/agents.mjs'
 import { delegateTool, jobWaitTool, jobStatusTool, jobResultTool, jobCancelTool, jobReplyTool } from './tools/jobs.mjs'
-import { julesDelegateTool, julesSourcesTool, julesCheckTool, julesSessionsTool, julesAccountsTool, julesSchedulesTool, julesInteractTool, julesWait } from './tools/jules.mjs'
+import { julesDelegateTool, julesSourcesTool, julesCheckTool, julesSessionsTool, julesAccountsTool, julesSchedulesTool, julesInteractTool, julesWait, julesSuperviseTool } from './tools/jules.mjs'
 import { computeAttention } from './cloud/check.mjs'
 import { agentsQuotaTool } from './tools/agents.mjs'
 import { resumeRemoteJobs } from './cloud/runner.mjs'
@@ -35,6 +35,7 @@ import {
   JulesSourcesResponse,
   JulesAccountsResponse,
   JulesSchedulesResponse,
+  JulesSuperviseResponse,
 } from './schemas.mjs'
 
 const VERSION = '2.1.0'
@@ -466,6 +467,44 @@ export function buildServer() {
       annotations: { readOnlyHint: true, openWorldHint: true, idempotentHint: true },
     },
     guard(({ limit, state, account }) => julesSessionsTool({ limit, state, account }))
+  )
+
+  server.registerTool(
+    'jules_supervise',
+    {
+      title: 'Supervise a Jules session with autonomous watch and interaction',
+      description:
+        'Autonomous watch-and-interact loop for a Jules session. Acquires the watch lease so concurrent ' +
+        'watchers observe read-only. Continuously observes the session, auto-approving plans (if enabled) ' +
+        'and classifying user feedback through 6 hard gates (unambiguous, no objective change, no business decisions, ' +
+        'no secrets, no scope change, attempts < maxAutoReplies). A PAUSED session is never auto-resumed. ' +
+        'Returns with outcome: terminal (completed/failed), attention (needs human decision), paused, ' +
+        'timeout, or budget_exhausted (maxAutoReplies reached).',
+      inputSchema: {
+        jobId: z.string().min(1).optional().describe('Local jobId whose remote.sessionId should be supervised.'),
+        sessionId: z.string().min(1).optional().describe('A bare Jules session id.'),
+        autoApprovePlan: z.boolean().optional().default(true).describe('Automatically approve plans when AWAITING_PLAN_APPROVAL.'),
+        autoResolveFeedback: z.boolean().optional().default(true).describe('Automatically reply to unambiguous questions when AWAITING_USER_FEEDBACK.'),
+        maxAutoReplies: z.number().int().nonnegative().optional().default(2).describe('Maximum number of auto-replies across the session.'),
+        pauseAfterAmbiguity: z.boolean().optional().default(true).describe('Pause and request user attention if feedback cannot be safely auto-resolved.'),
+        timeoutS: z.number().int().positive().max(600).optional().default(300).describe('Supervision timeout in seconds.'),
+        pollIntervalS: z.number().int().positive().max(60).optional().describe('Poll interval in seconds between checks.'),
+      },
+      outputSchema: JulesSuperviseResponse,
+      annotations: { readOnlyHint: false, openWorldHint: true },
+    },
+    guard(({ jobId, sessionId, autoApprovePlan, autoResolveFeedback, maxAutoReplies, pauseAfterAmbiguity, timeoutS, pollIntervalS }) =>
+      julesSuperviseTool({
+        jobId,
+        sessionId,
+        autoApprovePlan,
+        autoResolveFeedback,
+        maxAutoReplies,
+        pauseAfterAmbiguity,
+        timeoutS,
+        pollIntervalS,
+      })
+    )
   )
 
   server.registerTool(

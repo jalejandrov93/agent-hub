@@ -93,6 +93,9 @@ export const RemoteInfo = z
     interventionCount: nullableNumber,
     autoReplyCount: nullableNumber,
     planApprovalCount: nullableNumber,
+    // B4 watch lease: observation ownership so a supervisor and a concurrent
+    // jules_wait never drive the same session (see §7 execution-contract.md).
+    watch: z.object({ owner: z.string().nullable().optional(), generation: z.number().int().nonnegative().nullable().optional() }).nullable().optional(),
   })
   .passthrough()
 
@@ -505,6 +508,31 @@ export const JulesWaitResponse = z
     done: z.boolean(),
     waiting: z.boolean(),
     timedOut: z.boolean(),
+  })
+  .passthrough()
+
+/**
+ * Result from jules_supervise: the supervisor's final observation after its
+ * watch cycle ends. `outcome` says WHY it stopped: 'terminal' (session ended),
+ * 'attention' (needs human), 'paused' (PAUSED state — never auto-resumed),
+ * 'timeout' (local budget elapsed), or 'budget_exhausted' (maxAutoReplies hit).
+ */
+export const JulesSuperviseResponse = z
+  .object({
+    jobId: nullableString,
+    sessionId: z.string().nullable(),
+    state: z.string(),
+    prUrl: nullableString,
+    branch: nullableString,
+    sessionUrl: nullableString,
+    lastMessage: nullableString,
+    terminal: z.boolean(),
+    outcome: z.enum(['terminal', 'attention', 'paused', 'timeout', 'budget_exhausted']),
+    attentionRequired: z.boolean().optional(),
+    attentionReason: z.enum(['user_feedback', 'plan_approval', 'paused']).nullable().optional(),
+    recommendedAction: z.enum(['send_message', 'approve_plan']).nullable().optional(),
+    autoReplyCount: z.number().int().nonnegative().optional(),
+    planApprovalCount: z.number().int().nonnegative().optional(),
   })
   .passthrough()
 

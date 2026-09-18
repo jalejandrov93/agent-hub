@@ -13,6 +13,7 @@ import { keyForJob, keyForAccount } from '../cloud/credentials.mjs'
 import * as defaultClient from '../cloud/jules/client.mjs'
 import { listAllSources } from '../cloud/jules/client.mjs'
 import * as defaultAdapter from '../cloud/jules/adapter.mjs'
+import { julesSuperviseTool } from '../cloud/jules/supervisor.mjs'
 import { TASK_TYPES } from '../schemas.mjs'
 
 /** Reject a caller-supplied taskType that is not one of schemas.mjs TASK_TYPES (mirrors tools/jobs.mjs). */
@@ -487,12 +488,54 @@ export async function julesWait({
   checkRemoteSessionFn = defaultCheckRemoteSession,
   sleepFn = (ms) => new Promise((resolve) => setTimeout(resolve, ms)),
   nowFn = Date.now,
+  readResultFn = defaultReadResult,
+  listJobsFn = defaultListJobs,
+  finishRemoteJobFn,
+  updateResultFn,
 } = {}) {
   const effectiveTimeoutMs = timeoutMs ?? (timeoutS * 1000)
   const start = nowFn()
 
+  // Resolve the jobId for watch lease checking
+  let resolvedJobId = jobId ?? null
+  if (!resolvedJobId && sessionId) {
+    let jobs = []
+    try { jobs = listJobsFn(env) } catch { /* ignore */ }
+    const match = Array.isArray(jobs) ? jobs.find((j) => j?.remote?.sessionId === sessionId) : null
+    if (match) resolvedJobId = match.jobId
+  }
+
   while (true) {
-    const check = await checkRemoteSessionFn({ jobId, sessionId, env, client, adapter, enrich: true })
+    // B4 watch lease: when another owner (e.g. 'supervisor') holds the watch,
+    // observe read-only — no finalization, no state mutation. The supervisor
+    // owns the interaction lifecycle and will finalize when it's done.
+    let effectiveFinishRemoteJobFn = finishRemoteJobFn
+    let effectiveUpdateResultFn = updateResultFn
+
+    if (resolvedJobId) {
+      try {
+        const record = readResultFn(resolvedJobId, env)
+        const watch = record?.remote?.watch
+        if (watch?.owner != null && watch.owner !== 'jules_wait') {
+          // Foreign lease active — wrap check to be read-only
+          effectiveFinishRemoteJobFn = () => {}
+          effectiveUpdateResultFn = () => {}
+        }
+      } catch { /* no record — proceed normally */ }
+    }
+
+    const check = await checkRemoteSessionFn({
+      jobId,
+      sessionId,
+      env,
+      client,
+      adapter,
+      enrich: true,
+      readResultFn,
+      listJobsFn,
+      ...(effectiveFinishRemoteJobFn !== undefined ? { finishRemoteJobFn: effectiveFinishRemoteJobFn } : {}),
+      ...(effectiveUpdateResultFn !== undefined ? { updateResultFn: effectiveUpdateResultFn } : {}),
+    })
     const state = check.state
     const terminal = adapter.isTerminalState(state)
     const waiting = adapter.isWaitingState?.(state) || (typeof state === 'string' && (state.startsWith('AWAITING_') || state === 'PAUSED'))
@@ -523,4 +566,6 @@ export async function julesWait({
   }
 }
 
+export { julesSuperviseTool }
+export const jules_supervise = julesSuperviseTool
 export const jules_wait = julesWait

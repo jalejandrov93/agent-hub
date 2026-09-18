@@ -49,6 +49,7 @@ test('the server boots over stdio and exposes the full tool set', async () => {
         'jules_schedules',
         'jules_sessions',
         'jules_sources',
+        'jules_supervise',
         'jules_wait',
         'learning_propose',
         'route',
@@ -237,6 +238,28 @@ test('jules_delegate and jules_sources accept an optional account', async () => 
       const tool = tools.find((t) => t.name === name)
       assert.ok(tool.inputSchema.properties.account, `${name} should accept an "account" input`)
       assert.ok(!(tool.inputSchema.required ?? []).includes('account'), `${name} account must be optional`)
+    }
+  } finally {
+    await close()
+  }
+})
+
+test('jules_supervise is registered with expected schema and annotations', async () => {
+  const { client, close } = await connect()
+  try {
+    const { tools } = await client.listTools()
+    const tool = tools.find((t) => t.name === 'jules_supervise')
+    assert.ok(tool, 'jules_supervise must be registered')
+    assert.deepEqual(tool.inputSchema.required ?? [], [])
+    assert.equal(tool.annotations?.readOnlyHint, false)
+    assert.ok(tool.inputSchema.properties.jobId, 'accepts jobId')
+    assert.ok(tool.inputSchema.properties.sessionId, 'accepts sessionId')
+    assert.ok(tool.inputSchema.properties.autoApprovePlan, 'accepts autoApprovePlan')
+    assert.ok(tool.inputSchema.properties.autoResolveFeedback, 'accepts autoResolveFeedback')
+    assert.ok(tool.inputSchema.properties.maxAutoReplies, 'accepts maxAutoReplies')
+    assert.ok(tool.inputSchema.properties.pauseAfterAmbiguity, 'accepts pauseAfterAmbiguity')
+    for (const phrase of [/watch/i, /hard gates/i, /PAUSED/]) {
+      assert.match(tool.description, phrase, `jules_supervise.description should mention ${phrase}`)
     }
   } finally {
     await close()
