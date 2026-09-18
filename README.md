@@ -442,11 +442,30 @@ plus a `listSessions` search before creating).
 `JobRecord` carries nullable workflow columns from the start (`workflow_id`,
 `step_id`, `parent_execution_id`, `root_execution_id`, `attempt`,
 `remote_state`, `quality_score`, `verified`, `judge_verdict`) so the later
-workflow engine never needs a breaking migration. `src/storage/sqlite.mjs`
-provides the minimal C0 store (SQLite WAL when `better-sqlite3` is present,
-JSON fallback otherwise) with `workflows`, `workflow_nodes`, `jobs` and
-`leases` tables; `runs/<jobId>/result.json` stays the source of truth until
-the engine lands.
+workflow engine never needs a breaking migration.
+
+### C0-real: SQLite as coordination state
+
+`better-sqlite3` is a runtime dependency; `initDb()` runs at MCP and
+dashboard startup (`AGENT_HUB_HOME/agent-hub.db`, WAL, singleton per state
+dir). `createJob`/`updateResult` dual-write: `runs/<jobId>/result.json`
+stays the content artifact and compat path, while SQLite (`jobs`, `leases`,
+`workflows`, `workflow_nodes`) is the authority for coordination state —
+this is what lets two processes update the same job without lost updates,
+and what C1's DAG will build on. If the native module is ever unavailable,
+the mirror is skipped with a one-time warning and the JSON path keeps
+working alone. Crash/recovery (kill → restart → coherent state) and
+concurrent-writer tests pin the guarantee (`test/storage-c0real.test.mjs`).
+
+### Event watcher (C0.5)
+
+`bin/agent-hub watch [--once|--follow] [--sink console|file|webhook]`
+tails `events.jsonl` (`src/notify/watch.mjs`, same offset-tracked pattern as
+the dashboard SSE) and routes first-level events (`job.finished`,
+`job.failed`, `jules.waiting`, `jules.attention_required`,
+`workflow.completed`) to console / `<AGENT_HUB_HOME>/notifications.jsonl` /
+webhook adapters (`src/notify/adapters.mjs`, never throws, never logs
+secrets). It runs as its own process — never inside the MCP stdio lifecycle.
 
 ### Write-mode gate
 
