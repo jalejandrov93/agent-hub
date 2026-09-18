@@ -1,4 +1,5 @@
 import { policyFor } from './registry.mjs'
+import { classifyError } from './taxonomy.mjs'
 
 /**
  * Recovery pipeline stages in default order: retry -> resume -> fallback ->
@@ -102,7 +103,6 @@ export function recoveryStageOrder(ctx = {}) {
 }
 
 export async function executeWithPolicy(taskFn, policy, ctx = {}) {
-  const resolvedPolicy = typeof policy === 'string' ? (policyFor(policy) ?? {}) : (policy ?? {})
   const stages = recoveryStageOrder(ctx)
 
   const state = {
@@ -127,8 +127,10 @@ export async function executeWithPolicy(taskFn, policy, ctx = {}) {
       if (result && typeof result === 'object' && result.status === 'failed') {
         const err = new Error(result.error || 'Task failed')
         err.result = result
-        err.errorKind = result.errorKind
+        err.errorKind = result.errorKind ?? result.job?.errorKind
         if (result.sessionId) err.sessionId = result.sessionId
+        else if (result.job?.sessionId) err.sessionId = result.job.sessionId
+        else if (result.job?.remote?.sessionId) err.sessionId = result.job.remote.sessionId
         throw err
       }
       return result
@@ -136,16 +138,38 @@ export async function executeWithPolicy(taskFn, policy, ctx = {}) {
       state.lastError = err
       if (err?.sessionId) state.sessionId = err.sessionId
       if (err?.result?.sessionId) state.sessionId = err.result.sessionId
+      if (err?.result?.job?.sessionId) state.sessionId = err.result.job.sessionId
+      if (err?.result?.job?.remote?.sessionId) state.sessionId = err.result.job.remote.sessionId
+
+      // Post-error policy resolution per attempt
+      let activePolicy
+      if (typeof policy === 'function') {
+        activePolicy = policy(err, ctx, state)
+      } else if (policy && typeof policy === 'object') {
+        activePolicy = policy
+      } else {
+        const cat = (typeof policy === 'string' && policy) ? policy : classifyError(err, {
+          errorKind: err?.errorKind ?? err?.result?.errorKind ?? err?.result?.job?.errorKind,
+          status: err?.status ?? err?.statusCode ?? err?.result?.status ?? err?.result?.job?.status,
+          category: err?.category ?? err?.result?.category,
+        })
+        activePolicy = (cat ? (ctx?.policyForFn ?? ctx?.policyFor ?? policyFor)(cat) : null) ?? (policyFor('default') || {
+          retry: 1,
+          resume: false,
+          fallback: true,
+          escalation: 'human',
+        })
+      }
 
       // Single loop through recovery stages in the caller's (or default)
       // order: retry -> resume -> fallback -> escalate unless recoveryOrder
       // says otherwise (remote adapters resume first).
-      const stage = stages.find((s) => s.isApplicable(resolvedPolicy, ctx, state, err))
+      const stage = stages.find((s) => s.isApplicable(activePolicy, ctx, state, err))
       if (!stage) {
         throw err
       }
 
-      const outcome = await stage.execute(resolvedPolicy, ctx, state, err)
+      const outcome = await stage.execute(activePolicy, ctx, state, err)
       if (outcome?.action === 'continue') {
         continue
       }

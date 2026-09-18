@@ -3,7 +3,7 @@ import { spawnDetached, runWithTimeout as defaultRunWithTimeout, killProcessGrou
 import { createJob, updateResult, appendStdout, stdoutPath, responsePath, readResult } from './jobstore.mjs'
 import { appendEvent } from './eventlog.mjs'
 import { adapterFor as defaultAdapterFor } from './adapters/index.mjs'
-import { checkWriteAllowed, acquireWriteLock, releaseWriteLock, heartbeatWriteLock, LEASE_TTL_MS_DEFAULT } from './worktree.mjs'
+import { checkWriteAllowed, acquireWriteLock, releaseWriteLock, heartbeatWriteLock, LEASE_TTL_MS_DEFAULT, adoptWriteLock } from './worktree.mjs'
 import { resolveVariant, KILL_GRACE_S, SANDBOX } from './config.mjs'
 import { resolveSandboxProfile, filterEnv, sandboxTelemetry } from './sandbox.mjs'
 import { resolveEffectiveTimeoutS as defaultResolveEffectiveTimeoutS } from './timeouts.mjs'
@@ -116,6 +116,9 @@ export function startJob({
   attempt,
   workflow_id,
   step_id,
+  reservationToken,
+  adoptWriteLockFn = adoptWriteLock,
+  acquireWriteLockFn = acquireWriteLock,
 }) {
   // Resolved BEFORE anything else — including learnings/timeout/createJob —
   // because a remote adapter (Jules) edits a branch on GitHub via its own
@@ -217,13 +220,23 @@ export function startJob({
       return { job: readResult(job.jobId, env), done: Promise.resolve() }
     }
     leaseTtlMs = resolveLeaseTtlMs(env, leaseTtlMs)
-    const lock = acquireWriteLock({ cwd, jobId: job.jobId, env, ttlMs: leaseTtlMs })
-    if (!lock.acquired) {
-      updateResult(job.jobId, { status: 'failed', errorKind: 'locked', error: lock.reason }, env)
-      appendEvent({ kind: 'job.failed', agent, model, cwd, title, jobId: job.jobId, errorKind: 'locked', taskType, summary: lock.reason }, { env })
-      return { job: readResult(job.jobId, env), done: Promise.resolve() }
+    if (reservationToken) {
+      const adoption = adoptWriteLockFn({ cwd, token: reservationToken, jobId: job.jobId, env, ttlMs: leaseTtlMs })
+      if (!adoption.adopted) {
+        updateResult(job.jobId, { status: 'failed', errorKind: 'locked', error: `Reservation invalid: ${adoption.reason}` }, env)
+        appendEvent({ kind: 'job.failed', agent, model, cwd, title, jobId: job.jobId, errorKind: 'locked', taskType, summary: `Reservation invalid: ${adoption.reason}` }, { env })
+        return { job: readResult(job.jobId, env), done: Promise.resolve() }
+      }
+      leaseToken = adoption.token
+    } else {
+      const lock = acquireWriteLockFn({ cwd, jobId: job.jobId, env, ttlMs: leaseTtlMs })
+      if (!lock.acquired) {
+        updateResult(job.jobId, { status: 'failed', errorKind: 'locked', error: lock.reason }, env)
+        appendEvent({ kind: 'job.failed', agent, model, cwd, title, jobId: job.jobId, errorKind: 'locked', taskType, summary: lock.reason }, { env })
+        return { job: readResult(job.jobId, env), done: Promise.resolve() }
+      }
+      leaseToken = lock.token
     }
-    leaseToken = lock.token
   }
 
   const argv = adapter.buildArgv({ model, prompt: effectiveTask, cwd, mode, title, variant: effectiveVariant, timeoutS: effectiveTimeoutS, sessionId, env })

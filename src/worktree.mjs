@@ -250,6 +250,43 @@ export function readWriteLock({ cwd, env = process.env }) {
 }
 
 /**
+ * Adopt an existing reservation lock as an execution lease for a new jobId.
+ * Succeeds only if the lock exists, token matches, and lease has not expired.
+ * Never steals from another holder.
+ */
+export function adoptWriteLock({ cwd, token, jobId, env = process.env, ttlMs = LEASE_TTL_MS_DEFAULT }) {
+  if (!token) return { adopted: false, reason: 'missing reservation token' }
+  const file = lockFilePath(cwd, env)
+  let holder
+  try {
+    holder = JSON.parse(fs.readFileSync(file, 'utf8'))
+  } catch {
+    return { adopted: false, reason: 'lock file unreadable or missing' }
+  }
+  if (holder.token !== token) {
+    return { adopted: false, reason: 'reservation token mismatch or reclaimed' }
+  }
+  if (isHolderStale(holder)) {
+    return { adopted: false, reason: 'reservation expired' }
+  }
+  const ttl = normalizeTtlMs(ttlMs)
+  const now = new Date()
+  const updatedHolder = {
+    ...holder,
+    jobId: jobId ?? holder.jobId,
+    pid: process.pid,
+    heartbeatAt: now.toISOString(),
+    expiresAt: new Date(now.getTime() + ttl).toISOString(),
+  }
+  try {
+    writeHolderAtomic(file, updatedHolder)
+    return { adopted: true, token, file }
+  } catch (error) {
+    return { adopted: false, reason: String(error?.message ?? error) }
+  }
+}
+
+/**
  * Release the cwd lease, but ONLY when the caller still owns it.
  *
  * - Token path (current): `token` must match the holder's token. A stale
