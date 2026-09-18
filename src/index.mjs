@@ -19,6 +19,7 @@ import { metricsTool } from './tools/insights.mjs'
 import { learningProposeTool } from './tools/learnings.mjs'
 import { scheduleStartupDiscovery, scheduleQuotaWarmup } from './startup.mjs'
 import { dispatch } from './dispatch.mjs'
+import { recordDispatchOrigin } from './harness/origin.mjs'
 import { clientHintForName, getClientHint, setClientHint } from './harness/registry.mjs'
 import {
   TASK_TYPES,
@@ -71,9 +72,13 @@ const fail = (error) => ({
 // (bare array -> {agents}) and learning_propose (already an object) need it;
 // every other tool's payload already matches its outputSchema, so `wrap`
 // defaults to identity.
-const guard = (handler, wrap = (payload) => payload) => async (args) => {
+// guard() forwards the transport's extra argument (2nd SDK parameter,
+// carrying e.g. _meta/sessionId) to handlers that declare it —
+// handler(args, extra). Handlers that ignore it keep working unchanged:
+// extra JS arguments are simply dropped.
+const guard = (handler, wrap = (payload) => payload) => async (args, extra) => {
   try {
-    const payload = await handler(args ?? {})
+    const payload = await handler(args ?? {}, extra)
     return ok(payload, wrap(payload))
   } catch (error) {
     return fail(error)
@@ -245,8 +250,13 @@ export function buildServer() {
       outputSchema: DelegateResponse,
       annotations: { readOnlyHint: false, openWorldHint: true },
     },
-    guard(({ agent, model, task, cwd, mode, timeoutS, title, variant, taskType }) =>
-      delegateTool({ agent, model, task, cwd, mode, timeoutS, title, variant, taskType })
+    guard(({ agent, model, task, cwd, mode, timeoutS, title, variant, taskType }, extra) =>
+      delegateTool({ agent, model, task, cwd, mode, timeoutS, title, variant, taskType }).then((res) => {
+        // C1.2 origin mapping (best-effort, mapping-only): remember which
+        // harness session this job came from for a future wake-up bridge.
+        recordDispatchOrigin({ jobId: res?.jobId, extra, harness: null, env: process.env })
+        return res
+      })
     )
   )
 
@@ -278,8 +288,13 @@ export function buildServer() {
       outputSchema: DispatchResponse,
       annotations: { readOnlyHint: false, openWorldHint: true },
     },
-    guard(({ task, taskType, cwd, mode, workflowStep, dispatchKey, attempt, parentExecutionId, rootExecutionId, timeoutS, waitMode, harness }) =>
-      dispatch({ task, taskType, cwd, mode, workflowStep, dispatchKey, attempt, parentExecutionId, rootExecutionId, timeoutS, waitMode, harness, clientHint: getMcpClientHint() })
+    guard(({ task, taskType, cwd, mode, workflowStep, dispatchKey, attempt, parentExecutionId, rootExecutionId, timeoutS, waitMode, harness }, extra) =>
+      dispatch({ task, taskType, cwd, mode, workflowStep, dispatchKey, attempt, parentExecutionId, rootExecutionId, timeoutS, waitMode, harness, clientHint: getMcpClientHint() }).then((res) => {
+        // C1.2 origin mapping (best-effort, mapping-only): remember which
+        // harness session this dispatch came from for a future wake-up bridge.
+        recordDispatchOrigin({ jobId: res?.job?.jobId ?? res?.jobId, extra, harness: harness ?? null, env: process.env })
+        return res
+      })
     )
   )
 
