@@ -497,6 +497,21 @@ concurrent schedulers can't double-claim a node (`claimed_by` CAS in
   `running` node whose lease expired *and* whose owner is dead, else it
   re-adopts. A `fork()`-based test pins cross-process single execution.
 
+### Harness profiles (`src/harness/`)
+
+`delegate()` starts a job and returns — but harnesses behave differently
+after an MCP tool call (Claude Code usually continues with `job_wait`;
+OpenCode may end the turn with the job still running). Profiles model the
+orchestration strategy explicitly without coupling the engine to any
+harness: `generic` (`waitMode: none`), `claude-code` (`attention`),
+`opencode` (`attention`). Priority: explicit `waitMode`/`harness` arg >
+`AGENT_HUB_HARNESS` env > MCP `clientInfo` hint > `generic` (hints never
+decide security or critical logic). `waitMode` semantics: `none` returns at
+creation; `attention` returns on terminal *or* waiting/attention; `terminal`
+only on terminal. `delegate()` is unchanged (generic never waits by
+default). `job.started/finished/failed` events carry `harness` + `waitMode`
+for later analysis.
+
 ### Write-mode gate
 
 A `delegate()`/`job_reply()` call with `mode: 'write'` requires `cwd` to be
@@ -569,7 +584,7 @@ read jobs from a disposable worktree when that matters.
 | `agents_status` | `{refresh?: boolean}` | L0-L2 for every pair in the delegation map. Never pings. Rows include `binPath`/`cliVersion` from `discovery.json`. |
 | `route` | `{taskType: enum, mode?: 'read'\|'write', includeCatalog?: boolean}` | Skips unavailable/breaker-open/held pairs; returns `{primary, fallbacks, skipped, discovery, reason, appliedProposal}`. `discovery` holds `{binPath, version, modelCount, checkedAt, error}` per CLI; `includeCatalog: true` returns the full model catalog instead. `appliedProposal` names the accepted proposal whose order was applied, or `null`. |
 | `delegate` | `{agent, model, task, cwd, mode?, timeoutS?, title?, variant?, taskType?}` | Returns `{jobId, status:'queued'}` immediately. `variant` is opencode's reasoning effort (minimal/low/medium/high/max); ignored by agy/copilot. Pass the same `taskType` you gave `route` so metrics, adaptive timeouts and learnings apply. |
-| `dispatch` | `{task, cwd, taskType?, mode?, workflowStep?, dispatchKey?, attempt?, parentExecutionId?, rootExecutionId?, timeoutS?}` | Atomic decide+execute: revalidates preflight/breaker at execution time (closes the `route`→`delegate` TOCTOU gap), applies the per-class policy with adapter-aware recovery (remote candidates resume/reconcile before retry; policy resolved from the real error, not the caller's guess), and deduplicates by `dispatchKey` (concurrent same-key dispatches share one job). Write mode reserves a lease token that `startJob` adopts. `route` stays recommendation-only, `delegate` exact-execution. |
+| `dispatch` | `{task, cwd, taskType?, mode?, workflowStep?, dispatchKey?, attempt?, parentExecutionId?, rootExecutionId?, timeoutS?, waitMode?, harness?}` | Atomic decide+execute: revalidates preflight/breaker at execution time (closes the `route`→`delegate` TOCTOU gap), applies the per-class policy with adapter-aware recovery (remote candidates resume/reconcile before retry; policy resolved from the real error, not the caller's guess), and deduplicates by `dispatchKey` (concurrent same-key dispatches share one job). Write mode reserves a lease token that `startJob` adopts. `route` stays recommendation-only, `delegate` exact-execution. `waitMode` (`none`\|`attention`\|`terminal`) defaults from the harness profile — see Harness profiles. |
 | `job_wait` | `{jobId, timeoutS?<=60}` | Polls until terminal (`done`, `waiting:false`), until a remote session waits for interaction (`done` + `waiting:true` with `attentionRequired`, `attentionReason`, `recommendedAction` — act via `jules_interact`, no timeout burned), or until the local budget elapses (`done:false`, `timedOut:true`; job/session keep running). |
 | `job_status` | `{jobId}` | Current status, no waiting. |
 | `job_result` | `{jobId, maxLines?, tailLines?}` | Head of the response (default 20 lines) plus extra `tailLines` from the end (default 10, never repeating a head line) and `fullPath`, `truncated`, `tailTruncated`. |
