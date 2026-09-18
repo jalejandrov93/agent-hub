@@ -64,6 +64,21 @@ export const CIRCUIT_BREAKER = {
   immediateKinds: new Set(['billing']),
 }
 
+export const CIRCUIT_BREAKER_BY_CLASS = {
+  billing: { windowMs: 30 * 60 * 1000, failureThreshold: 1, immediate: true },
+  auth: { windowMs: 30 * 60 * 1000, failureThreshold: 1, immediate: true },
+  quota: { windowMs: 30 * 60 * 1000, failureThreshold: 2 },
+  timeout: { windowMs: 15 * 60 * 1000, failureThreshold: 3 },
+  transport: { windowMs: 15 * 60 * 1000, failureThreshold: 3 },
+  crash: { windowMs: 15 * 60 * 1000, failureThreshold: 2 },
+  quality: { windowMs: 15 * 60 * 1000, failureThreshold: 3 },
+  default: { windowMs: 30 * 60 * 1000, failureThreshold: 2 },
+}
+
+export function breakerKey(agent, model, klass) {
+  return klass ? `${agent}:${model}:${klass}` : `${agent}:${model}`
+}
+
 /**
  * Extra buffer (seconds) the hub's own hard-kill waits past the adapter's
  * requested timeoutS. agy is given --print-timeout <timeoutS>s and exits on
