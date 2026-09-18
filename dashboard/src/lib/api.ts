@@ -25,6 +25,7 @@ import {
   JulesCheckResponse,
   AgentsQuotaResponse,
   WorkGraphResponse,
+  McpToolsResponse,
 } from "@shared"
 import type {
   StateResponseT,
@@ -49,6 +50,7 @@ import type {
   CloudActivitiesResponseT,
   CloudSourceCacheEntryT,
   WorkGraphResponseT,
+  McpToolsResponseT,
 } from "./types"
 
 export class ApiError extends Error {
@@ -243,4 +245,8 @@ export function getCloudJobActivities(id: string): Promise<CloudActivitiesRespon
 
 export function fetchWorkGraph(): Promise<WorkGraphResponseT> {
   return fetchJson(WorkGraphResponse, "/api/work-graph")
+}
+
+export function getTools(): Promise<McpToolsResponseT> {
+  return fetchJson(McpToolsResponse, "/api/tools")
 }

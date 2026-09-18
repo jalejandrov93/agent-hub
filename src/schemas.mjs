@@ -328,6 +328,15 @@ export const MetricsResponse = z
   .object({ generatedAt: z.string(), groupBy: z.array(z.string()), rows: z.array(MetricsRow) })
   .passthrough()
 
+/** One MCP tool registered in buildServer() — the {name, title, description} snapshot listMcpTools() returns. */
+export const McpToolInfo = z
+  .object({ name: z.string(), title: z.string(), description: z.string() })
+  .passthrough()
+
+export const McpToolsResponse = z
+  .object({ tools: z.array(McpToolInfo) })
+  .passthrough()
+
 export const PairRef = z.object({ agent: z.string(), model: z.string() }).passthrough()
 
 export const ProposalStatus = z.enum(['pending', 'accepted', 'rejected', 'superseded'])

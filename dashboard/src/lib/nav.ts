@@ -10,6 +10,7 @@ import {
   Settings,
   Cloud,
   GitFork,
+  Wrench,
   type LucideIcon,
 } from "lucide-react"
 import type { NavBadgeKey } from "./badges"
@@ -26,6 +27,7 @@ export type RouteName =
   | "approvals"
   | "config"
   | "cloud"
+  | "tools"
 
 export type NavItem = {
   name: RouteName
@@ -62,6 +64,7 @@ export const NAV_GROUPS: NavGroup[] = [
       { name: "approvals", label: "Approvals", path: "/approvals", icon: CheckSquare, badge: "approvals" },
       { name: "cloud", label: "Cloud", path: "/cloud", icon: Cloud },
       { name: "config", label: "Config", path: "/config", icon: Settings, badge: "config" },
+      { name: "tools", label: "Tools", path: "/tools", icon: Wrench },
     ],
   },
 ]
