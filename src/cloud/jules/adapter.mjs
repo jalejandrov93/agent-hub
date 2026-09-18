@@ -7,6 +7,23 @@ export function isTerminalState(state) {
   return TERMINAL_STATES.has(state)
 }
 
+export const ALL_JULES_STATES = [
+  'QUEUED',
+  'PLANNING',
+  'AWAITING_PLAN_APPROVAL',
+  'AWAITING_USER_FEEDBACK',
+  'IN_PROGRESS',
+  'PAUSED',
+  'COMPLETED',
+  'FAILED',
+  'UNKNOWN',
+]
+
+export function isWaitingState(state) {
+  if (typeof state !== 'string') return false
+  return state.startsWith('AWAITING_') || state === 'PAUSED'
+}
+
 /**
  * Validates and defaults the argument set for client.createSession. This is
  * NOT the HTTP body: it returns the flat keyword arguments (source,

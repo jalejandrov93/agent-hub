@@ -1,6 +1,6 @@
 import { startRemoteJob as defaultStartRemoteJob } from '../cloud/runner.mjs'
 import { checkRemoteSession as defaultCheckRemoteSession } from '../cloud/check.mjs'
-import { listJobs as defaultListJobs, readResult as defaultReadResult } from '../jobstore.mjs'
+import { listJobs as defaultListJobs, readResult as defaultReadResult, updateResult as defaultUpdateResult } from '../jobstore.mjs'
 import { listSchedules as defaultListSchedules } from '../schedules.mjs'
 import {
   listAccounts as defaultListAccounts,
@@ -9,7 +9,7 @@ import {
   readPolicy as defaultReadPolicy,
 } from '../accounts.mjs'
 import { readSourcesCache as defaultReadSourcesCache } from '../cloud/sources.mjs'
-import { keyForAccount } from '../cloud/credentials.mjs'
+import { keyForJob, keyForAccount } from '../cloud/credentials.mjs'
 import * as defaultClient from '../cloud/jules/client.mjs'
 import { listAllSources } from '../cloud/jules/client.mjs'
 import * as defaultAdapter from '../cloud/jules/adapter.mjs'
@@ -334,3 +334,161 @@ export function julesSchedulesTool({
     }),
   }
 }
+
+/**
+ * Interact with an active Jules session: reply with a message or approve a plan.
+ * The Jules API runs remotely and does NOT support remote pause, resume, or cancel.
+ */
+export async function julesInteractTool({
+  jobId,
+  sessionId,
+  action,
+  message,
+  env = process.env,
+  client = defaultClient,
+  listJobsFn = defaultListJobs,
+  readResultFn = defaultReadResult,
+  updateResultFn = defaultUpdateResult,
+  listAccountsFn = defaultListAccounts,
+  getAccountSecretFn = defaultGetAccountSecret,
+} = {}) {
+  if (action === 'pause' || action === 'resume' || action === 'cancel') {
+    throw new Error(`Jules API does not support remote ${action} (no remote pause, resume, or cancel endpoints exist)`)
+  }
+
+  if (action !== 'reply' && action !== 'approve_plan') {
+    throw new Error(`Invalid action "${action}": only "reply" and "approve_plan" are supported. Remote pause, resume, and cancel are not supported.`)
+  }
+
+  if (action === 'reply' && (!message || String(message).trim().length === 0)) {
+    throw new Error('message is required for action "reply"')
+  }
+
+  if (!jobId && !sessionId) {
+    throw new Error('jules_interact requires either jobId or sessionId')
+  }
+
+  let resolvedJobId = jobId ?? null
+  let resolvedSessionId = sessionId ?? null
+  let resolvedJob = null
+
+  if (jobId) {
+    const record = readResultFn(jobId, env)
+    const recorded = record?.remote?.sessionId
+    if (!recorded && !sessionId) {
+      throw new Error(`job ${jobId} has no Jules session recorded`)
+    }
+    resolvedSessionId = sessionId ?? recorded
+    resolvedJob = record
+  } else {
+    let jobs = []
+    try {
+      jobs = listJobsFn(env)
+    } catch {
+      // ignore
+    }
+    const match = Array.isArray(jobs) ? jobs.find((job) => job?.remote?.sessionId === resolvedSessionId) : null
+    if (match) {
+      resolvedJobId = match.jobId
+      resolvedJob = match
+    }
+  }
+
+  const apiKey = resolvedJob
+    ? keyForJob(resolvedJob, { env, getAccountSecretFn })
+    : keyForAccount({ env, listAccountsFn, getAccountSecretFn }).apiKey
+
+  if (!apiKey || apiKey.length === 0) {
+    throw new Error('JULES_API_KEY is missing or rejected')
+  }
+
+  if (action === 'approve_plan') {
+    await client.approvePlan({ apiKey, sessionId: resolvedSessionId })
+  } else {
+    await client.sendMessage({ apiKey, sessionId: resolvedSessionId, prompt: message })
+  }
+
+  if (resolvedJobId) {
+    try {
+      const current = readResultFn(resolvedJobId, env)
+      const currentRemote = current?.remote ?? {}
+      const newAttempts = (currentRemote.attempts ?? current?.turnDepth ?? 0) + 1
+      updateResultFn(
+        resolvedJobId,
+        {
+          turnDepth: newAttempts,
+          remote: {
+            ...currentRemote,
+            attempts: newAttempts,
+            pollingStoppedReason: null,
+          },
+        },
+        env
+      )
+    } catch {
+      // best-effort
+    }
+  }
+
+  return {
+    jobId: resolvedJobId,
+    sessionId: resolvedSessionId,
+    action,
+    status: 'ok',
+    success: true,
+  }
+}
+
+/**
+ * Local helper (not an MCP tool): poll with a local timeout waiting for a terminal
+ * state (COMPLETED, FAILED) or a waiting state (AWAITING_*, PAUSED).
+ */
+export async function julesWait({
+  jobId,
+  sessionId,
+  timeoutMs,
+  timeoutS = 30,
+  intervalMs = 2000,
+  env = process.env,
+  client = defaultClient,
+  adapter = defaultAdapter,
+  checkRemoteSessionFn = defaultCheckRemoteSession,
+  sleepFn = (ms) => new Promise((resolve) => setTimeout(resolve, ms)),
+  nowFn = Date.now,
+} = {}) {
+  const effectiveTimeoutMs = timeoutMs ?? (timeoutS * 1000)
+  const start = nowFn()
+
+  while (true) {
+    const check = await checkRemoteSessionFn({ jobId, sessionId, env, client, adapter, enrich: true })
+    const state = check.state
+    const terminal = adapter.isTerminalState(state)
+    const waiting = adapter.isWaitingState?.(state) || (typeof state === 'string' && (state.startsWith('AWAITING_') || state === 'PAUSED'))
+
+    if (terminal || waiting) {
+      return {
+        ...check,
+        done: true,
+        terminal,
+        waiting,
+        timedOut: false,
+      }
+    }
+
+    const elapsed = nowFn() - start
+    if (elapsed >= effectiveTimeoutMs) {
+      return {
+        ...check,
+        done: false,
+        terminal: false,
+        waiting: false,
+        timedOut: true,
+      }
+    }
+
+    const sleepTime = Math.min(intervalMs, effectiveTimeoutMs - elapsed)
+    await sleepFn(sleepTime)
+  }
+}
+
+export const jules_wait = julesWait

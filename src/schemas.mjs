@@ -411,6 +411,21 @@ export const JulesCheckResponse = z
     // True when a remote job wrongly marked failed/orphaned was reopened.
     recovered: z.boolean().optional(),
     terminal: z.boolean(),
+    attentionRequired: z.boolean().optional(),
+    attentionReason: z.enum(['user_feedback', 'plan_approval', 'paused']).nullable().optional(),
+    recommendedAction: z.enum(['send_message', 'approve_plan']).nullable().optional(),
+    canAutoResolve: z.boolean().optional(),
+    attempts: z.number().int().nonnegative().optional(),
+  })
+  .passthrough()
+
+export const JulesInteractResponse = z
+  .object({
+    jobId: nullableString,
+    sessionId: z.string().nullable(),
+    action: z.enum(['reply', 'approve_plan']),
+    status: z.string().optional(),
+    success: z.boolean().optional(),
   })
   .passthrough()
 

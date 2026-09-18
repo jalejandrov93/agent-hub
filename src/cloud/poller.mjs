@@ -27,6 +27,40 @@ function activityIdentity(activity) {
   return `anon:${crypto.createHash('sha1').update(JSON.stringify(activity ?? null)).digest('hex')}`
 }
 
+export const STATE_INTERVALS = {
+  QUEUED: { minIntervalMs: 5000, maxIntervalMs: 5000, min: 5000, max: 5000, valueOf() { return 5000 } },
+  PLANNING: { minIntervalMs: 5000, maxIntervalMs: 5000, min: 5000, max: 5000, valueOf() { return 5000 } },
+  IN_PROGRESS: { minIntervalMs: 5000, maxIntervalMs: 15000, min: 5000, max: 15000, valueOf() { return 5000 } },
+  AWAITING_PLAN_APPROVAL: { minIntervalMs: 30000, maxIntervalMs: 60000, min: 30000, max: 60000, valueOf() { return 30000 } },
+  AWAITING_USER_FEEDBACK: { minIntervalMs: 30000, maxIntervalMs: 60000, min: 30000, max: 60000, valueOf() { return 30000 } },
+  PAUSED: { minIntervalMs: 300000, maxIntervalMs: 300000, min: 300000, max: 300000, valueOf() { return 300000 } },
+}
+
+export function intervalForState(state, options = {}) {
+  const opts = typeof options === 'number' ? { current: options } : options
+  const cfg = STATE_INTERVALS[state] ?? {
+    minIntervalMs: MIN_INTERVAL_MS,
+    maxIntervalMs: MAX_INTERVAL_MS,
+  }
+  const minIntervalMs = cfg.minIntervalMs ?? MIN_INTERVAL_MS
+  const maxIntervalMs = cfg.maxIntervalMs ?? MAX_INTERVAL_MS
+  const backoffFactor = opts.backoffFactor ?? BACKOFF_FACTOR
+
+  if (opts.current === undefined) {
+    return minIntervalMs
+  }
+
+  if (opts.sawNewActivity) {
+    return minIntervalMs
+  }
+
+  if (opts.current < minIntervalMs) {
+    return minIntervalMs
+  }
+
+  return Math.min(opts.current * backoffFactor, maxIntervalMs)
+}
+
 export function nextInterval(current, {
   sawNewActivity,
   minIntervalMs = MIN_INTERVAL_MS,
@@ -66,27 +100,44 @@ export async function pollOnce({
 }) {
   const session = await client.getSession({ apiKey, sessionId })
 
+  let currentRemote = remote
+  try {
+    currentRemote = readResultFn(jobId, env)?.remote ?? remote
+  } catch {
+    // no persisted record (unit tests) — fall back to the passed snapshot
+  }
+
+  const isWaiting = Boolean(
+    adapter?.isWaitingState?.(session.state) ||
+    (typeof session.state === 'string' && (session.state.startsWith('AWAITING_') || session.state === 'PAUSED'))
+  )
+
   let pageToken = cursor
   let lastToken = cursor
   const activities = []
   let pages = 0
-  while (pages < MAX_PAGES_PER_TICK) {
-    const page = await client.listActivities({ apiKey, sessionId, pageToken })
-    pages++
-    const batch = Array.isArray(page?.activities) ? page.activities : []
-    activities.push(...batch)
-    if (page?.nextPageToken) {
-      lastToken = page.nextPageToken
-      pageToken = page.nextPageToken
-    } else {
-      break
+
+  if (!isWaiting) {
+    while (pages < MAX_PAGES_PER_TICK) {
+      const page = await client.listActivities({ apiKey, sessionId, pageToken })
+      pages++
+      const batch = Array.isArray(page?.activities) ? page.activities : []
+      activities.push(...batch)
+      if (page?.nextPageToken) {
+        lastToken = page.nextPageToken
+        pageToken = page.nextPageToken
+      } else {
+        break
+      }
+      // An empty page with a next token means there is nothing more to read
+      // this tick; stop rather than chase a token with no data behind it.
+      if (batch.length === 0) break
     }
-    // An empty page with a next token means there is nothing more to read
-    // this tick; stop rather than chase a token with no data behind it.
-    if (batch.length === 0) break
   }
 
-  const seenIds = Array.isArray(remote.seenActivityIds) ? remote.seenActivityIds : []
+  const seenIds = Array.isArray(currentRemote.seenActivityIds ?? remote.seenActivityIds)
+    ? (currentRemote.seenActivityIds ?? remote.seenActivityIds)
+    : []
   const seen = new Set(seenIds)
   const seenActivityIds = [...seen]
   const newActivities = activities.filter((activity) => !seen.has(activityIdentity(activity)))
@@ -112,9 +163,8 @@ export async function pollOnce({
   // during the network round trip (a job_reply, another process). Spread the
   // CURRENT block and overwrite only the fields this tick owns, so a concurrent
   // write is not silently reverted.
-  let currentRemote = remote
   try {
-    currentRemote = readResultFn(jobId, env)?.remote ?? remote
+    currentRemote = readResultFn(jobId, env)?.remote ?? currentRemote
   } catch {
     // no persisted record (unit tests) — fall back to the passed snapshot
   }
@@ -125,18 +175,25 @@ export async function pollOnce({
   const branch = adapter.branchFromSession?.(session) ?? null
   const prUrl = summary?.prUrl ?? adapter.prUrlFromSession?.(session) ?? null
 
+  const remoteUpdate = {
+    ...currentRemote,
+    state: session.state,
+    branch: branch ?? currentRemote.branch ?? null,
+    prUrl: prUrl ?? currentRemote.prUrl ?? null,
+    activityCursor: lastToken,
+    seenActivityIds: cappedSeenActivityIds,
+    lastPolledAt: new Date(nowFn()).toISOString(),
+  }
+  if (isWaiting) {
+    remoteUpdate.pollingStoppedReason = 'awaiting_interaction'
+  } else if (currentRemote.pollingStoppedReason === 'awaiting_interaction') {
+    remoteUpdate.pollingStoppedReason = null
+  }
+
   updateResultFn(
     jobId,
     {
-      remote: {
-        ...currentRemote,
-        state: session.state,
-        branch: branch ?? currentRemote.branch ?? null,
-        prUrl: prUrl ?? currentRemote.prUrl ?? null,
-        activityCursor: lastToken,
-        seenActivityIds: cappedSeenActivityIds,
-        lastPolledAt: new Date(nowFn()).toISOString(),
-      },
+      remote: remoteUpdate,
     },
     env
   )
@@ -233,11 +290,19 @@ export async function pollUntilTerminal({
     }
 
     await sleepFn(interval)
-    interval = nextInterval(interval, {
-      sawNewActivity: tick.sawNewActivity,
-      minIntervalMs,
-      maxIntervalMs,
-      backoffFactor,
-    })
+    if (STATE_INTERVALS[tick.state]) {
+      interval = intervalForState(tick.state, {
+        current: interval,
+        sawNewActivity: tick.sawNewActivity,
+        backoffFactor,
+      })
+    } else {
+      interval = nextInterval(interval, {
+        sawNewActivity: tick.sawNewActivity,
+        minIntervalMs,
+        maxIntervalMs,
+        backoffFactor,
+      })
+    }
   }
 }
