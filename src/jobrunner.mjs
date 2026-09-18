@@ -108,6 +108,14 @@ export function startJob({
   // Lease TTL for this job's write lock (ms). Defaults to
   // AGENT_HUB_LEASE_TTL_MS / LEASE_TTL_MS_DEFAULT via resolveLeaseTtlMs.
   leaseTtlMs,
+  // A1 dispatch / C0 provenance fields
+  dispatchKey,
+  executionId,
+  parentExecutionId,
+  rootExecutionId,
+  attempt,
+  workflow_id,
+  step_id,
 }) {
   // Resolved BEFORE anything else — including learnings/timeout/createJob —
   // because a remote adapter (Jules) edits a branch on GitHub via its own
@@ -137,6 +145,13 @@ export function startJob({
       resolveEffectiveTimeoutSFn,
       selectLearningsFn,
       augmentTaskFn,
+      dispatchKey,
+      executionId,
+      parentExecutionId,
+      rootExecutionId,
+      attempt,
+      workflow_id,
+      step_id,
     })
   }
 
@@ -179,6 +194,13 @@ export function startJob({
     variant: effectiveVariant,
     sessionId,
     parentJobId,
+    dispatchKey,
+    executionId,
+    parentExecutionId,
+    rootExecutionId,
+    attempt,
+    workflow_id,
+    step_id,
   })
   appendEvent({ kind: 'job.queued', agent, model, cwd, title, jobId: job.jobId, taskType }, { env })
 

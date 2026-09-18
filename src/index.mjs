@@ -15,12 +15,14 @@ import { resumeRemoteJobs } from './cloud/runner.mjs'
 import { metricsTool } from './tools/insights.mjs'
 import { learningProposeTool } from './tools/learnings.mjs'
 import { scheduleStartupDiscovery, scheduleQuotaWarmup } from './startup.mjs'
+import { dispatch } from './dispatch.mjs'
 import {
   TASK_TYPES,
   LEARNING_TEXT_MAX,
   AgentStatusRow,
   RouteResult,
   DelegateResponse,
+  DispatchResponse,
   JobRecord,
   JobResultResponse,
   MetricsResponse,
@@ -168,6 +170,33 @@ export function buildServer() {
     },
     guard(({ agent, model, task, cwd, mode, timeoutS, title, variant, taskType }) =>
       delegateTool({ agent, model, task, cwd, mode, timeoutS, title, variant, taskType })
+    )
+  )
+
+  server.registerTool(
+    'dispatch',
+    {
+      title: 'Dispatch a task through routing, policy, and reservation',
+      description:
+        'Route, reserve write lock, and execute a task with automatic policy recovery (retry, fallback). ' +
+        'Deduplicates concurrent or recent dispatches with the same dispatchKey.',
+      inputSchema: {
+        task: z.string().min(1).describe('The prompt/task text.'),
+        cwd: z.string().min(1),
+        taskType: taskTypeArg.optional(),
+        mode: modeEnum.optional().default('read'),
+        workflowStep: z.string().optional().describe('Workflow step identifier used in key derivation.'),
+        dispatchKey: z.string().optional().describe('Explicit idempotency key. Defaults to sha256(task+cwd+taskType+workflowStep).'),
+        attempt: z.number().int().positive().optional().default(1),
+        parentExecutionId: z.string().optional(),
+        rootExecutionId: z.string().optional(),
+        timeoutS: z.number().int().positive().optional(),
+      },
+      outputSchema: DispatchResponse,
+      annotations: { readOnlyHint: false, openWorldHint: true },
+    },
+    guard(({ task, taskType, cwd, mode, workflowStep, dispatchKey, attempt, parentExecutionId, rootExecutionId, timeoutS }) =>
+      dispatch({ task, taskType, cwd, mode, workflowStep, dispatchKey, attempt, parentExecutionId, rootExecutionId, timeoutS })
     )
   )
 

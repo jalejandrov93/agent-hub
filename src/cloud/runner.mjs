@@ -260,6 +260,14 @@ export function startRemoteJob({
   readSourcesCacheFn = defaultReadSourcesCache,
   markAccountUsedFn = defaultMarkAccountUsed,
   refreshSourcesFn = defaultRefreshSources,
+  // A1 dispatch / C0 provenance fields
+  dispatchKey,
+  executionId,
+  parentExecutionId,
+  rootExecutionId,
+  attempt,
+  workflow_id,
+  step_id,
 }) {
   // Mirrors startJob: only a root turn gets curated learnings prepended. A
   // Jules job never resumes via a local sessionId (job_reply talks to the
@@ -299,6 +307,13 @@ export function startRemoteJob({
     learningIds,
     env,
     parentJobId,
+    dispatchKey,
+    executionId,
+    parentExecutionId,
+    rootExecutionId,
+    attempt,
+    workflow_id,
+    step_id,
   })
   appendEventFn({ kind: 'job.queued', agent, model, cwd, title, jobId: job.jobId, taskType }, { env })
 

@@ -135,6 +135,11 @@ export const JobRecord = z
     quality_score: z.number().nullable().optional(),
     verified: z.boolean().nullable().optional(),
     judge_verdict: z.string().nullable().optional(),
+    // A1 dispatch provenance fields
+    execution_id: z.string().nullable().optional(),
+    executionId: z.string().nullable().optional(),
+    dispatch_key: z.string().nullable().optional(),
+    dispatchKey: z.string().nullable().optional(),
   })
   .passthrough()
 
@@ -408,6 +413,21 @@ export const DelegateResponse = z
     parentJobId: nullableString,
     turnDepth: z.number().int().nonnegative().optional(),
     warning: nullableString,
+  })
+  .passthrough()
+
+export const DispatchResponse = z
+  .object({
+    job: JobRecord,
+    dispatchKey: z.string(),
+    executionId: z.string(),
+    candidate: z
+      .object({
+        agent: z.string(),
+        model: z.string(),
+        mode: z.string().optional(),
+      })
+      .passthrough(),
   })
   .passthrough()
 
