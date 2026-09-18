@@ -482,6 +482,21 @@ concurrent schedulers can't double-claim a node (`claimed_by` CAS in
 `onSuccess`/`onFailure` hooks for the future judge (C4). Example:
 `examples/software-pipeline.mjs` (research → implementation → review).
 
+### C1.1 execution hardening (`src/workflow/dsl.mjs`, `execution.mjs`)
+
+- `dispatch()` also returns an `ExecutionHandle {jobId, sessionId, abort()}`;
+  the engine awaits real completion via `waitExecution()` — a node succeeds
+  only on terminal job state, never on dispatch return. Timeout aborts first
+  (`cancelJob` locally, stop-wait remotely), then retries.
+- Nodes understand `waiting` (`user_feedback|plan_approval|external_event`):
+  `running→waiting→running→succeeded`, resumed without duplicating execution.
+- Conditions and fan-out `items` use a small safe DSL (`==,!=,===,!==,AND,
+  OR,NOT,exists` over `steps.*`) — no `new Function`/`eval` anywhere in `src/`.
+- All mutations go through `claimNode()` (sole `ready→running`) and
+  `transitionNode()` (`assertValidTransition` always); resume only revives a
+  `running` node whose lease expired *and* whose owner is dead, else it
+  re-adopts. A `fork()`-based test pins cross-process single execution.
+
 ### Write-mode gate
 
 A `delegate()`/`job_reply()` call with `mode: 'write'` requires `cwd` to be
