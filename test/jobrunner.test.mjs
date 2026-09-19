@@ -336,6 +336,161 @@ test('a failed job with partialText/sessionId on its error persists both — res
   assert.equal(fs.readFileSync(jobstore.responsePath(job.jobId), 'utf8'), 'partial answer so far')
 })
 
+test('finishJob fires the adapter\'s interruptArgv hook on a timeout with a recoverable sessionId, and records a job.interrupted event without touching the job\'s failed status/errorKind (E19)', async () => {
+  const home = tmpHome()
+  const { startJob, jobstore, eventlog } = await freshModules(home)
+  const calls = []
+  const runCommandFn = async (cmd, args, opts) => {
+    calls.push({ cmd, args, opts })
+    return { stdout: JSON.stringify({ interrupted: true }), stderr: '', code: 0, signal: null, timedOut: false }
+  }
+  const adapters = {
+    fake: {
+      id: 'fake',
+      cmd: process.execPath,
+      buildArgv: () => ['-e', SUCCESS_SCRIPT],
+      parseResult: () => ({ ok: true, text: '' }),
+      classifyError: () => ({ kind: 'timeout', retriable: true, message: 'fake timeout', sessionId: 'ses_abc' }),
+      interruptArgv: ({ sessionId }) => ['api', 'session.interrupt', '--param', `sessionID=${sessionId}`],
+      listModels: () => [],
+    },
+  }
+
+  const { job, done } = startJob({ agent: 'fake', model: 'x', task: 't', cwd: '/tmp', mode: 'read', adapterFor: (a) => adapters[a], runCommandFn })
+  await done
+
+  assert.equal(calls.length, 1, 'the interrupt argv must be run exactly once')
+  assert.equal(calls[0].cmd, process.execPath, 'the interrupt must be run with the adapter\'s own cmd')
+  assert.deepEqual(calls[0].args, ['api', 'session.interrupt', '--param', 'sessionID=ses_abc'])
+
+  const finalResult = jobstore.readResult(job.jobId)
+  assert.equal(finalResult.status, 'failed', 'the interrupt cleanup must never change the recorded status')
+  assert.equal(finalResult.errorKind, 'timeout', 'the interrupt cleanup must never change the recorded errorKind')
+
+  const events = eventlog.readTail({ n: 20 }).filter((e) => e.jobId === job.jobId)
+  const interrupted = events.find((e) => e.kind === 'job.interrupted')
+  assert.ok(interrupted, 'a job.interrupted event must be recorded')
+  assert.equal(interrupted.sessionId, 'ses_abc')
+  assert.equal(interrupted.interrupted, true)
+})
+
+test('finishJob recovers the interrupt sessionId from the job record when the timeout error itself carries none (a timeout resuming an existing session)', async () => {
+  const home = tmpHome()
+  const { startJob, jobstore, eventlog } = await freshModules(home)
+  const calls = []
+  const runCommandFn = async (cmd, args, opts) => {
+    calls.push({ cmd, args, opts })
+    return { stdout: JSON.stringify({ interrupted: false }), stderr: '', code: 0, signal: null, timedOut: false }
+  }
+  const adapters = {
+    fake: {
+      id: 'fake',
+      cmd: process.execPath,
+      buildArgv: () => ['-e', SUCCESS_SCRIPT],
+      parseResult: () => ({ ok: true, text: '' }),
+      classifyError: () => ({ kind: 'timeout', retriable: true, message: 'fake timeout' }),
+      interruptArgv: ({ sessionId }) => ['api', 'session.interrupt', '--param', `sessionID=${sessionId}`],
+      listModels: () => [],
+    },
+  }
+
+  const { job, done } = startJob({ agent: 'fake', model: 'x', task: 't', cwd: '/tmp', mode: 'read', sessionId: 'ses_resumed', adapterFor: (a) => adapters[a], runCommandFn })
+  await done
+
+  assert.equal(calls.length, 1)
+  assert.deepEqual(calls[0].args, ['api', 'session.interrupt', '--param', 'sessionID=ses_resumed'], 'falls back to the job record\'s own sessionId (see jobrunner.mjs finishJob\'s existing error.sessionId ?? current.sessionId fallback)')
+
+  const events = eventlog.readTail({ n: 20 }).filter((e) => e.jobId === job.jobId)
+  const interrupted = events.find((e) => e.kind === 'job.interrupted')
+  assert.equal(interrupted.interrupted, false, 'the CLI reports false when the session had already finished — still recorded honestly')
+})
+
+test('finishJob never attempts a server-side interrupt when the adapter has no interruptArgv hook, so agy/codex/copilot/jules stay unaffected', async () => {
+  const home = tmpHome()
+  const { startJob, eventlog } = await freshModules(home)
+  let called = false
+  const runCommandFn = async () => {
+    called = true
+    return { stdout: '{}', stderr: '', code: 0, signal: null, timedOut: false }
+  }
+  const adapters = {
+    fake: {
+      id: 'fake',
+      cmd: process.execPath,
+      buildArgv: () => ['-e', SUCCESS_SCRIPT],
+      parseResult: () => ({ ok: true, text: '' }),
+      classifyError: () => ({ kind: 'timeout', retriable: true, message: 'fake timeout', sessionId: 'ses_abc' }),
+      listModels: () => [],
+    },
+  }
+
+  const { job, done } = startJob({ agent: 'fake', model: 'x', task: 't', cwd: '/tmp', mode: 'read', adapterFor: (a) => adapters[a], runCommandFn })
+  await done
+
+  assert.equal(called, false, 'no interrupt hook means no interrupt attempt')
+  const events = eventlog.readTail({ n: 20 }).filter((e) => e.jobId === job.jobId)
+  assert.ok(!events.some((e) => e.kind === 'job.interrupted'))
+})
+
+test('finishJob never attempts a server-side interrupt when a non-timeout error carries a sessionId (e.g. a plain crash)', async () => {
+  const home = tmpHome()
+  const { startJob, eventlog } = await freshModules(home)
+  let called = false
+  const runCommandFn = async () => {
+    called = true
+    return { stdout: '{}', stderr: '', code: 0, signal: null, timedOut: false }
+  }
+  const adapters = {
+    fake: {
+      id: 'fake',
+      cmd: process.execPath,
+      buildArgv: () => ['-e', SUCCESS_SCRIPT],
+      parseResult: () => ({ ok: true, text: '' }),
+      classifyError: () => ({ kind: 'crash', retriable: false, message: 'fake crash', sessionId: 'ses_abc' }),
+      interruptArgv: ({ sessionId }) => ['api', 'session.interrupt', '--param', `sessionID=${sessionId}`],
+      listModels: () => [],
+    },
+  }
+
+  const { job, done } = startJob({ agent: 'fake', model: 'x', task: 't', cwd: '/tmp', mode: 'read', adapterFor: (a) => adapters[a], runCommandFn })
+  await done
+
+  assert.equal(called, false, 'the interrupt is a timeout-only cleanup, not a general-purpose one')
+  const events = eventlog.readTail({ n: 20 }).filter((e) => e.jobId === job.jobId)
+  assert.ok(!events.some((e) => e.kind === 'job.interrupted'))
+})
+
+test('a failing server-side interrupt attempt never throws into finalization, and the job still finalizes as failed/timeout', async () => {
+  const home = tmpHome()
+  const { startJob, jobstore, eventlog } = await freshModules(home)
+  const runCommandFn = async () => {
+    throw new Error('boom: interrupt command failed to spawn')
+  }
+  const adapters = {
+    fake: {
+      id: 'fake',
+      cmd: process.execPath,
+      buildArgv: () => ['-e', SUCCESS_SCRIPT],
+      parseResult: () => ({ ok: true, text: '' }),
+      classifyError: () => ({ kind: 'timeout', retriable: true, message: 'fake timeout', sessionId: 'ses_abc' }),
+      interruptArgv: ({ sessionId }) => ['api', 'session.interrupt', '--param', `sessionID=${sessionId}`],
+      listModels: () => [],
+    },
+  }
+
+  const { job, done } = startJob({ agent: 'fake', model: 'x', task: 't', cwd: '/tmp', mode: 'read', adapterFor: (a) => adapters[a], runCommandFn })
+  await done // must resolve, never reject
+
+  const finalResult = jobstore.readResult(job.jobId)
+  assert.equal(finalResult.status, 'failed')
+  assert.equal(finalResult.errorKind, 'timeout')
+
+  const events = eventlog.readTail({ n: 20 }).filter((e) => e.jobId === job.jobId)
+  const interrupted = events.find((e) => e.kind === 'job.interrupted')
+  assert.ok(interrupted, 'the failed attempt is still recorded, not silently swallowed')
+  assert.equal(interrupted.interrupted, null, 'unknown outcome when the interrupt command itself failed')
+})
+
 test('taskType is stored on result.json and carried on every job.* event', async () => {
   const home = tmpHome()
   const { startJob, jobstore, eventlog } = await freshModules(home)
@@ -645,4 +800,40 @@ test('cancelJob never leaves a spurious job.failed event alongside job.canceled 
   const kinds = events.map((e) => e.kind)
   assert.ok(kinds.includes('job.canceled'))
   assert.ok(!kinds.includes('job.failed'), `expected no spurious job.failed, got: ${kinds.join(', ')}`)
+})
+
+test('cancelJob also interrupts the server-side session, not just the local client', async () => {
+  // A user cancel kills the process group exactly like a timeout does, and
+  // finishJob no-ops once it sees status:'canceled' — so without this the
+  // opencode session keeps running on the shared server, still spending
+  // tokens and still editing the worktree. Cancelling is precisely when the
+  // user wants it stopped, so it must not be weaker than the timeout path.
+  const home = tmpHome()
+  const { startJob, cancelJob, eventlog } = await freshModules(home)
+
+  const EMIT_SESSION_THEN_HANG = `console.log(JSON.stringify({type:"step_start",sessionID:"ses_cancel"})); process.on("SIGINT",()=>{}); process.on("SIGTERM",()=>{}); setInterval(()=>{},1000)`
+  const calls = []
+  const adapter = {
+    ...fakeAdapter(EMIT_SESSION_THEN_HANG),
+    sessionIdFrom: (stdout) => (stdout.includes('ses_cancel') ? 'ses_cancel' : null),
+    interruptArgv: ({ sessionId }) => ['api', 'session.interrupt', '--param', `sessionID=${sessionId}`],
+  }
+  const runCommandFn = async (cmd, args) => {
+    calls.push({ cmd, args })
+    return { stdout: '{"interrupted":true}', stderr: '', code: 0, timedOut: false }
+  }
+
+  const { job, done } = startJob({
+    agent: 'fake', model: 'x', task: 't', cwd: '/tmp', mode: 'read', timeoutS: 30,
+    adapterFor: () => adapter, runCommandFn,
+  })
+  await new Promise((r) => setTimeout(r, 300)) // let the child emit its first line
+
+  await cancelJob(job.jobId)
+
+  assert.equal(calls.length, 1, `expected one interrupt attempt, got ${JSON.stringify(calls)}`)
+  assert.deepEqual(calls[0].args, ['api', 'session.interrupt', '--param', 'sessionID=ses_cancel'])
+  assert.ok(eventlog.readTail({ n: 20 }).some((e) => e.jobId === job.jobId && e.kind === 'job.interrupted'))
+
+  await done
 })

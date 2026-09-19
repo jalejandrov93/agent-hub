@@ -34,6 +34,7 @@ export const EVENT_KINDS = [
   'job.finished',
   'job.failed',
   'job.canceled',
+  'job.interrupted',
   'subagent.start',
   'subagent.stop',
   'proposal.created',

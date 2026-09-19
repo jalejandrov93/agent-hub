@@ -41,6 +41,22 @@ export function stdinFor({ prompt }) {
   return prompt
 }
 
+/**
+ * Optional adapter hook (see jobrunner.mjs): on a timeout, the kill ladder's
+ * SIGINT is only best-effort (opencode's own SIGINT handler fires
+ * `session.interrupt` but swallows its rejection) and a SIGKILL never
+ * reaches the server at all, so the server-side session can be left running
+ * and spending tokens after this process has moved on (E19). This builds
+ * the argv for the verified, idempotent cleanup call:
+ * `opencode api session.interrupt --param sessionID=<id>`, which returns
+ * `{"interrupted": <bool>}` and exit 0, including when the session already
+ * finished (returns `false`). No other adapter defines this hook, so this
+ * fallback is opencode-only.
+ */
+export function interruptArgv({ sessionId }) {
+  return ['api', 'session.interrupt', '--param', `sessionID=${sessionId}`]
+}
+
 export function parseResult(stdout) {
   const events = parseJsonl(stdout)
   const textEvents = events.filter((e) => e.type === 'text')
@@ -89,12 +105,30 @@ export function parseResult(stdout) {
   }
 }
 
+/**
+ * Recover the opencode session id from whatever stdout was captured. Every
+ * NDJSON line carries a top-level sessionID (E19), so this works on the
+ * partial output of a run that was killed before it could finish -- which is
+ * exactly when the id is needed, to interrupt the still-live server-side
+ * session (see interruptArgv).
+ */
+export function sessionIdFrom(stdout) {
+  return parseJsonl(stdout).find((e) => e.sessionID)?.sessionID ?? null
+}
+
 export function classifyError(stdout, exitInfo = {}) {
   if (exitInfo.timedOut) {
+    // Every NDJSON line carries a top-level sessionID (E19), so it is
+    // recoverable from partial stdout even when the run never reached a
+    // terminal parse. jobrunner uses this to fire a best-effort server-side
+    // session.interrupt (see interruptArgv below): our own SIGINT is only
+    // best-effort (opencode's handler swallows a rejected session.interrupt
+    // call), and a SIGKILL never reaches the server at all.
     return {
       kind: 'timeout',
       retriable: true,
       message: 'opencode hard timeout (it handles SIGINT but not SIGTERM; the process group was SIGKILLed)',
+      sessionId: sessionIdFrom(stdout),
     }
   }
 

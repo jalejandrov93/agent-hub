@@ -1,5 +1,5 @@
 import fs from 'node:fs'
-import { spawnDetached, runWithTimeout as defaultRunWithTimeout, killProcessGroup } from './process.mjs'
+import { spawnDetached, runWithTimeout as defaultRunWithTimeout, killProcessGroup, runCommand as defaultRunCommand } from './process.mjs'
 import { createJob, updateResult, appendStdout, stdoutPath, responsePath, readResult } from './jobstore.mjs'
 import { appendEvent } from './eventlog.mjs'
 import { adapterFor as defaultAdapterFor } from './adapters/index.mjs'
@@ -18,6 +18,13 @@ import { startRemoteJob as defaultStartRemoteJob } from './cloud/runner.mjs'
 // (jobstore.mjs) covers jobs left running by a process that died without
 // ever calling cancelJob.
 const active = new Map()
+
+// Bound on the best-effort server-side session.interrupt cleanup fired on an
+// opencode-style timeout (E19). Short and fixed, not derived from the job's
+// own timeoutS/KILL_GRACE_S: this is cleanup after the job has already been
+// finalized as failed, so it must never meaningfully delay that finalization
+// even if the CLI/server is unresponsive.
+const INTERRUPT_TIMEOUT_MS = 5000
 
 /** Lease TTL for a write job's lock: explicit opt wins, then
  * AGENT_HUB_LEASE_TTL_MS, then the worktree default. */
@@ -89,6 +96,7 @@ export function startJob({
   spawn = spawnDetached,
   adapterFor = defaultAdapterFor,
   runWithTimeout = defaultRunWithTimeout,
+  runCommandFn = defaultRunCommand,
   variant,
   sessionId,
   parentJobId,
@@ -287,7 +295,10 @@ export function startJob({
   updateResult(job.jobId, { status: 'running', pid: child.pid, pgid: child.pid }, env)
   const sandbox = sandboxTelemetry(childEnv, process.env, sandboxProfile)
   appendEvent({ kind: 'job.started', agent, model, cwd, title, jobId: job.jobId, taskType, sandbox, harness: harness ?? null, waitMode: waitMode ?? null }, { env })
-  active.set(job.jobId, { pgid: child.pid, leaseToken })
+  // adapter/runCommandFn are stashed so cancelJob can reach them: a user
+  // cancel kills the same process group a timeout does, and must interrupt
+  // the server-side session just as the timeout path does.
+  active.set(job.jobId, { pgid: child.pid, leaseToken, adapter, runCommandFn })
   if (mode === 'write') startHeartbeat({ jobId: job.jobId, cwd, token: leaseToken, ttlMs: leaseTtlMs, env })
 
   // Hard-kill at timeoutS + KILL_GRACE_S, not at timeoutS itself: agy is
@@ -303,7 +314,7 @@ export function startJob({
 
   const done = exitPromise
     .then(({ code, timedOut }) =>
-      finishJob({ jobId: job.jobId, agent, model, cwd, title, adapter, mode, env, timedOut, exitCode: code, taskType, snapshot, takeSnapshotFn, diffSnapshotsFn, formatViolationFn, harness, waitMode })
+      finishJob({ jobId: job.jobId, agent, model, cwd, title, adapter, mode, env, timedOut, exitCode: code, taskType, snapshot, takeSnapshotFn, diffSnapshotsFn, formatViolationFn, harness, waitMode, runCommandFn })
     )
     .finally(() => {
       stopHeartbeat(job.jobId)
@@ -317,7 +328,64 @@ export function startJob({
   return { job: readResult(job.jobId, env), done }
 }
 
-function finishJob({
+/**
+ * Best-effort server-side session interrupt, fired when a job finalizes as
+ * timed out (E19/E13/T10 — see odd/tasks/opencode-v2-migration.md). Only
+ * opencode defines `adapter.interruptArgv`; every other adapter (agy, codex,
+ * copilot, jules) is entirely unaffected since this is a no-op without it.
+ *
+ * This must never throw into the caller's finalization path and must never
+ * block it beyond INTERRUPT_TIMEOUT_MS — both are enforced here rather than
+ * relied upon from the adapter or runCommandFn.
+ */
+async function attemptServerInterrupt({ adapter, agent, model, cwd, title, jobId, taskType, sessionId, env, harness, waitMode, runCommandFn }) {
+  if (!sessionId || typeof adapter.interruptArgv !== 'function') return
+
+  let argv
+  try {
+    argv = adapter.interruptArgv({ sessionId })
+  } catch {
+    return // a broken hook must not affect finalization
+  }
+  if (!Array.isArray(argv) || argv.length === 0) return
+
+  let interrupted = null
+  let ranOk = false
+  try {
+    const result = await runCommandFn(adapter.cmd, argv, { env, timeoutMs: INTERRUPT_TIMEOUT_MS })
+    ranOk = result?.code === 0 && !result?.timedOut
+    if (ranOk) {
+      try {
+        const parsed = JSON.parse(result.stdout)
+        interrupted = typeof parsed?.interrupted === 'boolean' ? parsed.interrupted : null
+      } catch {
+        interrupted = null // stdout wasn't the expected JSON envelope — still ran, outcome unknown
+      }
+    }
+  } catch {
+    ranOk = false // the interrupt command itself failed to run — best-effort, swallow it
+  }
+
+  appendEvent(
+    {
+      kind: 'job.interrupted',
+      agent,
+      model,
+      cwd,
+      title,
+      jobId,
+      taskType,
+      sessionId,
+      interrupted,
+      summary: ranOk ? `server-side session interrupt attempted (interrupted=${interrupted})` : 'server-side session interrupt attempt failed to run',
+      harness,
+      waitMode,
+    },
+    { env }
+  )
+}
+
+async function finishJob({
   jobId,
   agent,
   model,
@@ -335,6 +403,7 @@ function finishJob({
   formatViolationFn = defaultFormatViolation,
   harness = null,
   waitMode = null,
+  runCommandFn = defaultRunCommand,
 }) {
   const current = readResult(jobId, env)
   if (current.status === 'canceled') return // cancelJob already finalized this job
@@ -382,6 +451,28 @@ function finishJob({
       { kind: 'job.failed', agent, model, cwd, title, jobId, errorKind: error.kind, taskType, summary: summarize(error.message), harness: eventHarness, waitMode: eventWaitMode },
       { env }
     )
+    if (error.kind === 'timeout') {
+      // Best-effort cleanup only (E19): a timeout means our own SIGINT was
+      // at best best-effort (opencode's handler swallows a rejected
+      // session.interrupt) and a SIGKILL never reached the server at all, so
+      // the session may still be running there. This must never affect the
+      // status/errorKind already recorded above, and must never throw or
+      // hang finalization — see attemptServerInterrupt.
+      await attemptServerInterrupt({
+        adapter,
+        agent,
+        model,
+        cwd,
+        title,
+        jobId,
+        taskType,
+        sessionId: error.sessionId ?? current.sessionId ?? null,
+        env,
+        harness: eventHarness,
+        waitMode: eventWaitMode,
+        runCommandFn,
+      })
+    }
     return
   }
 
@@ -467,6 +558,35 @@ export async function cancelJob(jobId, { env = process.env } = {}) {
   if (pgid) {
     await killProcessGroup(pgid, {})
   }
+
+  // Killing the local client does not stop the run: in opencode v2 the shared
+  // background server owns execution (E19), so without this the session keeps
+  // spending tokens and editing the worktree after the user cancelled it.
+  // Best-effort and bounded, exactly like the timeout path.
+  const adapter = entry?.adapter
+  if (adapter) {
+    let stdout = ''
+    try {
+      stdout = fs.readFileSync(stdoutPath(jobId, env), 'utf8')
+    } catch {
+      // nothing captured yet — sessionId simply stays unrecoverable below
+    }
+    await attemptServerInterrupt({
+      adapter,
+      agent: result.agent,
+      model: result.model,
+      cwd: result.cwd,
+      title: result.title,
+      jobId,
+      taskType: result.taskType ?? null,
+      sessionId: adapter.sessionIdFrom?.(stdout) ?? result.sessionId ?? null,
+      env,
+      harness: result.harness ?? null,
+      waitMode: result.waitMode ?? null,
+      runCommandFn: entry?.runCommandFn ?? defaultRunCommand,
+    })
+  }
+
   appendEvent(
     { kind: 'job.canceled', agent: result.agent, model: result.model, cwd: result.cwd, title: result.title, jobId, taskType: result.taskType ?? null, harness: result.harness ?? null, waitMode: result.waitMode ?? null },
     { env }

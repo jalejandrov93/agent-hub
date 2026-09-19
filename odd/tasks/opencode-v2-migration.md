@@ -80,7 +80,7 @@ sliced into the work units below. Push/PR remain the user's decision.
 - [x] **T3 — kill ladder.** `src/process.mjs`: SIGINT first (E13), so the client interrupts
       the server-side session, then the existing SIGTERM→SIGKILL ladder. Fix the now-false
       "opencode ignores SIGTERM" comment. Route: delegated.
-- [ ] **T10 — explicit server-side interrupt on timeout.** SIGINT is only best-effort: the
+- [x] **T10 — explicit server-side interrupt on timeout.** SIGINT is only best-effort: the
       handler fires `session.interrupt` and swallows its rejection, and a SIGKILL bypasses it
       entirely, leaving a live server-side session (E19). Every NDJSON line carries
       `sessionID`, so the id is already known from partial stdout at timeout. On an opencode
@@ -103,7 +103,7 @@ sliced into the work units below. Push/PR remain the user's decision.
       verified end to end with the real binary (`npm run selftest` now prints
       `opencode  : opencode v2.0.10` with no WARN). Replacing the fake `opencode-go/default`
       is **still open** — see "Open decision". Route: inline (mechanical, known lines).
-- [ ] **T9 — fixtures, tests, docs.** Regenerate from the live captures; delete
+- [x] **T9 — fixtures, tests, docs.** Regenerate from the live captures; delete
       `models-verbose.txt`; update the skill reference and README. Route: delegated.
 
 ## Open decision
@@ -157,6 +157,24 @@ guessing a paid model.
   would have been dropped and reported as "not listed". Re-verified after the change that all
   95 real catalog ids are still accepted and that HTTP status lines, usage banners and JSON
   fragments are still rejected.
+- **T9 + T10 done** (delegated writer, strict TDD). New adapter hooks `interruptArgv()` and
+  `sessionIdFrom()`; a bounded, best-effort `attemptServerInterrupt()` in `jobrunner` that can
+  never throw into or stall finalization; a new `job.interrupted` event (added to both
+  `schemas.mjs` and `eventlog.mjs`, which an existing test keeps in parity).
+  **Parent closed a gap the writer scoped out**: the interrupt fired only on `timeout`, but
+  `cancelJob` kills the same process group and `finishJob` no-ops once it sees `canceled`, so a
+  *user cancel* orphaned the server-side session just as badly — and cancelling is exactly when
+  the user wants it stopped. `cancelJob` now fires the same bounded interrupt, recovering the
+  session id from partial stdout. Covered by a test.
+  Parent spot check: `npm test` -> 1014 tests, 1006 pass, 0 fail, 8 cancelled.
+
+## Finding for the user (not acted on)
+
+`.opencode/package.json` in this repo pins `@opencode-ai/plugin` 1.18.30 — a v1 plugin, and v2's
+migration guide states plainly that V1 plugin implementations do not run in V2. The directory is
+gitignored, so nothing was changed; it is a local dev-environment artifact, independent of this
+codebase change.
+
 - Work unit 2 (`69b0d4d`) assessed `medium`, `review_due: true` (`slice_budget_reached`).
   Native review was **not re-attempted**: the defect above is deterministic and already
   reproduced twice on this build, and the contract is explicit that an unavailable verifier's

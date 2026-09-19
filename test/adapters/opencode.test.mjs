@@ -3,7 +3,7 @@ import assert from 'node:assert/strict'
 import fs from 'node:fs'
 import path from 'node:path'
 import { fileURLToPath } from 'node:url'
-import { buildArgv, stdinFor, parseResult, classifyError, listModels } from '../../src/adapters/opencode.mjs'
+import { sessionIdFrom, buildArgv, stdinFor, parseResult, classifyError, listModels, interruptArgv } from '../../src/adapters/opencode.mjs'
 
 const FIXTURES = path.join(path.dirname(fileURLToPath(import.meta.url)), '..', 'fixtures', 'opencode')
 const read = (name) => fs.readFileSync(path.join(FIXTURES, name), 'utf8')
@@ -151,6 +151,21 @@ test('classifyError timeout message reflects that opencode handles SIGINT but no
   assert.doesNotMatch(error.message, /ignores SIGTERM/)
 })
 
+test('classifyError recovers sessionId from partial NDJSON stdout on timeout, since a timed-out run may never reach a terminal parse (E19)', () => {
+  const error = classifyError(read('success.jsonl'), { timedOut: true })
+  assert.equal(error.sessionId, 'ses_f6f0a1e89ffe702DvBLQmWfcpn')
+})
+
+test('classifyError returns a null sessionId on timeout when stdout has no NDJSON at all', () => {
+  const error = classifyError('', { timedOut: true })
+  assert.equal(error.sessionId, null)
+})
+
+test('interruptArgv builds the argv that fires the verified `opencode api session.interrupt --param sessionID=<id>` invocation (E19)', () => {
+  const argv = interruptArgv({ sessionId: 'ses_f6f0a1e89ffe702DvBLQmWfcpn' })
+  assert.deepEqual(argv, ['api', 'session.interrupt', '--param', 'sessionID=ses_f6f0a1e89ffe702DvBLQmWfcpn'])
+})
+
 test('classifyError no longer special-cases a session.error event (v2 only emits "error", E18)', () => {
   const lines = [
     JSON.stringify({ type: 'text', sessionID: 's1', part: { text: 'partial', messageID: 'm1' } }),
@@ -230,4 +245,18 @@ test('listModels fallback accepts a nested model id (provider/vendor/model#varia
     models.map((m) => m.id),
     ['openrouter/anthropic/claude-sonnet-4.5', 'opencode/big-pickle']
   )
+})
+
+test('sessionIdFrom recovers the session id from partial NDJSON stdout', () => {
+  // A canceled or timed-out run never reaches a terminal parse, but every
+  // line carries a top-level sessionID (E19), so the id needed to interrupt
+  // the server-side session is already in whatever stdout was captured.
+  const partial = [
+    '[skill-registry] skipping refresh: not a project root: /',
+    JSON.stringify({ type: 'step_start', sessionID: 'ses_abc', part: { messageID: 'm1' } }),
+    '{ truncated mid-line',
+  ].join('\n')
+
+  assert.equal(sessionIdFrom(partial), 'ses_abc')
+  assert.equal(sessionIdFrom(''), null)
 })
