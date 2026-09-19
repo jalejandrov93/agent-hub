@@ -148,6 +148,13 @@ guessing a paid model.
   STATUS re-entered clean. **Outcome for this work unit: declined — unreviewed, delivery under
   ordinary repository policy.**
 
+- Work unit 2 (`69b0d4d`) assessed `medium`, `review_due: true` (`slice_budget_reached`).
+  Native review was **not re-attempted**: the defect above is deterministic and already
+  reproduced twice on this build, and the contract is explicit that an unavailable verifier's
+  typed result is preserved rather than retried indefinitely. Outcome recorded as
+  **unavailable — upstream #4804**. RDD stays enabled; nothing was disabled or worked around.
+  Re-attemptable at any time once a fix ships in the stable channel.
+
 ## Next step
 
 T5 + T6 (model discovery via `api model.list`, and dropping the provider fan-out).
