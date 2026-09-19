@@ -91,10 +91,10 @@ sliced into the work units below. Push/PR remain the user's decision.
 - [x] **T4 — parseResult.** Take only the last assistant message's `text` parts (E7); sum
       `tokens` since there is no `total` (E5); tolerate a missing `step_finish` (E6).
       Route: delegated.
-- [ ] **T5 — model discovery.** `modelsArgv('opencode')` → `opencode api model.list`;
+- [x] **T5 — model discovery.** `modelsArgv('opencode')` → `opencode api model.list`;
       `listModels` parses `{data:[…]}`; fall back to the flat `opencode models` list when
       the API call fails. Route: delegated.
-- [ ] **T6 — drop the provider fan-out.** Remove `opencodeProviders()` and both
+- [x] **T6 — drop the provider fan-out.** Remove `opencodeProviders()` and both
       `if (agent === 'opencode')` branches in `discovery.mjs` and `preflight.mjs`.
       Route: delegated.
 - [x] **T7 — classifyError + exit codes.** Use the exit code (E16): 130 is an interrupt,
@@ -148,6 +148,13 @@ guessing a paid model.
   STATUS re-entered clean. **Outcome for this work unit: declined — unreviewed, delivery under
   ordinary repository policy.**
 
+- **T5 + T6 done** (delegated writer, strict TDD). Parent spot check: 1004 tests,
+  995 pass, 8 cancelled, 1 intermittent failure matching the base profile above.
+  Parent hardened one gap: the fallback id parser rejected nested ids
+  (`openrouter/anthropic/claude-sonnet-4.5`), which v2 documents as valid, so such a model
+  would have been dropped and reported as "not listed". Re-verified after the change that all
+  95 real catalog ids are still accepted and that HTTP status lines, usage banners and JSON
+  fragments are still rejected.
 - Work unit 2 (`69b0d4d`) assessed `medium`, `review_due: true` (`slice_budget_reached`).
   Native review was **not re-attempted**: the defect above is deterministic and already
   reproduced twice on this build, and the contract is explicit that an unavailable verifier's
@@ -155,6 +162,22 @@ guessing a paid model.
   **unavailable — upstream #4804**. RDD stays enabled; nothing was disabled or worked around.
   Re-attemptable at any time once a fix ships in the stable channel.
 
+## Test-suite baseline (honest record)
+
+This repo's suite is not clean on the base and never was during this work. Measured:
+
+- `test/quota-codexbar.test.mjs` run in isolation: 8 tests, **0 pass, 0 fail, 8 cancelled** —
+  the whole file is inert (`cancelledByParent`). Present on the base.
+- The base (`dev`, all of this branch's changes stashed) reports **1 fail + 8 cancelled**.
+- Under full-suite parallel load one test fails intermittently; it moves between
+  `test/worktree-lease.test.mjs` ("old holder cannot release the new holder lock after reclaim")
+  and the codexbar set. `worktree-lease` passes **5/5 in isolation**. Both are timing-sensitive
+  and neither touches opencode, discovery or preflight.
+
+So "0 fail" on this branch is not claimed. What is claimed: every opencode-related file passes
+deterministically, and the branch's failure profile matches the base's. Cleaning up that flake
+is separate work, out of this feature's scope.
+
 ## Next step
 
-T5 + T6 (model discovery via `api model.list`, and dropping the provider fan-out).
+T8 (registry + tested version) and T9 (fixtures, docs), then T10 (server-side interrupt).

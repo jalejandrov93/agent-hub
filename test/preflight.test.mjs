@@ -137,8 +137,8 @@ test('a single billing failure opens the breaker immediately (no threshold wait,
 
   const { runPreflight } = await fresh(home)
   const runner = fakeRunner([
-    ['--version', { stdout: '1.18.30', stderr: '', code: 0 }],
-    [/models|help config/, { stdout: 'deepseek/deepseek-v4-pro\n{\n"providerID":"deepseek",\n"id":"deepseek-v4-pro",\n"name":"n"\n}\n', stderr: '', code: 0 }],
+    ['--version', { stdout: '2.0.10', stderr: '', code: 0 }],
+    ['api model.list', { stdout: JSON.stringify({ location: { directory: '/tmp' }, data: [{ id: 'deepseek-v4-pro', providerID: 'deepseek', name: 'n' }] }), stderr: '', code: 0 }],
   ])
 
   const entry = await runPreflight({ agent: 'opencode', model: 'deepseek/deepseek-v4-pro', cwd: '/tmp', commandRunner: runner, level: 'L2' })
@@ -360,6 +360,42 @@ test('agentsStatus lists the models-list command only once for 3 pairs of the sa
   assert.ok(results.every((r) => r.status === 'ready'))
   const modelsCalls = runner.calls.filter((c) => c.args.includes('models'))
   assert.equal(modelsCalls.length, 1, 'the models-list command must be spawned once, not once per pair')
+})
+
+test('agentsStatus for opencode issues a single `api model.list` call even when pairs span multiple providers (T6: fan-out removed)', async () => {
+  const home = tmpHome()
+  const { agentsStatus } = await fresh(home)
+  const runner = fakeRunner([
+    ['--version', { stdout: '2.0.10', stderr: '', code: 0 }],
+    [
+      'api model.list',
+      {
+        stdout: JSON.stringify({
+          location: { directory: '/tmp' },
+          data: [
+            { id: 'muse-spark-1.3-contributor-free', providerID: 'opencode', name: 'Muse Spark' },
+            { id: 'deepseek-v4-flash', providerID: 'deepseek', name: 'DeepSeek Flash' },
+          ],
+        }),
+        stderr: '',
+        code: 0,
+      },
+    ],
+  ])
+
+  const results = await agentsStatus({
+    agents: [
+      { agent: 'opencode', model: 'opencode/muse-spark-1.3-contributor-free' },
+      { agent: 'opencode', model: 'deepseek/deepseek-v4-flash' },
+    ],
+    cwd: '/tmp',
+    commandRunner: runner,
+  })
+
+  assert.equal(results.length, 2)
+  assert.ok(results.every((r) => r.status === 'ready'))
+  const modelsCalls = runner.calls.filter((c) => c.args.join(' ') === 'api model.list')
+  assert.equal(modelsCalls.length, 1, 'v2\'s catalog call is not provider-scoped, so one call must cover pairs from different providers')
 })
 
 test('agentsStatus preserves the input pair order in its results', async () => {

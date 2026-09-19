@@ -160,13 +160,48 @@ test('classifyError no longer special-cases a session.error event (v2 only emits
   assert.equal(error, null, 'session.error is not a recognized v2 event type, so it is ignored and the text event still counts as success')
 })
 
-test('listModels parses the real `opencode models opencode --verbose` fixture', () => {
-  const models = listModels(read('models-verbose.txt'))
-  assert.equal(models.length, 7)
+test('listModels parses the real `opencode api model.list` JSON envelope (v2 catalog, E9)', () => {
+  const models = listModels(read('model-list.json'))
+  assert.equal(models.length, 3)
   const byId = Object.fromEntries(models.map((m) => [m.id, m]))
-  assert.ok(byId['opencode/muse-spark-1.3-contributor-free'])
-  assert.equal(byId['opencode/muse-spark-1.3-contributor-free'].cost.input, 0)
-  assert.equal(byId['opencode/nemotron-3-ultra-free'].limit.context, 1000000)
+  assert.ok(byId['opencode/muse-spark-1.3-contributor-free'], 'id is rebuilt as providerID/id, matching DELEGATION_MAP keys exactly')
+  assert.ok(byId['opencode/jev-1.13-free'], 'a free model with no variants and capabilities.tools:false still comes through')
+  assert.ok(byId['deepseek/deepseek-v4-flash'], 'a paid model on a different provider is included in the same single-call catalog')
+  assert.equal(byId['opencode/muse-spark-1.3-contributor-free'].label, 'Muse Spark 1.3 Free')
+})
+
+test('listModels passes cost/limit/variants through untouched in their v2 shapes (array cost, {context,output} limit)', () => {
+  const models = listModels(read('model-list.json'))
+  const byId = Object.fromEntries(models.map((m) => [m.id, m]))
+
+  const free = byId['opencode/jev-1.13-free']
+  assert.ok(Array.isArray(free.cost), 'v2 cost is an array, unlike v1\'s single object')
+  assert.equal(free.cost[0].input, 0)
+  assert.equal(free.limit.context, 64000)
+  assert.deepEqual(free.variants, [], 'a model with no reasoning variants keeps an empty array, not undefined')
+
+  const withVariants = byId['opencode/muse-spark-1.3-contributor-free']
+  assert.equal(withVariants.variants.length, 5)
+
+  const paid = byId['deepseek/deepseek-v4-flash']
+  assert.ok(paid.cost[0].input > 0)
+})
+
+test('listModels falls back to parsing bare "<provider>/<id>" lines when stdout is not the JSON envelope (e.g. the server is down)', () => {
+  const stdout = 'opencode/muse-spark-1.3-contributor-free\ndeepseek/deepseek-v4-flash\n'
+  const models = listModels(stdout)
+  assert.deepEqual(models, [{ id: 'opencode/muse-spark-1.3-contributor-free' }, { id: 'deepseek/deepseek-v4-flash' }])
+})
+
+test('listModels\'s fallback parser rejects stray non-id lines instead of treating them as fake models', () => {
+  const stdout = ['HTTP/1.1 400 Bad Request', '', 'opencode/muse-spark-1.3-contributor-free', 'usage: opencode [options]', '{"error":"boom"}'].join('\n')
+  const models = listModels(stdout)
+  assert.deepEqual(models, [{ id: 'opencode/muse-spark-1.3-contributor-free' }])
+})
+
+test('listModels returns an empty array (never throws) for stdout that matches neither format', () => {
+  const models = listModels('opencode: command not found\n')
+  assert.deepEqual(models, [])
 })
 
 test('parseResult tolerates a tokens object missing a component instead of reporting NaN', () => {
@@ -180,4 +215,19 @@ test('parseResult tolerates a tokens object missing a component instead of repor
 
   const result = parseResult(stdout)
   assert.equal(result.tokens, 15)
+})
+
+test('listModels fallback accepts a nested model id (provider/vendor/model#variant)', () => {
+  // v2 documents the id format as provider/model#variant where the provider
+  // ends at the FIRST slash and the model itself may contain more, e.g.
+  // openrouter/anthropic/claude-sonnet-4.5. No provider configured on this
+  // machine produces one today, but silently dropping such a model from the
+  // catalog would mark it unavailable with a misleading "model not listed".
+  const stdout = ['openrouter/anthropic/claude-sonnet-4.5', 'opencode/big-pickle'].join('\n')
+
+  const models = listModels(stdout)
+  assert.deepEqual(
+    models.map((m) => m.id),
+    ['openrouter/anthropic/claude-sonnet-4.5', 'opencode/big-pickle']
+  )
 })

@@ -252,8 +252,9 @@ function isFreshDiscoveryRow(entry) {
  * Resolve one shared {modelId: model} map for every pair of `agent` in this
  * agentsStatus() batch, so runPreflight's L1 spawns the models-list command
  * at most once per agent (not once per pair). Prefers a fresh discovery.json
- * row; otherwise spawns live, once per agent (opencode: once per distinct
- * provider actually requested, since its catalog command is provider-scoped).
+ * row; otherwise spawns live, once per agent — opencode's v2 catalog call
+ * (`api model.list`) covers every provider in one shot, so it needs no
+ * per-provider special case here either (E9).
  * Returns null on any failure/timeout so callers fall back to runPreflight's
  * own per-pair spawn — the pre-existing, safe "degraded on timeout" path.
  */
@@ -269,16 +270,6 @@ async function resolveModelsById({ agent, pairs, cwd, env, commandRunner, refres
 
   const adapter = adapterFor(agent)
   const modelsById = {}
-
-  if (agent === 'opencode') {
-    const providers = new Set(pairs.map((p) => String(p.model).split('/')[0] || 'opencode'))
-    for (const provider of providers) {
-      const result = await commandRunner(adapter.cmd, modelsArgv(agent, `${provider}/probe`), { cwd, env, timeoutMs: 60_000 })
-      if (result?.timedOut || !result?.stdout) return null
-      for (const m of adapter.listModels(result.stdout)) modelsById[m.id] = m
-    }
-    return modelsById
-  }
 
   const result = await commandRunner(adapter.cmd, modelsArgv(agent, pairs[0]?.model), { cwd, env, timeoutMs: 60_000 })
   if (result?.timedOut || !result?.stdout) return null

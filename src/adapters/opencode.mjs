@@ -131,35 +131,65 @@ export function classifyError(stdout, exitInfo = {}) {
 }
 
 /**
- * Parse `opencode models <provider> --verbose`: repeated blocks of
- * "<provider>/<id>" followed by a pretty-printed JSON object.
+ * v1's `models <provider> --verbose` scrape is gone (E8): the machine-
+ * readable catalog is now one server-side call, `opencode api model.list`,
+ * whose stdout is a JSON envelope `{location, data:[...]}` covering every
+ * provider in one shot (E9). Each entry becomes `{id, label, cost, limit,
+ * variants}`; `id` is rebuilt as `${providerID}/${id}` because that exact
+ * string is the key preflight.mjs compares by strict equality against
+ * DELEGATION_MAP/MODEL_REGISTRY (see buildArgv's doc above) -- getting this
+ * wrong silently marks every model unavailable. `cost` (now an array) and
+ * `limit` (`{context, output}`) are passed through as-is: nothing in this
+ * codebase consumes them today, so there is no existing shape to preserve.
+ *
+ * Fallback: if stdout is not that JSON envelope (server down, a refusal, or
+ * any other malformed response), this parses it instead as the flat
+ * `opencode models` output -- one bare "<provider>/<id>" per line -- and
+ * returns those ids with no metadata. Returning ids without metadata still
+ * lets preflight's L1 catalog check pass; returning an empty array here would
+ * mark every model unavailable instead.
  */
 export function listModels(stdout) {
-  const lines = stdout.split(/\r?\n/)
-  const models = []
-  let i = 0
-  while (i < lines.length) {
-    const header = lines[i].trim()
-    if (/^[\w.-]+\/[\w.-]+$/.test(header) && lines[i + 1]?.trim() === '{') {
-      let depth = 0
-      const block = []
-      let j = i + 1
-      for (; j < lines.length; j++) {
-        block.push(lines[j])
-        depth += (lines[j].match(/{/g) || []).length
-        depth -= (lines[j].match(/}/g) || []).length
-        if (depth === 0) break
-      }
-      try {
-        const obj = JSON.parse(block.join('\n'))
-        models.push({ id: `${obj.providerID}/${obj.id}`, label: obj.name, cost: obj.cost, limit: obj.limit })
-      } catch {
-        // skip a malformed block rather than aborting the whole parse
-      }
-      i = j + 1
-    } else {
-      i++
-    }
+  return parseModelListEnvelope(stdout) ?? parseFlatModelList(stdout)
+}
+
+function parseModelListEnvelope(stdout) {
+  let parsed
+  try {
+    parsed = JSON.parse(stdout)
+  } catch {
+    return null
   }
-  return models
+  if (!parsed || !Array.isArray(parsed.data)) return null
+  return parsed.data.map((m) => ({
+    id: `${m.providerID}/${m.id}`,
+    label: m.name,
+    cost: m.cost,
+    limit: m.limit,
+    variants: m.variants,
+  }))
+}
+
+// A valid flat-list line is exactly "<provider>/<id>": both segments start
+// with a lowercase letter (id may also start with a digit) and continue with
+// lowercase letters/digits/hyphen/underscore/dot only -- no whitespace, no
+// uppercase, no colon. This is deliberately strict so stray CLI output never
+// becomes a fake model: an HTTP status line ("HTTP/1.1 400 Bad Request")
+// fails on its uppercase prefix and embedded space, a usage/help line
+// ("usage: opencode [options]") has no slash to match at all, and a JSON
+// fragment fails on its braces/quotes. Every real id observed against the
+// live catalog (e.g. "opencode/muse-spark-1.3-contributor-free",
+// "deepseek/deepseek-v4-flash") still matches.
+// v2 ids are `provider/model#variant`: the provider ends at the FIRST slash
+// and the model may itself contain more (openrouter/anthropic/claude-sonnet-4.5).
+// Kept deliberately strict otherwise -- lowercase-led, no whitespace -- so an
+// HTTP status line, a usage banner or a JSON fragment never becomes a model.
+const FLAT_ID_LINE = /^[a-z][a-z0-9_-]*\/[a-z0-9][a-z0-9._\-\/]*(?:#[a-z0-9._-]+)?$/
+
+function parseFlatModelList(stdout) {
+  return stdout
+    .split(/\r?\n/)
+    .map((line) => line.trim())
+    .filter((line) => FLAT_ID_LINE.test(line))
+    .map((id) => ({ id }))
 }
