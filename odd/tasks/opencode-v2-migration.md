@@ -99,8 +99,10 @@ sliced into the work units below. Push/PR remain the user's decision.
       Route: delegated.
 - [x] **T7 — classifyError + exit codes.** Use the exit code (E16): 130 is an interrupt,
       not a crash. Drop the dead `session.error` branch. Route: delegated.
-- [ ] **T8 — registry and version.** `TESTED_VERSIONS.opencode` → `'2.0.10'`; replace the
-      fake `opencode-go/default`. Route: inline (mechanical, 2 known lines).
+- [~] **T8 — registry and version.** `TESTED_VERSIONS.opencode` → `'2.0.10'` **done**;
+      verified end to end with the real binary (`npm run selftest` now prints
+      `opencode  : opencode v2.0.10` with no WARN). Replacing the fake `opencode-go/default`
+      is **still open** — see "Open decision". Route: inline (mechanical, known lines).
 - [ ] **T9 — fixtures, tests, docs.** Regenerate from the live captures; delete
       `models-verbose.txt`; update the skill reference and README. Route: delegated.
 
