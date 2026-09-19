@@ -3,12 +3,12 @@ import assert from 'node:assert/strict'
 import fs from 'node:fs'
 import path from 'node:path'
 import { fileURLToPath } from 'node:url'
-import { buildArgv, parseResult, classifyError, listModels } from '../../src/adapters/opencode.mjs'
+import { buildArgv, stdinFor, parseResult, classifyError, listModels } from '../../src/adapters/opencode.mjs'
 
 const FIXTURES = path.join(path.dirname(fileURLToPath(import.meta.url)), '..', 'fixtures', 'opencode')
 const read = (name) => fs.readFileSync(path.join(FIXTURES, name), 'utf8')
 
-test('buildArgv builds a read-mode plan argv without --auto', () => {
+test('buildArgv builds a read-mode plan argv with no prompt positional and no --dir (v2: prompt rides stdin, --dir was removed)', () => {
   const argv = buildArgv({
     model: 'opencode/muse-spark-1.3-contributor-free',
     prompt: 'Reply exactly: PONG',
@@ -18,25 +18,24 @@ test('buildArgv builds a read-mode plan argv without --auto', () => {
   })
   assert.deepEqual(argv, [
     'run',
-    'Reply exactly: PONG',
     '-m',
     'opencode/muse-spark-1.3-contributor-free',
     '--format',
     'json',
     '--agent',
     'plan',
-    '--dir',
-    '/repo',
     '--title',
     'fixture-pong',
   ])
 })
 
-test('buildArgv builds a write-mode argv with --agent build and --auto', () => {
+test('buildArgv builds a write-mode argv with --agent build and --auto, and never leaks the prompt into argv', () => {
   const argv = buildArgv({ model: 'deepseek/deepseek-v4-flash', prompt: 'do it', cwd: '/repo', mode: 'write' })
   assert.ok(argv.includes('--auto'))
   assert.ok(argv.includes('build'))
   assert.ok(!argv.includes('plan'))
+  assert.ok(!argv.includes('do it'), 'the prompt must never appear as an argv element (E3: argv quoting corrupts it)')
+  assert.ok(!argv.includes('--dir'), '--dir was removed in v2 (E1)')
 })
 
 test('buildArgv defaults to read/plan when mode is omitted', () => {
@@ -45,11 +44,18 @@ test('buildArgv defaults to read/plan when mode is omitted', () => {
   assert.ok(!argv.includes('--auto'))
 })
 
-test('buildArgv adds --variant only when given', () => {
+test('buildArgv folds variant into the model id as model#variant instead of a --variant flag (E2)', () => {
   const withVariant = buildArgv({ model: 'x', prompt: 'p', cwd: '/repo', variant: 'high' })
-  assert.equal(withVariant[withVariant.indexOf('--variant') + 1], 'high')
+  assert.ok(!withVariant.includes('--variant'), '--variant was removed in v2')
+  assert.equal(withVariant[withVariant.indexOf('-m') + 1], 'x#high')
+
   const withoutVariant = buildArgv({ model: 'x', prompt: 'p', cwd: '/repo' })
-  assert.ok(!withoutVariant.includes('--variant'))
+  assert.equal(withoutVariant[withoutVariant.indexOf('-m') + 1], 'x')
+})
+
+test('buildArgv does not double up the variant when the model id already carries one', () => {
+  const argv = buildArgv({ model: 'x#already', prompt: 'p', cwd: '/repo', variant: 'high' })
+  assert.equal(argv[argv.indexOf('-m') + 1], 'x#already')
 })
 
 test('buildArgv adds -s <sessionId> only when given (session resume)', () => {
@@ -57,6 +63,15 @@ test('buildArgv adds -s <sessionId> only when given (session resume)', () => {
   assert.equal(withSession[withSession.indexOf('-s') + 1], 'ses_abc')
   const withoutSession = buildArgv({ model: 'x', prompt: 'p', cwd: '/repo' })
   assert.ok(!withoutSession.includes('-s'))
+})
+
+test('buildArgv never adds --standalone (E11: a standalone server has zero credentials/providers/models)', () => {
+  const argv = buildArgv({ model: 'x', prompt: 'p', cwd: '/repo', mode: 'write' })
+  assert.ok(!argv.includes('--standalone'))
+})
+
+test('stdinFor returns the prompt string, which is now piped to opencode run on stdin instead of argv (E3/E4)', () => {
+  assert.equal(stdinFor({ prompt: 'Reply exactly: PONG' }), 'Reply exactly: PONG')
 })
 
 test('parseResult reads the real success fixture (JSONL with a leading non-JSON noise line)', () => {

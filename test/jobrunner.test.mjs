@@ -218,8 +218,8 @@ test('startJob passes {model,prompt,cwd,mode,timeoutS} through the REAL adapterF
   const { startJob } = await freshModules(home)
   const { secondary } = makeRepoWithSecondaryWorktree()
   const captured = []
-  const spawn = (cmd, args) => {
-    captured.push({ cmd, args })
+  const spawn = (cmd, args, opts) => {
+    captured.push({ cmd, args, opts })
     return fakeChild()
   }
 
@@ -237,16 +237,24 @@ test('startJob passes {model,prompt,cwd,mode,timeoutS} through the REAL adapterF
 
   const agyRead = captured.find((c) => c.cmd === 'agy' && c.args.includes('plan'))
   assert.ok(agyRead, 'agy read mode must reach buildArgv as --mode plan')
+  assert.equal(agyRead.opts.stdin, undefined, 'agy has no stdinFor, so no stdin must be forwarded for it')
+  assert.equal(agyRead.opts.env.PWD, agyRead.opts.cwd, 'PWD must match the cwd passed to spawn (E14), for every agent')
+
   const agyWrite = captured.find((c) => c.cmd === 'agy' && c.args.includes('accept-edits'))
   assert.ok(agyWrite, 'agy write mode must reach buildArgv as --mode accept-edits')
 
   const ocRead = captured.find((c) => c.cmd === 'opencode' && c.args.includes('plan'))
   assert.ok(ocRead, 'opencode read mode must reach buildArgv as --agent plan')
   assert.ok(!ocRead.args.includes('--auto'), 'opencode read mode must never get --auto')
+  assert.ok(!ocRead.args.includes('--dir'), '--dir was removed in opencode v2 (E1)')
+  assert.ok(!ocRead.args.includes('hi'), 'the prompt must never appear as an argv element (E3)')
+  assert.equal(ocRead.opts.stdin, 'hi', 'the prompt must reach opencode via stdin instead of argv (E3/E4)')
+  assert.equal(ocRead.opts.env.PWD, ocRead.opts.cwd, 'PWD must match the cwd passed to spawn (E14): opencode v2 resolves cwd from process.env.PWD')
 
   const ocWrite = captured.find((c) => c.cmd === 'opencode' && c.args.includes('build'))
   assert.ok(ocWrite, 'opencode write mode must reach buildArgv as --agent build')
   assert.ok(ocWrite.args.includes('--auto'), 'opencode write mode must get --auto (regression: jobrunner used to call opencode.buildArgv with {agentMode,write} that jobrunner never sent)')
+  assert.equal(ocWrite.opts.stdin, 'hi', 'opencode write mode must also get the prompt on stdin')
 })
 
 test('startJob hard-kills only after timeoutS + KILL_GRACE_S, giving agy\'s own --print-timeout room to fire and flush first', async () => {

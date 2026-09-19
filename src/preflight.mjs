@@ -344,9 +344,17 @@ export async function pingAgent({ agent, model, cwd, env = process.env, commandR
   const key = cacheKey(agent, model)
   const startedAt = Date.now()
   const timeoutS = resolveTimeoutS(agent, model)
-  const argv = adapter.buildArgv({ model, prompt: PING_PROMPT, cwd, mode: agent === 'copilot' ? 'read' : 'plan' })
+  const adapterArgs = { model, prompt: PING_PROMPT, cwd, mode: agent === 'copilot' ? 'read' : 'plan' }
+  const argv = adapter.buildArgv(adapterArgs)
+  // The ping must travel the SAME path as a real job or it stops proving
+  // anything. opencode v2 takes its prompt on stdin (E3/E4) and resolves its
+  // working directory from PWD before chdir'ing (E14): a ping that drops
+  // either sends an empty message from the wrong directory and still spends a
+  // real model call, so a resulting "ready" would be meaningless.
+  const stdin = adapter.stdinFor?.(adapterArgs)
+  const childEnv = { ...env, PWD: cwd }
 
-  const result = await commandRunner(adapter.cmd, argv, { cwd, env, timeoutMs: Math.min(timeoutS, 45) * 1000 })
+  const result = await commandRunner(adapter.cmd, argv, { cwd, env: childEnv, stdin, timeoutMs: Math.min(timeoutS, 45) * 1000 })
   // Combine stdout+stderr before classifying: copilot's --model rejection
   // ("Error: Model ... is not available.") was measured on STDERR, not
   // stdout, while success payloads for all three adapters are stdout-only.

@@ -7,15 +7,38 @@ export const cmd = 'opencode'
  * Argv only. read -> --agent plan; write -> --agent build --auto.
  * sessionId resumes a session (-s <id>); variant selects reasoning effort
  * (minimal/low/medium/high/max), e.g. Muse Spark 1.3's registry default 'high'.
+ *
+ * v2 changes (see odd/tasks/opencode-v2-migration.md, evidence E1-E3/E11):
+ * - No prompt positional: an argv element containing spaces arrives wrapped
+ *   in literal double quotes and corrupts the prompt (E3). The prompt now
+ *   travels on stdin instead -- see stdinFor() below.
+ * - No --dir: the flag was removed (E1); cwd comes from the spawned
+ *   process's own cwd/PWD instead (see jobrunner.mjs).
+ * - No --variant: the flag was removed (E2). The variant now rides the
+ *   model id as `<model>#<variant>`.
+ * - Never --standalone: a private `opencode serve` reports zero
+ *   credentials, zero providers, and zero models even when warm (E11), so
+ *   the model id above would never resolve. This looks like an obvious
+ *   "fix" to a future reader -- it is not; the shared service is the only
+ *   mode with real provider credentials wired up.
  */
-export function buildArgv({ model, prompt, cwd, mode = 'read', title, variant, sessionId }) {
+export function buildArgv({ model, prompt, mode = 'read', title, variant, sessionId }) {
   const agent = mode === 'write' ? 'build' : 'plan'
-  const args = ['run', prompt, '-m', model, '--format', 'json', '--agent', agent, '--dir', cwd]
+  const modelId = variant && !model.includes('#') ? `${model}#${variant}` : model
+  const args = ['run', '-m', modelId, '--format', 'json', '--agent', agent]
   if (title) args.push('--title', title)
-  if (variant) args.push('--variant', variant)
   if (sessionId) args.push('-s', sessionId)
   if (mode === 'write') args.push('--auto')
   return args
+}
+
+/**
+ * The prompt now reaches opencode via stdin instead of argv (E3/E4): a
+ * prompt passed as an argv element arrives wrapped in literal double
+ * quotes, corrupting it, while the same text on stdin arrives verbatim.
+ */
+export function stdinFor({ prompt }) {
+  return prompt
 }
 
 export function parseResult(stdout) {

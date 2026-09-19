@@ -499,3 +499,24 @@ test('agentsStatus emits no "preflight" event when announce is false (the defaul
   const events = readTail({ env: { AGENT_HUB_HOME: home } }).filter((e) => e.kind === 'preflight')
   assert.equal(events.length, 0)
 })
+
+test('pingAgent (L3) sends the ping prompt on stdin and pins PWD for adapters that need it', async () => {
+  const { pingAgent } = await fresh(tmpHome())
+  const calls = []
+  const runner = async (cmd, args, opts) => {
+    calls.push({ cmd, args, opts })
+    return { stdout: '{"type":"text","sessionID":"ses_1","part":{"text":"PONG"}}', stderr: '', code: 0, timedOut: false }
+  }
+
+  await pingAgent({ agent: 'opencode', model: 'opencode/big-pickle', cwd: '/tmp', env: { PATH: '/usr/bin' }, commandRunner: runner })
+
+  assert.equal(calls.length, 1)
+  const [call] = calls
+  // v2 takes the prompt on stdin, never as an argv element (E3/E4): a ping
+  // that forgets it sends opencode an EMPTY message and still spends a real
+  // model call, so "ready" would mean nothing.
+  assert.ok(!call.args.some((a) => a.includes('PONG')), `prompt must not appear in argv: ${JSON.stringify(call.args)}`)
+  assert.match(String(call.opts.stdin ?? ''), /PONG/)
+  // Same PWD hazard as a real job (E14).
+  assert.equal(call.opts.env.PWD, '/tmp')
+})

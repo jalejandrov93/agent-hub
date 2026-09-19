@@ -245,7 +245,13 @@ export function startJob({
     }
   }
 
-  const argv = adapter.buildArgv({ model, prompt: effectiveTask, cwd, mode, title, variant: effectiveVariant, timeoutS: effectiveTimeoutS, sessionId, env })
+  const adapterArgs = { model, prompt: effectiveTask, cwd, mode, title, variant: effectiveVariant, timeoutS: effectiveTimeoutS, sessionId, env }
+  const argv = adapter.buildArgv(adapterArgs)
+  // Only opencode (v2) provides stdinFor: its prompt travels on stdin
+  // instead of argv (E3/E4). Every other adapter is unaffected -- the
+  // optional chaining leaves stdin undefined for them, which spawnDetached
+  // treats as "no stdin", byte-identical to before.
+  const stdin = adapter.stdinFor?.(adapterArgs)
 
   // Snapshot right before spawning, AFTER the write gate/lock: a gate failure
   // must never be judged by a snapshot it never ran against.
@@ -255,6 +261,13 @@ export function startJob({
   // are always redacted; HOME isolation depends on the sandbox profile.
   const sandboxProfile = resolveSandboxProfile(env.AGENT_HUB_SANDBOX_PROFILE)
   const childEnv = filterEnv({ ...process.env }, sandboxProfile)
+  // opencode v2 resolves its own working directory as
+  // `process.env.PWD ?? process.cwd()` before chdir'ing (E14). A stale
+  // inherited PWD (agent-hub itself may be running from a different
+  // worktree than the one it delegates into) would silently redirect the
+  // child into the wrong directory. Set it explicitly for every adapter so
+  // it always agrees with the `cwd` passed to spawn below.
+  childEnv.PWD = cwd
 
   if (sandboxProfile === 'compatibility' && !_warnedCompatibility) {
     _warnedCompatibility = true
@@ -263,7 +276,7 @@ export function startJob({
 
   let child
   try {
-    child = spawn(adapter.cmd, argv, { cwd, env: childEnv })
+    child = spawn(adapter.cmd, argv, { cwd, env: childEnv, stdin })
   } catch (error) {
     updateResult(job.jobId, { status: 'failed', errorKind: 'crash', error: String(error?.message ?? error) }, env)
     appendEvent({ kind: 'job.failed', agent, model, cwd, title, jobId: job.jobId, errorKind: 'crash', taskType, summary: String(error?.message ?? error), harness: harness ?? null, waitMode: waitMode ?? null }, { env })
