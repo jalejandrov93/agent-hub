@@ -124,6 +124,23 @@ guessing a paid model.
   opencode an empty message from the wrong directory while still spending a real model
   call — a "ready" that proves nothing. Fixed under TDD (RED observed: stdin empty).
 
+## Review record
+
+- Work unit 1 (`6c6c071`) assessed `medium`, `review_due: true` (`slice_budget_reached`).
+  Consent relayed; the user granted. Lineage `review-7f58a68979765f79` created.
+- The lineage **could not reach a terminal outcome**: its `collect` transition returned a
+  `review.capture-result` slot whose token list carries none of `--agent`, `--input` or
+  `--preflight`, and `capture-result` refuses that exact list as `invalid_request`
+  (`mutation_outcome: not_started`). The bound STATUS reoffers the identical slot, so it is
+  deterministic, not transient.
+- A regression of upstream #4582 (closed `not_planned` because the token was present on 2.9.0
+  stable; this build is 3.4.0 stable). Reported with the user's explicit consent as
+  `Gentleman-Programming/gentle-ai#4804`.
+- The candidate's exact provider-issued decline invocation was then executed once and validated
+  (`action: declined`, `consent: declined_this_candidate`, target identity matched), and native
+  STATUS re-entered clean. **Outcome for this work unit: declined — unreviewed, delivery under
+  ordinary repository policy.**
+
 ## Next step
 
 T4 + T7 (`parseResult` and `classifyError`) as one writer unit.
