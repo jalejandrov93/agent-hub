@@ -88,7 +88,7 @@ sliced into the work units below. Push/PR remain the user's decision.
       Invocation confirmed live: it returns `{"interrupted": <bool>}`, exit 0, and is safe and
       idempotent on an already-finished session (returns `false`).
       Route: delegated (own unit — it needs a jobrunner hook).
-- [ ] **T4 — parseResult.** Take only the last assistant message's `text` parts (E7); sum
+- [x] **T4 — parseResult.** Take only the last assistant message's `text` parts (E7); sum
       `tokens` since there is no `total` (E5); tolerate a missing `step_finish` (E6).
       Route: delegated.
 - [ ] **T5 — model discovery.** `modelsArgv('opencode')` → `opencode api model.list`;
@@ -97,7 +97,7 @@ sliced into the work units below. Push/PR remain the user's decision.
 - [ ] **T6 — drop the provider fan-out.** Remove `opencodeProviders()` and both
       `if (agent === 'opencode')` branches in `discovery.mjs` and `preflight.mjs`.
       Route: delegated.
-- [ ] **T7 — classifyError + exit codes.** Use the exit code (E16): 130 is an interrupt,
+- [x] **T7 — classifyError + exit codes.** Use the exit code (E16): 130 is an interrupt,
       not a crash. Drop the dead `session.error` branch. Route: delegated.
 - [ ] **T8 — registry and version.** `TESTED_VERSIONS.opencode` → `'2.0.10'`; replace the
       fake `opencode-go/default`. Route: inline (mechanical, 2 known lines).
@@ -133,6 +133,13 @@ guessing a paid model.
   `--preflight`, and `capture-result` refuses that exact list as `invalid_request`
   (`mutation_outcome: not_started`). The bound STATUS reoffers the identical slot, so it is
   deterministic, not transient.
+- **T4 + T7 done** (delegated writer, strict TDD). Parent spot check: `npm test` -> 997 tests,
+  989 pass, 0 fail, 8 cancelled (same pre-existing `quota-codexbar` set).
+  The writer's choice to count cache tokens toward the total was independently verified against
+  `success.jsonl`: opencode v1's own recorded `total` (39465) equals
+  input+output+reasoning+cache.read+cache.write exactly, and does not equal the sum without
+  cache (38072). Parent hardened one gap it found: the three non-cache components were summed
+  unguarded, so a model omitting `reasoning` would have reported `NaN` tokens. Covered by a test.
 - A regression of upstream #4582 (closed `not_planned` because the token was present on 2.9.0
   stable; this build is 3.4.0 stable). Reported with the user's explicit consent as
   `Gentleman-Programming/gentle-ai#4804`.
@@ -143,4 +150,4 @@ guessing a paid model.
 
 ## Next step
 
-T4 + T7 (`parseResult` and `classifyError`) as one writer unit.
+T5 + T6 (model discovery via `api model.list`, and dropping the provider fan-out).

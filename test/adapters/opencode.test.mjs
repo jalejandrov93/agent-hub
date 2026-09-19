@@ -94,7 +94,7 @@ test('classifyError treats a dropped text/step_finish stream as empty and retria
   assert.equal(error.retriable, true)
 })
 
-test('classifyError reports timeout when the process wrapper says timedOut (opencode ignores SIGTERM)', () => {
+test('classifyError reports timeout when the process wrapper says timedOut (opencode handles SIGINT but not SIGTERM)', () => {
   const error = classifyError(read('success.jsonl'), { timedOut: true })
   assert.equal(error.kind, 'timeout')
 })
@@ -105,6 +105,61 @@ test('classifyError detects a real DeepSeek 402/Insufficient Balance error event
   assert.equal(error.retriable, false)
 })
 
+test('parseResult keeps only the last assistant message when a run emits several (E7: group by part.messageID, take the last group)', () => {
+  const result = parseResult(read('v2-two-assistant-messages.jsonl'))
+  assert.equal(result.ok, true)
+  assert.equal(result.text, 'Ready to plan — what do you want to work on?')
+  assert.notEqual(result.text, 'PONGReady to plan — what do you want to work on?', 'must not splice unrelated turns together')
+})
+
+test('parseResult sums step_finish.part.tokens components since v2 has no `total` field (E5)', () => {
+  const result = parseResult(read('v2-two-assistant-messages.jsonl'))
+  // input:19401 + output:12 + reasoning:14 + cache.read:0 + cache.write:0
+  assert.equal(result.tokens, 19427)
+  assert.equal(result.costUsd, 0)
+  assert.equal(result.sessionId, 'ses_f442b8afeffeTPaFVPlSIhCR8b')
+})
+
+test('parseResult still computes the pre-v2 fixture total by summing components, matching its own recorded total (39465)', () => {
+  const result = parseResult(read('success.jsonl'))
+  assert.equal(result.tokens, 39465)
+})
+
+test('parseResult degrades tokens/cost to null but stays ok when step_finish is absent entirely (E6)', () => {
+  const result = parseResult(read('v2-no-step-finish.jsonl'))
+  assert.equal(result.ok, true)
+  assert.equal(result.text, 'Repeat back the exact characters of my message, nothing else.')
+  assert.equal(result.tokens, null)
+  assert.equal(result.costUsd, null)
+  assert.equal(result.sessionId, 'ses_f442abe80ffeDArU3srUc4szQR')
+})
+
+test('classifyError treats exit code 130 as a canceled interrupt, not a crash (E16: our own kill ladder sends SIGINT first)', () => {
+  const error = classifyError(read('success.jsonl'), { code: 130 })
+  assert.equal(error.kind, 'canceled')
+  assert.equal(error.retriable, true)
+})
+
+test('classifyError still reports timeout when the process wrapper says timedOut, even if a code is also present', () => {
+  const error = classifyError(read('success.jsonl'), { timedOut: true, code: 130 })
+  assert.equal(error.kind, 'timeout')
+})
+
+test('classifyError timeout message reflects that opencode handles SIGINT but not SIGTERM (not "ignores SIGTERM")', () => {
+  const error = classifyError(read('success.jsonl'), { timedOut: true })
+  assert.match(error.message, /SIGTERM/)
+  assert.doesNotMatch(error.message, /ignores SIGTERM/)
+})
+
+test('classifyError no longer special-cases a session.error event (v2 only emits "error", E18)', () => {
+  const lines = [
+    JSON.stringify({ type: 'text', sessionID: 's1', part: { text: 'partial', messageID: 'm1' } }),
+    JSON.stringify({ type: 'session.error', error: { message: 'boom' } }),
+  ].join('\n')
+  const error = classifyError(lines)
+  assert.equal(error, null, 'session.error is not a recognized v2 event type, so it is ignored and the text event still counts as success')
+})
+
 test('listModels parses the real `opencode models opencode --verbose` fixture', () => {
   const models = listModels(read('models-verbose.txt'))
   assert.equal(models.length, 7)
@@ -112,4 +167,17 @@ test('listModels parses the real `opencode models opencode --verbose` fixture', 
   assert.ok(byId['opencode/muse-spark-1.3-contributor-free'])
   assert.equal(byId['opencode/muse-spark-1.3-contributor-free'].cost.input, 0)
   assert.equal(byId['opencode/nemotron-3-ultra-free'].limit.context, 1000000)
+})
+
+test('parseResult tolerates a tokens object missing a component instead of reporting NaN', () => {
+  // Not every model reports every component -- a model without reasoning
+  // support can omit `reasoning` entirely. An unguarded sum would turn the
+  // whole total into NaN and carry it into the job result.
+  const stdout = [
+    JSON.stringify({ type: 'text', sessionID: 'ses_x', part: { messageID: 'm1', text: 'hi' } }),
+    JSON.stringify({ type: 'step_finish', sessionID: 'ses_x', part: { messageID: 'm1', cost: 0, tokens: { input: 10, output: 5 } } }),
+  ].join('\n')
+
+  const result = parseResult(stdout)
+  assert.equal(result.tokens, 15)
 })

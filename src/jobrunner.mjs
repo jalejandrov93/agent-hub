@@ -302,7 +302,9 @@ export function startJob({
   })
 
   const done = exitPromise
-    .then(({ timedOut }) => finishJob({ jobId: job.jobId, agent, model, cwd, title, adapter, mode, env, timedOut, taskType, snapshot, takeSnapshotFn, diffSnapshotsFn, formatViolationFn, harness, waitMode }))
+    .then(({ code, timedOut }) =>
+      finishJob({ jobId: job.jobId, agent, model, cwd, title, adapter, mode, env, timedOut, exitCode: code, taskType, snapshot, takeSnapshotFn, diffSnapshotsFn, formatViolationFn, harness, waitMode })
+    )
     .finally(() => {
       stopHeartbeat(job.jobId)
       active.delete(job.jobId)
@@ -325,6 +327,7 @@ function finishJob({
   mode,
   env,
   timedOut,
+  exitCode = null,
   taskType = null,
   snapshot = null,
   takeSnapshotFn = defaultTakeSnapshot,
@@ -350,7 +353,7 @@ function finishJob({
   const diff = snapshot ? diffSnapshotsFn(snapshot, takeSnapshotFn(cwd)) : null
   const violation = diff?.changed ? formatViolationFn(diff) : null
 
-  const error = adapter.classifyError(stdout, { timedOut })
+  const error = adapter.classifyError(stdout, { timedOut, code: exitCode })
   if (error) {
     // A print-timeout abandons the turn but agy still streamed partial text
     // (see agy.mjs classifyError) — keep it in response.txt like a normal

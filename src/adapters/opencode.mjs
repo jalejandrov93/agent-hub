@@ -50,10 +50,39 @@ export function parseResult(stdout) {
     return { ok: false, raw: events }
   }
 
+  // v2 can emit several assistant messages in one run (E7): concatenating
+  // every `text` event splices unrelated turns together (a real capture
+  // produced "PONG" followed by an unrelated "Ready to plan..." turn). Group
+  // by part.messageID, preserving stream order, and keep only the last
+  // group. An event missing messageID still groups fine (under the
+  // `undefined` key) instead of throwing.
+  const groupOrder = []
+  const groups = new Map()
+  for (const e of textEvents) {
+    const key = e.part?.messageID
+    if (!groups.has(key)) {
+      groups.set(key, [])
+      groupOrder.push(key)
+    }
+    groups.get(key).push(e)
+  }
+  const lastMessageEvents = groups.get(groupOrder[groupOrder.length - 1])
+
+  // v2's step_finish.part.tokens has no `total` field (E5): it is
+  // {input, output, reasoning, cache:{read,write}}. We sum every component,
+  // including cache read/write, into the reported total: cache tokens still
+  // represent real work done against the provider, and this matches the
+  // `total` this adapter reported pre-v2 (verified against a real capture
+  // where total === input+output+reasoning+cache.read+cache.write).
+  const tokenParts = finish?.part?.tokens
+  const tokens = tokenParts
+    ? (tokenParts.input ?? 0) + (tokenParts.output ?? 0) + (tokenParts.reasoning ?? 0) + (tokenParts.cache?.read ?? 0) + (tokenParts.cache?.write ?? 0)
+    : null
+
   return {
     ok: true,
-    text: textEvents.map((e) => e.part?.text ?? '').join(''),
-    tokens: finish?.part?.tokens?.total ?? null,
+    text: lastMessageEvents.map((e) => e.part?.text ?? '').join(''),
+    tokens,
     costUsd: finish?.part?.cost ?? null,
     sessionId: events[0]?.sessionID ?? null,
     raw: events,
@@ -62,11 +91,24 @@ export function parseResult(stdout) {
 
 export function classifyError(stdout, exitInfo = {}) {
   if (exitInfo.timedOut) {
-    return { kind: 'timeout', retriable: true, message: 'opencode hard timeout (it ignores SIGTERM; the process group was SIGKILLed)' }
+    return {
+      kind: 'timeout',
+      retriable: true,
+      message: 'opencode hard timeout (it handles SIGINT but not SIGTERM; the process group was SIGKILLed)',
+    }
+  }
+
+  if (exitInfo.code === 130) {
+    // v2 exit codes are meaningful (E16): 130 is SIGINT/interrupt, not a
+    // crash. Our own kill ladder sends SIGINT first (E13), so this is
+    // reachable in normal operation, not only from an external Ctrl-C.
+    return { kind: 'canceled', retriable: true, message: 'opencode run was interrupted (exit 130 / SIGINT)' }
   }
 
   const events = parseJsonl(stdout)
-  const errorEvent = events.find((e) => e.type === 'error' || e.type === 'session.error')
+  // v2's `run` only ever emits `error`, never `session.error` (E18) — that
+  // branch was dead against the real CLI and has been removed.
+  const errorEvent = events.find((e) => e.type === 'error')
   if (errorEvent) {
     const msg = JSON.stringify(errorEvent).toLowerCase()
     // Real capture: DeepSeek returned statusCode:402 "Insufficient Balance".

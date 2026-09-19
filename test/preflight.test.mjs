@@ -520,3 +520,16 @@ test('pingAgent (L3) sends the ping prompt on stdin and pins PWD for adapters th
   // Same PWD hazard as a real job (E14).
   assert.equal(call.opts.env.PWD, '/tmp')
 })
+
+test('pingAgent (L3) forwards the child exit code into classifyError so a 130 (SIGINT) reads as canceled, not a generic empty/crash', async () => {
+  const { pingAgent } = await fresh(tmpHome())
+  // No text event at all and exit 130: without forwarding the code, this
+  // reads as a generic "empty" stream; with it, classifyError recognizes
+  // the SIGINT interrupt from our own kill ladder (E16).
+  const runner = async () => ({ stdout: '', stderr: '', code: 130, timedOut: false })
+
+  const entry = await pingAgent({ agent: 'opencode', model: 'opencode/big-pickle', cwd: '/tmp', commandRunner: runner })
+
+  assert.equal(entry.status, 'unavailable')
+  assert.match(entry.reason, /canceled/)
+})

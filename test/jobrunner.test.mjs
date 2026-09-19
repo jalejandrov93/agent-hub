@@ -56,6 +56,23 @@ function fakeAdapter(script) {
 const SUCCESS_SCRIPT = `console.log(JSON.stringify({status:"SUCCESS",response:"PONG",usage:{total_tokens:5},conversation_id:"c1"}))`
 const FAIL_SCRIPT = `console.log(JSON.stringify({status:"CANCELED",response:""}))`
 const HANG_SCRIPT = `process.on("SIGTERM", () => {}); setInterval(() => {}, 1000)`
+const EXIT_130_SCRIPT = `process.exit(130)`
+
+/** A fake adapter whose classifyError depends on the forwarded exit code, to prove finishJob threads it through. */
+function fakeAdapterSensitiveToExitCode(script) {
+  return {
+    id: 'fake',
+    cmd: process.execPath,
+    buildArgv: () => ['-e', script],
+    parseResult: () => ({ ok: false }),
+    classifyError: (stdout, exitInfo = {}) => {
+      if (exitInfo.timedOut) return { kind: 'timeout', retriable: true, message: 'fake timeout' }
+      if (exitInfo.code === 130) return { kind: 'canceled', retriable: true, message: 'fake canceled (SIGINT)' }
+      return { kind: 'crash', retriable: false, message: `fake crash, code=${exitInfo.code}` }
+    },
+    listModels: () => [],
+  }
+}
 
 /** Import jobrunner + its sibling modules fresh, all pinned to the same AGENT_HUB_HOME. */
 async function freshModules(home) {
@@ -118,6 +135,19 @@ test('a failing read job (CANCELED) ends up failed with errorKind and a job.fail
 
   const events = eventlog.readTail({ n: 20 })
   assert.ok(events.some((e) => e.jobId === job.jobId && e.kind === 'job.failed'))
+})
+
+test('finishJob forwards the child exit code into classifyError, so an adapter can tell a 130/SIGINT apart from a crash', async () => {
+  const home = tmpHome()
+  const { startJob, jobstore } = await freshModules(home)
+  const adapters = { fake: fakeAdapterSensitiveToExitCode(EXIT_130_SCRIPT) }
+
+  const { job, done } = startJob({ agent: 'fake', model: 'x', task: 't', cwd: '/tmp', mode: 'read', adapterFor: (a) => adapters[a] })
+  await done
+
+  const finalResult = jobstore.readResult(job.jobId)
+  assert.equal(finalResult.status, 'failed')
+  assert.equal(finalResult.errorKind, 'canceled')
 })
 
 test('startJob redacts JULES_API_KEY (and other secrets) via the sandbox filter, keeping the rest of the environment', async () => {

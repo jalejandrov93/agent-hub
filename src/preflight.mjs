@@ -362,7 +362,7 @@ export async function pingAgent({ agent, model, cwd, env = process.env, commandR
   // the same stdout.log); pingAgent keeps process.mjs's streams separate, so
   // it must combine them explicitly or a stderr-only error is invisible.
   const combinedOutput = `${result.stdout ?? ''}\n${result.stderr ?? ''}`
-  const error = adapter.classifyError(combinedOutput, { timedOut: result.timedOut })
+  const error = adapter.classifyError(combinedOutput, { timedOut: result.timedOut, code: result.code })
 
   if (error) {
     return writeCacheEntry(
