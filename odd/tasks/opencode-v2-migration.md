@@ -168,6 +168,40 @@ guessing a paid model.
   session id from partial stdout. Covered by a test.
   Parent spot check: `npm test` -> 1014 tests, 1006 pass, 0 fail, 8 cancelled.
 
+## Live verification (real CLI, real models)
+
+| Check | Result |
+|---|---|
+| PONG round-trip through the real adapter path | **pass** — text `PONG`, `sessionId` matching `^ses_`, `classifyError` null, exit 0 |
+| Same live test on the base (`dev`, changes stashed) | **fails** — confirms v1 adapter was broken against v2 and this branch fixes it |
+| Session resume via `-s` (the `job_reply` contract) | **pass** — turn 1 `"OK"` / `ses_f43e7073…`; turn 2 answered `"BANANA-77"` on the **same** session id, so context carried |
+| `copilot`, `codex` live | fail on this branch **and on the base** — pre-existing, other CLIs, untouched by this work |
+| `npm run selftest` | `opencode  : opencode v2.0.10`, no WARN |
+
+**Consequence worth knowing: token and cost accounting for opencode is now best-effort.**
+`step_finish` is the only event carrying `cost`/`tokens`, and v2 does not always emit it —
+observed absent on 2 of 3 live captures, including the passing round-trip. `parseResult` degrades
+to `null` correctly, but dashboard token/cost figures for opencode will have gaps. Not fixable
+from the hub side.
+
+## Proposed follow-up (raised by the user, not yet approved)
+
+The registry rots on its own: it pins 5 free opencode models while the live catalog has 8, and
+two signals a human will not catch by eye — `opencode/big-pickle` is free without the `-free`
+suffix (so cost, not the name, is the reliable signal), and `opencode/jev-1.13-free` has
+`capabilities.tools: false`, making it unusable for delegation.
+
+- **T11 — drift detection.** At discovery, reconcile the live catalog against the ids referenced
+  in `MODEL_REGISTRY` + `DELEGATION_MAP`, and emit an event/badge for: a pinned id that vanished,
+  a new usable free model, or a changed one (`cost` no longer 0 — a free model going paid is a
+  money bug and is detectable; `tools` flipped false; a pinned `variant` no longer in `variants[]`).
+  Report only; no behavior change.
+- **T12 — derive instead of hardcode.** `tier`, context size and variant validity come from the
+  catalog (`cost`, `limit.context`, `variants[]`). Only `dataPolicy` and `strengths` stay
+  hand-written, since opencode cannot know them.
+- Explicitly **not** proposed: selecting by predicate in the router — a job's model would drift
+  over time and reproducibility would be lost.
+
 ## Finding for the user (not acted on)
 
 `.opencode/package.json` in this repo pins `@opencode-ai/plugin` 1.18.30 — a v1 plugin, and v2's
