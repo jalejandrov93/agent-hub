@@ -8,6 +8,14 @@ and this project adheres to [Semantic Versioning](https://semver.org/).
 
 ### Added
 
+- Workflow evidence artifacts (`src/artifacts.mjs`): a delegate node can
+  declare `artifacts: ['plan.md', ...]`, the engine creates
+  `runs/<workflowId>/<stepId>/artifacts/`, tells the agent to write exactly
+  those files there, and records an `artifacts.manifest.json`
+  (`present`/`missing`, bytes, sha256) that also travels on `job.finished`.
+  Downstream nodes pass evidence with `artifact://<workflowId>/<stepId>/<name>`
+  refs, inlined into the task (64 KiB per ref) instead of inlining a whole
+  response; an unresolved ref fails the node.
 - Harness profiles (`src/harness/`: `generic`, `claude-code`, `opencode`)
   with a default `dispatch()` wait contract per caller. `dispatch()` accepts
   `waitMode` (`none` = return at create/start, `attention` = also return on

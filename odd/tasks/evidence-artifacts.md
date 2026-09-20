@@ -116,4 +116,6 @@ Out of scope (explicit follow-ups):
   Verified: targeted 13 pass / 0 fail; full `npm test` 1019 pass / 1 fail
   (pre-existing `worktree-lease` full-suite flake, 6/6 in isolation) /
   8 cancelled (`quota-codexbar`, pre-existing).
-- T3 pending: README + CHANGELOG.
+- 2026-09-20: **T3 done** — README (`src/artifacts.mjs` layout entry, runtime
+  state line, new "C2 evidence artifacts" section) + CHANGELOG `[Unreleased]`.
+  Feature complete; all acceptance criteria met.

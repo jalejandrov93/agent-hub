@@ -31,6 +31,7 @@ src/
   eventlog.mjs        appendEvent() (one atomic append per line) / readTail()
   fsutil.mjs           writeJsonAtomic()/updateJsonLocked() (lock + tmp + rename) for state shared by two processes
   jobstore.mjs        runs/<jobId>/{prompt.txt,stdout.log,response.txt,result.json}
+  artifacts.mjs       runs/<workflowId>/<stepId>/artifacts/ evidence store + artifact:// refs (C2)
   process.mjs         spawn argv, SIGTERM->SIGKILL ladder, runCommand()
   jobrunner.mjs        ties process+jobstore+worktree+timeouts+learnings+readguard into startJob/cancelJob
   preflight.mjs        L0-L3 ladder, TTL cache, circuit breaker
@@ -68,7 +69,8 @@ systemd/agent-hub-dashboard.service   NOT installed — copy it yourself if want
 Runtime state (never committed) lives in `AGENT_HUB_HOME`, default
 `~/.local/share/agent-hub/`: `events.jsonl`, `preflight-cache.json`,
 `discovery.json`, `overrides.json`, `proposals.json`, `learnings.json`,
-`runs/<jobId>/`, `runs/.locks/`.
+`runs/<jobId>/`, `runs/<workflowId>/<stepId>/artifacts/` (with its
+`artifacts.manifest.json`), `runs/.locks/`.
 
 ## Install
 
@@ -510,6 +512,41 @@ stealing a live owner's claim (`owned-elsewhere` otherwise). Both
 successful interaction — the engine never polls Jules itself. Harness
 session origin (`_meta.sessionId` → `harness_origins`, mapping only,
 `supportsWake:false`) is recorded for the future lifecycle bridge.
+
+### C2 evidence artifacts (`src/artifacts.mjs`)
+
+Execution success is not task success, and an opaque `response.txt` is not
+evidence. A node can declare the evidence files it must produce, and
+downstream nodes consume them by reference instead of by inlining a whole
+response.
+
+```js
+{
+  id: 'implementation',
+  type: 'delegate',
+  agent: 'opencode',
+  model: 'deepseek/deepseek-v4-flash',
+  mode: 'write',
+  artifacts: ['plan.md', 'diff.patch', 'test-report.json'],
+  task: 'Implement the feature. Baseline brief: artifact://research/plan.md',
+}
+```
+
+- The engine creates `runs/<workflowId>/<stepId>/artifacts/` and appends the
+  absolute path plus the exact filename list to the dispatched task, so the
+  agent writes real files there instead of burying everything in prose.
+- A task may reference an upstream artifact with
+  `artifact://<workflowId>/<stepId>/<name>`; the engine inlines its content
+  (capped at 64 KiB per ref, marked when truncated) before dispatch. An
+  unresolved ref fails the node with `unresolved artifact ref: <ref>` rather
+  than silently handing the literal token to a model.
+- On success the engine writes `artifacts.manifest.json` next to the directory
+  with per-name `present`/`missing`, bytes and sha256, and the same manifest
+  travels on the `job.finished` event.
+- The store is path-safe (every segment validated against the same shape
+  `jobstore` uses for job ids) and writes atomically. A declared file that is
+  missing is recorded, not yet fatal — enforcement belongs to the verifier
+  (C3).
 
 ### Harness profiles (`src/harness/`)
 
