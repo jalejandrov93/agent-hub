@@ -19,6 +19,8 @@ import { metricsTool } from './tools/insights.mjs'
 import { learningProposeTool } from './tools/learnings.mjs'
 import { scheduleStartupDiscovery, scheduleQuotaWarmup } from './startup.mjs'
 import { dispatch } from './dispatch.mjs'
+import { recordDispatchOrigin } from './harness/origin.mjs'
+import { clientHintForName, getClientHint, setClientHint } from './harness/registry.mjs'
 import {
   TASK_TYPES,
   LEARNING_TEXT_MAX,
@@ -42,7 +44,7 @@ import {
 } from './schemas.mjs'
 
 const VERSION = '2.1.0'
-const TESTED_VERSIONS = { agy: '1.2.1', opencode: '1.18.30', copilot: '1.0.31', codex: '0.154.0' }
+const TESTED_VERSIONS = { agy: '1.2.1', opencode: '2.0.10', copilot: '1.0.31', codex: '0.154.0' }
 
 const log = (...args) => console.error('[agent-hub]', ...args)
 
@@ -70,9 +72,13 @@ const fail = (error) => ({
 // (bare array -> {agents}) and learning_propose (already an object) need it;
 // every other tool's payload already matches its outputSchema, so `wrap`
 // defaults to identity.
-const guard = (handler, wrap = (payload) => payload) => async (args) => {
+// guard() forwards the transport's extra argument (2nd SDK parameter,
+// carrying e.g. _meta/sessionId) to handlers that declare it —
+// handler(args, extra). Handlers that ignore it keep working unchanged:
+// extra JS arguments are simply dropped.
+const guard = (handler, wrap = (payload) => payload) => async (args, extra) => {
   try {
-    const payload = await handler(args ?? {})
+    const payload = await handler(args ?? {}, extra)
     return ok(payload, wrap(payload))
   } catch (error) {
     return fail(error)
@@ -81,6 +87,8 @@ const guard = (handler, wrap = (payload) => payload) => async (args) => {
 
 const agentEnum = z.enum(['agy', 'opencode', 'copilot', 'codex'])
 const modeEnum = z.enum(['read', 'write'])
+const waitModeEnum = z.enum(['none', 'attention', 'terminal'])
+const harnessEnum = z.enum(['generic', 'claude-code', 'opencode'])
 const jobIdArg = z.string().min(1).describe('A jobId returned by delegate().')
 const taskTypeArg = z
   .enum(TASK_TYPES)
@@ -107,8 +115,48 @@ export function listMcpTools() {
   return [...seen.values()]
 }
 
+// Latest MCP server built by buildServer(). Stored so getMcpClientHint()
+// can read the LIVE handshake (clientInfo.name via getClientVersion())
+// once the client connects — the handshake completes after buildServer()
+// returns, so reading it there would always see null.
+let mcpServerRef = null
+
+/**
+ * Harness hint for the connected MCP client ('claude-code' | 'opencode' |
+ * null). Prefers the live handshake over the stored value; both are
+ * default-only hints for dispatch()'s waitMode — they never override an
+ * explicit harness/env/waitMode and never decide anything
+ * security-sensitive (see src/harness/registry.mjs).
+ */
+export function getMcpClientHint() {
+  try {
+    const info = mcpServerRef?.server?.getClientVersion?.() ?? mcpServerRef?.getClientVersion?.()
+    const live = clientHintForName(info?.name)
+    if (live) return live
+  } catch {
+    // fall through to the stored hint
+  }
+  return getClientHint()
+}
+
+/**
+ * Capture clientInfo.name from the handshake into the stored hint.
+ * Best-effort: unknown clients map to null (generic), never a guess.
+ */
+export function captureClientHintFromServer(server = mcpServerRef) {
+  try {
+    const info = server?.server?.getClientVersion?.() ?? server?.getClientVersion?.()
+    return setClientHint(clientHintForName(info?.name))
+  } catch {
+    return null
+  }
+}
+
 export function buildServer() {
   const server = new McpServer({ name: 'agent-hub', version: VERSION })
+  // Remember the server so getMcpClientHint() can read the live handshake
+  // (clientInfo.name) once the client connects — see below.
+  mcpServerRef = server
 
   // Single source of truth for the registered MCP tools: every
   // server.registerTool call below goes through this helper, which keeps a
@@ -185,9 +233,9 @@ export function buildServer() {
     {
       title: 'Delegate a task to an agent CLI',
       description:
-        'Start a job on agy/opencode/copilot/codex. Returns {jobId, status:"queued"} immediately; poll with job_wait ' +
-        'or job_status. Write mode requires cwd to be a secondary `git worktree add` checkout. Codex (model "default") ' +
-        'has a limited plan quota and is only a LAST fallback, never a primary.',
+        'Start a job on agy/opencode/copilot/codex. Returns {jobId, status:"queued"} immediately and never waits; ' +
+        'poll with job_wait or job_status, read with job_result. Write mode requires cwd to be a secondary ' +
+        '`git worktree add` checkout. Codex (model "default") has a limited plan quota and is only a LAST fallback, never a primary.',
       inputSchema: {
         agent: agentEnum,
         model: z.string().min(1),
@@ -202,8 +250,13 @@ export function buildServer() {
       outputSchema: DelegateResponse,
       annotations: { readOnlyHint: false, openWorldHint: true },
     },
-    guard(({ agent, model, task, cwd, mode, timeoutS, title, variant, taskType }) =>
-      delegateTool({ agent, model, task, cwd, mode, timeoutS, title, variant, taskType })
+    guard(({ agent, model, task, cwd, mode, timeoutS, title, variant, taskType }, extra) =>
+      delegateTool({ agent, model, task, cwd, mode, timeoutS, title, variant, taskType }).then((res) => {
+        // C1.2 origin mapping (best-effort, mapping-only): remember which
+        // harness session this job came from for a future wake-up bridge.
+        recordDispatchOrigin({ jobId: res?.jobId, extra, harness: null, env: process.env })
+        return res
+      })
     )
   )
 
@@ -213,7 +266,11 @@ export function buildServer() {
       title: 'Dispatch a task through routing, policy, and reservation',
       description:
         'Route, reserve write lock, and execute a task with automatic policy recovery (retry, fallback). ' +
-        'Deduplicates concurrent or recent dispatches with the same dispatchKey.',
+        'Deduplicates concurrent or recent dispatches with the same dispatchKey. ' +
+        'waitMode: "none" returns at create/start (generic default); "attention" also returns on waiting/attention ' +
+        '(AWAITING_*/PAUSED, claude-code/opencode default); "terminal" waits for a terminal status only. ' +
+        'An explicit waitMode always beats the harness default; the MCP client hint only supplies that default. ' +
+        'waiting≠failure — act via jules_interact/job_reply, then observe again.',
       inputSchema: {
         task: z.string().min(1).describe('The prompt/task text.'),
         cwd: z.string().min(1),
@@ -225,12 +282,19 @@ export function buildServer() {
         parentExecutionId: z.string().optional(),
         rootExecutionId: z.string().optional(),
         timeoutS: z.number().int().positive().optional(),
+        waitMode: waitModeEnum.optional().describe('none: return at create/start; attention: also return on waiting/attention; terminal: terminal status only. Defaults to the harness profile.'),
+        harness: harnessEnum.optional().describe('Explicit harness profile; beats AGENT_HUB_HARNESS env and the MCP client hint.'),
       },
       outputSchema: DispatchResponse,
       annotations: { readOnlyHint: false, openWorldHint: true },
     },
-    guard(({ task, taskType, cwd, mode, workflowStep, dispatchKey, attempt, parentExecutionId, rootExecutionId, timeoutS }) =>
-      dispatch({ task, taskType, cwd, mode, workflowStep, dispatchKey, attempt, parentExecutionId, rootExecutionId, timeoutS })
+    guard(({ task, taskType, cwd, mode, workflowStep, dispatchKey, attempt, parentExecutionId, rootExecutionId, timeoutS, waitMode, harness }, extra) =>
+      dispatch({ task, taskType, cwd, mode, workflowStep, dispatchKey, attempt, parentExecutionId, rootExecutionId, timeoutS, waitMode, harness, clientHint: getMcpClientHint() }).then((res) => {
+        // C1.2 origin mapping (best-effort, mapping-only): remember which
+        // harness session this dispatch came from for a future wake-up bridge.
+        recordDispatchOrigin({ jobId: res?.job?.jobId ?? res?.jobId, extra, harness: harness ?? null, env: process.env })
+        return res
+      })
     )
   )
 
@@ -242,7 +306,7 @@ export function buildServer() {
         'Poll a job until it reaches a terminal state or timeoutS (max 60s) elapses. ' +
         'A remote (Jules) session waiting for interaction (AWAITING_*/PAUSED) also ends the wait immediately: ' +
         'done+waiting:true with attentionRequired, attentionReason and recommendedAction — then act via jules_interact. ' +
-        'done+timedOut:true means only the local budget elapsed; the job/session keeps running.',
+        'waiting≠failure. done+timedOut:true means only the local budget elapsed; the job/session keeps running.',
       inputSchema: { jobId: jobIdArg, timeoutS: z.number().int().positive().max(60).optional().default(30) },
       outputSchema: JobRecord,
       annotations: { readOnlyHint: true, idempotentHint: true },
@@ -462,6 +526,9 @@ export function buildServer() {
         'a terminal state (done+terminal) or a waiting state AWAITING_*/PAUSED (done+waiting, with attentionRequired, ' +
         'attentionReason and recommendedAction — then act via jules_interact). Returns done+timedOut:false only when the ' +
         'local budget elapsed while the session keeps working; the remote session is unaffected. ' +
+        'jules_interact never restarts observation — after interacting, nothing observes the session until you ' +
+        'wait/check again or jules_supervise owns it. jules_supervise holds the watcher lease; a concurrent ' +
+        'jules_wait then observes read-only. waiting≠failure. ' +
         'Never a watch daemon: one bounded wait per call; continuous supervision is the future jules_supervise.',
       inputSchema: {
         jobId: z.string().min(1).optional().describe('Local jobId whose remote.sessionId should be watched.'),
@@ -812,6 +879,10 @@ async function main() {
   // long-lived process. Two schedulers would double-fire every schedule.
   const server = buildServer()
   await server.connect(new StdioServerTransport())
+  // Best-effort: the handshake may complete after connect() resolves, but
+  // getMcpClientHint() also reads it live on every dispatch, so a miss here
+  // is harmless — this is just the earliest capture point.
+  captureClientHintFromServer(server)
   log(`ready — state dir ${paths().home}`)
 }
 

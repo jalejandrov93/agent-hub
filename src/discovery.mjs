@@ -9,18 +9,6 @@ import { DELEGATION_MAP } from './router.mjs'
 
 export const KNOWN_AGENTS = ['agy', 'opencode', 'copilot', 'codex']
 
-/** Every distinct opencode provider ("<provider>/<id>") referenced anywhere in DELEGATION_MAP. */
-function opencodeProviders() {
-  const providers = new Set()
-  for (const entry of Object.values(DELEGATION_MAP)) {
-    for (const candidate of entry.chain) {
-      if (candidate.agent === 'opencode') providers.add(String(candidate.model).split('/')[0] || 'opencode')
-      if (candidate.parallelWith?.agent === 'opencode') providers.add(String(candidate.parallelWith.model).split('/')[0] || 'opencode')
-    }
-  }
-  return providers.size > 0 ? [...providers] : ['opencode']
-}
-
 /**
  * Resolve a CLI's absolute path by scanning env.PATH ourselves (no shelling
  * out to `which`/`where`), so this works identically on POSIX and Windows.
@@ -78,38 +66,6 @@ export async function discoverCli(agent, { env = process.env, commandRunner = ru
     return { agent, cmd: adapter.cmd, binPath, version: null, models: [], checkedAt, error: 'L0 --version check failed' }
   }
   const version = (versionResult.stdout || '').trim().split(/\r?\n/)[0] || null
-
-  if (agent === 'opencode') {
-    // opencode's models-list argv is provider-scoped (derived from the
-    // model id's "<provider>/..." prefix), unlike agy/copilot whose catalog
-    // command ignores the model entirely. A single per-agent call would
-    // silently miss every provider but the default one, so this probes each
-    // provider actually referenced in DELEGATION_MAP once and merges the
-    // results — still far fewer spawns than the old per-pair listing.
-    const providers = opencodeProviders()
-    const models = []
-    const failedProviders = []
-    for (const provider of providers) {
-      const result = await commandRunner(adapter.cmd, modelsArgv(agent, `${provider}/probe`), { env, timeoutMs: 60_000 })
-      if (result.timedOut || !result.stdout) {
-        failedProviders.push(provider)
-        continue
-      }
-      models.push(...adapter.listModels(result.stdout))
-    }
-    if (models.length === 0 && failedProviders.length === providers.length) {
-      return { agent, cmd: adapter.cmd, binPath, version, models: [], checkedAt, error: 'model list timed out' }
-    }
-    return {
-      agent,
-      cmd: adapter.cmd,
-      binPath,
-      version,
-      models,
-      checkedAt,
-      error: failedProviders.length > 0 ? `model list timed out for provider(s): ${failedProviders.join(', ')}` : null,
-    }
-  }
 
   const modelsResult = await commandRunner(adapter.cmd, modelsArgv(agent), { env, timeoutMs: 60_000 })
   if (modelsResult.timedOut || !modelsResult.stdout) {

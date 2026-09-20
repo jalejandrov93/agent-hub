@@ -13,6 +13,10 @@ const VALID_KINDS = new Set([
   'job.finished',
   'job.failed',
   'job.canceled',
+  // Best-effort server-side session.interrupt cleanup fired on an opencode
+  // timeout (E19) — see jobrunner.mjs attemptServerInterrupt. Opencode-only;
+  // never emitted for an adapter without interruptArgv.
+  'job.interrupted',
   'subagent.start',
   'subagent.stop',
   // Emitted on writes to proposals.json / learnings.json so the dashboard's

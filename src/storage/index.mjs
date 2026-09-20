@@ -1,1 +1,22 @@
-export { initDb, upsertJob, getJob, upsertLease, deleteLease, getLease, getDb, closeDb } from './sqlite.mjs'
+export {
+  initDb,
+  upsertJob,
+  getJob,
+  upsertLease,
+  deleteLease,
+  getLease,
+  upsertWorkflow,
+  getWorkflow,
+  upsertWorkflowNode,
+  getWorkflowNode,
+  listWorkflowNodes,
+  claimWorkflowNode,
+  publishWorkflowNodeReady,
+  resumeWorkflowNode,
+  upsertHarnessOrigin,
+  getHarnessOrigin,
+  getDb,
+  closeDb,
+  resetDbInstances,
+} from './sqlite.mjs'
+

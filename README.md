@@ -467,6 +467,65 @@ the dashboard SSE) and routes first-level events (`job.finished`,
 webhook adapters (`src/notify/adapters.mjs`, never throws, never logs
 secrets). It runs as its own process — never inside the MCP stdio lifecycle.
 
+### C1 workflow DAG (`src/workflow/`)
+
+`runWorkflow({workflow, ctx})` executes delegate/fanout/fanin/notify nodes in
+parallel waves (`Promise.all` per wave), persisting every transition
+(`pending → ready → running → succeeded | failed | skipped | canceled`) to
+SQLite so `runWorkflow({workflowId})` resumes after a restart without
+re-running `succeeded` nodes. Dependencies resolve via `dependsOn` +
+`condition` (safe expression over sibling results) with `onFailure` skip
+propagation by default; `fanout` fans N children with distinct `dispatchKey`s
+and `fanin` aggregates them. Per-node `maxAttempts` (backoff) and `timeoutS`;
+concurrent schedulers can't double-claim a node (`claimed_by` CAS in
+`claimWorkflowNode`). No quality/cost/adaptive scoring yet — nodes carry
+`onSuccess`/`onFailure` hooks for the future judge (C4). Example:
+`examples/software-pipeline.mjs` (research → implementation → review).
+
+### C1.1 execution hardening (`src/workflow/dsl.mjs`, `execution.mjs`)
+
+- `dispatch()` also returns an `ExecutionHandle {jobId, sessionId, abort()}`;
+  the engine awaits real completion via `waitExecution()` — a node succeeds
+  only on terminal job state, never on dispatch return. Timeout aborts first
+  (`cancelJob` locally, stop-wait remotely), then retries.
+- Nodes understand `waiting` (`user_feedback|plan_approval|external_event`):
+  `running→waiting→running→succeeded`, resumed without duplicating execution.
+- Conditions and fan-out `items` use a small safe DSL (`==,!=,===,!==,AND,
+  OR,NOT,exists` over `steps.*`) — no `new Function`/`eval` anywhere in `src/`.
+- All mutations go through `claimNode()` (sole `ready→running`) and
+  `transitionNode()` (`assertValidTransition` always); resume only revives a
+  `running` node whose lease expired *and* whose owner is dead, else it
+  re-adopts. A `fork()`-based test pins cross-process single execution.
+A dispatch result carrying a `jobId` is always waited on (`pendingJobHandle`;
+a bare pending record never counts as success), and `dispatchKey` is scoped
+by `workflowId` so identical steps in different runs never share a job.
+
+### C1.2 workflow↔supervisor link (`src/workflow/resume.mjs`)
+
+A waiting node resumes only via `resumeWorkflowNodeFromExecution(jobId)`:
+it reads the record's `workflow_id/step_id` (C0), no-ops unless the node is
+`WAITING` (`not-waiting:<estado>`), and CASes `WAITING→RUNNING` without
+stealing a live owner's claim (`owned-elsewhere` otherwise). Both
+`jules_supervise` and `jules_interact` call it best-effort after every
+successful interaction — the engine never polls Jules itself. Harness
+session origin (`_meta.sessionId` → `harness_origins`, mapping only,
+`supportsWake:false`) is recorded for the future lifecycle bridge.
+
+### Harness profiles (`src/harness/`)
+
+`delegate()` starts a job and returns — but harnesses behave differently
+after an MCP tool call (Claude Code usually continues with `job_wait`;
+OpenCode may end the turn with the job still running). Profiles model the
+orchestration strategy explicitly without coupling the engine to any
+harness: `generic` (`waitMode: none`), `claude-code` (`attention`),
+`opencode` (`attention`). Priority: explicit `waitMode`/`harness` arg >
+`AGENT_HUB_HARNESS` env > MCP `clientInfo` hint > `generic` (hints never
+decide security or critical logic). `waitMode` semantics: `none` returns at
+creation; `attention` returns on terminal *or* waiting/attention; `terminal`
+only on terminal. `delegate()` is unchanged (generic never waits by
+default). `job.started/finished/failed` events carry `harness` + `waitMode`
+for later analysis.
+
 ### Write-mode gate
 
 A `delegate()`/`job_reply()` call with `mode: 'write'` requires `cwd` to be
@@ -538,8 +597,8 @@ read jobs from a disposable worktree when that matters.
 |---|---|---|
 | `agents_status` | `{refresh?: boolean}` | L0-L2 for every pair in the delegation map. Never pings. Rows include `binPath`/`cliVersion` from `discovery.json`. |
 | `route` | `{taskType: enum, mode?: 'read'\|'write', includeCatalog?: boolean}` | Skips unavailable/breaker-open/held pairs; returns `{primary, fallbacks, skipped, discovery, reason, appliedProposal}`. `discovery` holds `{binPath, version, modelCount, checkedAt, error}` per CLI; `includeCatalog: true` returns the full model catalog instead. `appliedProposal` names the accepted proposal whose order was applied, or `null`. |
-| `delegate` | `{agent, model, task, cwd, mode?, timeoutS?, title?, variant?, taskType?}` | Returns `{jobId, status:'queued'}` immediately. `variant` is opencode's reasoning effort (minimal/low/medium/high/max); ignored by agy/copilot. Pass the same `taskType` you gave `route` so metrics, adaptive timeouts and learnings apply. |
-| `dispatch` | `{task, cwd, taskType?, mode?, workflowStep?, dispatchKey?, attempt?, parentExecutionId?, rootExecutionId?, timeoutS?}` | Atomic decide+execute: revalidates preflight/breaker at execution time (closes the `route`→`delegate` TOCTOU gap), applies the per-class policy with adapter-aware recovery (remote candidates resume/reconcile before retry; policy resolved from the real error, not the caller's guess), and deduplicates by `dispatchKey` (concurrent same-key dispatches share one job). Write mode reserves a lease token that `startJob` adopts. `route` stays recommendation-only, `delegate` exact-execution. |
+| `delegate` | `{agent, model, task, cwd, mode?, timeoutS?, title?, variant?, taskType?}` | Returns `{jobId, status:'queued'}` immediately. `variant` is opencode's reasoning effort (minimal/low/medium/high/max); ignored by agy/copilot. For opencode this is no longer a separate CLI flag — the adapter folds it into the model id it invokes (`<model>#<variant>`), never into a `--variant` argument. Pass the same `taskType` you gave `route` so metrics, adaptive timeouts and learnings apply. |
+| `dispatch` | `{task, cwd, taskType?, mode?, workflowStep?, dispatchKey?, attempt?, parentExecutionId?, rootExecutionId?, timeoutS?, waitMode?, harness?}` | Atomic decide+execute: revalidates preflight/breaker at execution time (closes the `route`→`delegate` TOCTOU gap), applies the per-class policy with adapter-aware recovery (remote candidates resume/reconcile before retry; policy resolved from the real error, not the caller's guess), and deduplicates by `dispatchKey` (concurrent same-key dispatches share one job). Write mode reserves a lease token that `startJob` adopts. `route` stays recommendation-only, `delegate` exact-execution. `waitMode` (`none`\|`attention`\|`terminal`) defaults from the harness profile — see Harness profiles. |
 | `job_wait` | `{jobId, timeoutS?<=60}` | Polls until terminal (`done`, `waiting:false`), until a remote session waits for interaction (`done` + `waiting:true` with `attentionRequired`, `attentionReason`, `recommendedAction` — act via `jules_interact`, no timeout burned), or until the local budget elapses (`done:false`, `timedOut:true`; job/session keep running). |
 | `job_status` | `{jobId}` | Current status, no waiting. |
 | `job_result` | `{jobId, maxLines?, tailLines?}` | Head of the response (default 20 lines) plus extra `tailLines` from the end (default 10, never repeating a head line) and `fullPath`, `truncated`, `tailTruncated`. |

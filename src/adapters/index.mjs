@@ -23,7 +23,10 @@ export const REMOTE_AGENTS = new Set(
 /** Argv for the "list models" command per agent, used by preflight L1. */
 export function modelsArgv(agent, model) {
   if (agent === 'agy') return ['models']
-  if (agent === 'opencode') return ['models', String(model).split('/')[0] || 'opencode', '--verbose']
+  // v2 dropped the provider positional and --verbose (E8): the catalog is now
+  // one server-side call that returns every provider's models in one shot
+  // (E9), so the model argument goes unused here.
+  if (agent === 'opencode') return ['api', 'model.list']
   if (agent === 'copilot') return ['help', 'config']
   // Codex has no model-list command; listModels() ignores stdout and returns
   // the single CLI default, so a harmless argv keeps preflight L1 from failing.
