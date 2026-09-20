@@ -28,13 +28,31 @@ test('agy: a real PONG round-trip with gemini-3.8-flash-low', { skip: !LIVE }, a
 })
 
 test('opencode: a real PONG round-trip with opencode/muse-spark-1.3-contributor-free', { skip: !LIVE }, async () => {
-  const argv = opencode.buildArgv({ model: 'opencode/muse-spark-1.3-contributor-free', prompt: 'Reply exactly: PONG', cwd: CWD, title: 'live-pong' })
-  const result = await runCommand('opencode', argv, { cwd: CWD, timeoutMs: 90_000 })
+  // v2 takes the prompt on stdin and resolves its cwd from PWD, so this must
+  // mirror exactly what jobrunner does -- a live test that forgets either one
+  // sends an empty prompt from the wrong directory and proves nothing.
+  const args = { model: 'opencode/muse-spark-1.3-contributor-free', prompt: 'Reply exactly: PONG', cwd: CWD, title: 'live-pong' }
+  const argv = opencode.buildArgv(args)
+  const result = await runCommand('opencode', argv, {
+    cwd: CWD,
+    env: { ...process.env, PWD: CWD },
+    stdin: opencode.stdinFor(args),
+    timeoutMs: 90_000,
+  })
   const parsed = opencode.parseResult(result.stdout ?? '')
-  const error = opencode.classifyError(result.stdout ?? '', { timedOut: result.timedOut })
+  const error = opencode.classifyError(result.stdout ?? '', { timedOut: result.timedOut, code: result.code })
   assert.equal(error, null, error && JSON.stringify(error))
   assert.equal(parsed.ok, true)
   assert.match(parsed.text.trim(), /PONG/)
+  assert.match(String(parsed.sessionId ?? ''), /^ses_/)
+  // Tokens are best-effort: v2 does not always emit step_finish (E6 -- observed
+  // absent on 2 of 3 live captures), and when it does it carries no `total`, so
+  // parseResult sums the components (E5). Either a positive sum or null is
+  // correct here; NaN or a negative number would mean the summing broke.
+  assert.ok(
+    parsed.tokens === null || (typeof parsed.tokens === 'number' && Number.isFinite(parsed.tokens) && parsed.tokens > 0),
+    `tokens must be a positive number or null, got ${parsed.tokens}`
+  )
 })
 
 // gpt-5-mini (named in the plan) was rejected live by --model's client-side

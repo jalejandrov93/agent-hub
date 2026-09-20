@@ -3,6 +3,7 @@ import { checkRemoteSession as defaultCheckRemoteSession } from '../check.mjs'
 import { interactWithSession as defaultInteractWithSession } from '../../tools/jules.mjs'
 import { readResult as defaultReadResult, updateResult as defaultUpdateResult } from '../../jobstore.mjs'
 import { listJobs as defaultListJobs } from '../../jobstore.mjs'
+import { bestEffortResumeWorkflowNode } from '../../workflow/resume.mjs'
 import * as defaultClient from './client.mjs'
 import * as defaultAdapter from './adapter.mjs'
 
@@ -648,6 +649,12 @@ export async function supervise({
             listJobsFn,
           })
           localPlanApprovals++
+          // C1.2: the session resumed — flip a parked WAITING workflow node
+          // back to RUNNING so the wave loop keeps waiting on the same
+          // handle. Best-effort: never fails the supervision over this.
+          if (resolvedJobId) {
+            try { bestEffortResumeWorkflowNode(resolvedJobId, { env }) } catch {}
+          }
           await sleepFn(intervalMs)
           continue
         }
@@ -714,6 +721,10 @@ export async function supervise({
             listJobsFn,
           })
           localAutoReplies++
+          // C1.2: best-effort workflow resume (see approve_plan site above).
+          if (resolvedJobId) {
+            try { bestEffortResumeWorkflowNode(resolvedJobId, { env }) } catch {}
+          }
           await sleepFn(intervalMs)
           continue
         }
@@ -746,6 +757,10 @@ export async function supervise({
             listJobsFn,
           })
           localSafeContinues++
+          // C1.2: best-effort workflow resume (see approve_plan site above).
+          if (resolvedJobId) {
+            try { bestEffortResumeWorkflowNode(resolvedJobId, { env }) } catch {}
+          }
           await sleepFn(intervalMs)
           continue
         }

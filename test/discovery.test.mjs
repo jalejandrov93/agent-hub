@@ -105,49 +105,53 @@ test('discoverCli for copilot always attaches note "catalog not authoritative"',
   assert.equal(entry.note, 'catalog not authoritative')
 })
 
-test('discoverCli for opencode fetches models across every provider actually used in DELEGATION_MAP (opencode + deepseek), not just the default', async () => {
+test('discoverCli for opencode fetches every provider\'s models with a single `opencode api model.list` call (T6: no more per-provider fan-out)', async () => {
   const home = tmpHome()
   const binDir = path.join(home, 'bin')
   fakePathWithBinary(binDir, 'opencode')
   const { discoverCli } = await fresh(home)
   const runner = fakeRunner([
-    ['--version', { stdout: '1.18.30', stderr: '', code: 0 }],
+    ['--version', { stdout: '2.0.10', stderr: '', code: 0 }],
     [
-      'models opencode',
-      { stdout: 'opencode/muse-spark-1.3-contributor-free\n{\n"providerID":"opencode",\n"id":"muse-spark-1.3-contributor-free",\n"name":"Muse Spark"\n}\n', stderr: '', code: 0 },
-    ],
-    [
-      'models deepseek',
-      { stdout: 'deepseek/deepseek-v4-flash\n{\n"providerID":"deepseek",\n"id":"deepseek-v4-flash",\n"name":"DeepSeek Flash"\n}\n', stderr: '', code: 0 },
+      'api model.list',
+      {
+        stdout: JSON.stringify({
+          location: { directory: '/repo' },
+          data: [
+            { id: 'muse-spark-1.3-contributor-free', providerID: 'opencode', name: 'Muse Spark' },
+            { id: 'deepseek-v4-flash', providerID: 'deepseek', name: 'DeepSeek Flash' },
+          ],
+        }),
+        stderr: '',
+        code: 0,
+      },
     ],
   ])
 
   const entry = await discoverCli('opencode', { env: { PATH: binDir }, commandRunner: runner })
 
   const ids = entry.models.map((m) => m.id)
-  assert.ok(ids.includes('opencode/muse-spark-1.3-contributor-free'), 'includes the default opencode provider catalog')
-  assert.ok(ids.includes('deepseek/deepseek-v4-flash'), 'also includes the deepseek provider catalog used by mechanical-edit')
+  assert.ok(ids.includes('opencode/muse-spark-1.3-contributor-free'), 'includes the opencode provider catalog')
+  assert.ok(ids.includes('deepseek/deepseek-v4-flash'), 'also includes the deepseek provider catalog, from the same single call')
   assert.equal(entry.error, null)
+  const modelsCalls = runner.calls.filter((c) => c.args.join(' ') === 'api model.list')
+  assert.equal(modelsCalls.length, 1, 'v2\'s catalog command covers every provider in one call, unlike v1\'s provider-scoped scrape')
 })
 
-test('discoverCli for opencode reports a partial error when one provider times out but keeps the other provider models', async () => {
+test('discoverCli for opencode reports "model list timed out" when its single `api model.list` call fails, via the generic single-call path', async () => {
   const home = tmpHome()
   const binDir = path.join(home, 'bin')
   fakePathWithBinary(binDir, 'opencode')
   const { discoverCli } = await fresh(home)
   const runner = fakeRunner([
-    ['--version', { stdout: '1.18.30', stderr: '', code: 0 }],
-    [
-      'models opencode',
-      { stdout: 'opencode/muse-spark-1.3-contributor-free\n{\n"providerID":"opencode",\n"id":"muse-spark-1.3-contributor-free",\n"name":"Muse Spark"\n}\n', stderr: '', code: 0 },
-    ],
-    ['models deepseek', { stdout: '', stderr: '', code: null, timedOut: true }],
+    ['--version', { stdout: '2.0.10', stderr: '', code: 0 }],
+    ['api model.list', { stdout: '', stderr: '', code: null, timedOut: true }],
   ])
 
   const entry = await discoverCli('opencode', { env: { PATH: binDir }, commandRunner: runner })
 
-  assert.ok(entry.models.some((m) => m.id === 'opencode/muse-spark-1.3-contributor-free'))
-  assert.match(entry.error, /deepseek/)
+  assert.deepEqual(entry.models, [])
+  assert.match(entry.error, /model list timed out/)
 })
 
 test('runDiscovery writes discovery.json with one row per requested agent and never throws on a partial failure', async () => {

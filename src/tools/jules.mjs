@@ -14,6 +14,7 @@ import * as defaultClient from '../cloud/jules/client.mjs'
 import { listAllSources } from '../cloud/jules/client.mjs'
 import * as defaultAdapter from '../cloud/jules/adapter.mjs'
 import { julesSuperviseTool } from '../cloud/jules/supervisor.mjs'
+import { bestEffortResumeWorkflowNode } from '../workflow/resume.mjs'
 import { TASK_TYPES } from '../schemas.mjs'
 
 /** Reject a caller-supplied taskType that is not one of schemas.mjs TASK_TYPES (mirrors tools/jobs.mjs). */
@@ -462,9 +463,11 @@ export async function interactWithSession({
 
 /**
  * MCP tool wrapper around interactWithSession (same behavior, MCP defaults).
+ * C1.2: after a successful interaction, best-effort resume of a parked
+ * WAITING workflow node (WAITING -> RUNNING) — never fails the interaction.
  */
 export async function julesInteractTool(args = {}) {
-  return interactWithSession({
+  const res = await interactWithSession({
     env: process.env,
     client: defaultClient,
     listJobsFn: defaultListJobs,
@@ -474,6 +477,11 @@ export async function julesInteractTool(args = {}) {
     getAccountSecretFn: defaultGetAccountSecret,
     ...args,
   })
+  const jobId = args?.jobId ?? res?.jobId ?? null
+  if (jobId) {
+    try { bestEffortResumeWorkflowNode(jobId, { env: args?.env ?? process.env }) } catch {}
+  }
+  return res
 }
 
 /**

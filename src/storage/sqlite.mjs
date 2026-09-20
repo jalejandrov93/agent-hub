@@ -52,7 +52,7 @@ function readJsonStore(stateHome) {
   try {
     return JSON.parse(fs.readFileSync(p, 'utf8'))
   } catch {
-    return { workflows: {}, workflow_nodes: {}, jobs: {}, leases: {} }
+    return { workflows: {}, workflow_nodes: {}, jobs: {}, leases: {}, harness_origins: {} }
   }
 }
 
@@ -66,7 +66,7 @@ function jsonInitDb(stateHome) {
   ensureDir(stateHome)
   const p = jsonStoragePath(stateHome)
   if (!fs.existsSync(p)) {
-    writeJsonStore(stateHome, { workflows: {}, workflow_nodes: {}, jobs: {}, leases: {} })
+    writeJsonStore(stateHome, { workflows: {}, workflow_nodes: {}, jobs: {}, leases: {}, harness_origins: {} })
   }
 }
 
@@ -208,8 +208,8 @@ function jsonPublishWorkflowNodeReady(stateHome, { workflowId, stepId }) {
   writeJsonStore(stateHome, store)
   return true
 }
-
-function jsonClaimWorkflowNode(stateHome, { workflowId, stepId, claimedBy, attempt }) {  const store = readJsonStore(stateHome)
+function jsonClaimWorkflowNode(stateHome, { workflowId, stepId, claimedBy, attempt }) {
+  const store = readJsonStore(stateHome)
   store.workflow_nodes = store.workflow_nodes || {}
   const key = `${workflowId}:${stepId}`
   const existing = store.workflow_nodes[key]
@@ -227,6 +227,47 @@ function jsonClaimWorkflowNode(stateHome, { workflowId, stepId, claimedBy, attem
     return true
   }
   return false
+}
+
+/**
+ * C1.2: atomic CAS resume waiting -> running. Only flips a node that is
+ * STILL waiting; preserves claimed_by/attempt/result_json so the scheduler
+ * that holds the claim keeps it — a resume never steals ownership.
+ */
+function jsonResumeWorkflowNode(stateHome, { workflowId, stepId }) {
+  const store = readJsonStore(stateHome)
+  store.workflow_nodes = store.workflow_nodes || {}
+  const key = `${workflowId}:${stepId}`
+  const existing = store.workflow_nodes[key]
+  if (!existing || existing.status !== 'waiting') return false
+  existing.status = 'running'
+  existing.updated_at = new Date().toISOString()
+  existing.updatedAt = existing.updated_at
+  writeJsonStore(stateHome, store)
+  return true
+}
+
+function normalizeHarnessOriginRow(row) {
+  return {
+    job_id: row.job_id,
+    harness_session_id: row.harness_session_id ?? null,
+    harness: row.harness ?? null,
+    created_at: row.created_at ?? new Date().toISOString(),
+  }
+}
+
+function jsonUpsertHarnessOrigin(stateHome, row) {
+  const store = readJsonStore(stateHome)
+  store.harness_origins = store.harness_origins || {}
+  const norm = normalizeHarnessOriginRow(row)
+  store.harness_origins[norm.job_id] = norm
+  writeJsonStore(stateHome, store)
+  return norm
+}
+
+function jsonGetHarnessOrigin(stateHome, jobId) {
+  const store = readJsonStore(stateHome)
+  return store.harness_origins?.[jobId] ?? null
 }
 
 /* ------------------------------------------------------------------ */
@@ -272,6 +313,13 @@ CREATE TABLE IF NOT EXISTS leases (
   job_id TEXT PRIMARY KEY,
   owner TEXT,
   expires_at TEXT
+);
+
+CREATE TABLE IF NOT EXISTS harness_origins (
+  job_id TEXT PRIMARY KEY,
+  harness_session_id TEXT,
+  harness TEXT,
+  created_at TEXT
 );
 `
 
@@ -354,6 +402,26 @@ WHERE workflow_id = @workflow_id
   AND step_id = @step_id
   AND status = 'pending'
 `
+
+const RESUME_WORKFLOW_NODE_SQL = `
+UPDATE workflow_nodes
+SET status = 'running',
+    updated_at = @updated_at
+WHERE workflow_id = @workflow_id
+  AND step_id = @step_id
+  AND status = 'waiting'
+`
+
+const UPSERT_HARNESS_ORIGIN_SQL = `
+INSERT INTO harness_origins (job_id, harness_session_id, harness, created_at)
+VALUES (@job_id, @harness_session_id, @harness, @created_at)
+ON CONFLICT(job_id) DO UPDATE SET
+  harness_session_id = @harness_session_id,
+  harness = @harness,
+  created_at = @created_at
+`
+
+const GET_HARNESS_ORIGIN_SQL = `SELECT * FROM harness_origins WHERE job_id = ?`
 
 function sqliteInitDb(stateHome) {
   const dbPath = paths({ AGENT_HUB_HOME: stateHome }).dbFile
@@ -488,6 +556,31 @@ function sqliteClaimWorkflowNode(db, { workflowId, stepId, claimedBy, attempt })
     updated_at: now,
   })
   return info.changes > 0
+}
+
+function sqliteResumeWorkflowNode(db, { workflowId, stepId }) {
+  const now = new Date().toISOString()
+  const info = db.prepare(RESUME_WORKFLOW_NODE_SQL).run({
+    workflow_id: workflowId,
+    step_id: stepId,
+    updated_at: now,
+  })
+  return info.changes > 0
+}
+
+function sqliteUpsertHarnessOrigin(db, row) {
+  const norm = normalizeHarnessOriginRow(row)
+  db.prepare(UPSERT_HARNESS_ORIGIN_SQL).run({
+    job_id: norm.job_id,
+    harness_session_id: norm.harness_session_id,
+    harness: norm.harness,
+    created_at: norm.created_at,
+  })
+  return norm
+}
+
+function sqliteGetHarnessOrigin(db, jobId) {
+  return db.prepare(GET_HARNESS_ORIGIN_SQL).get(jobId) ?? null
 }
 
 /* ------------------------------------------------------------------ */
@@ -674,6 +767,43 @@ export function publishWorkflowNodeReady(ctx, { workflowId, stepId }) {
   }
   const home = normalizeHome(ctx?.stateHome)
   return jsonPublishWorkflowNodeReady(home, { workflowId, stepId })
+}
+
+/**
+ * C1.2: atomically resume a waiting node to running (conditional: only from
+ * waiting). Preserves claimed_by so the scheduler holding the claim keeps
+ * it — a resume never steals ownership.
+ * @returns {boolean} true if the row moved waiting -> running
+ */
+export function resumeWorkflowNode(ctx, { workflowId, stepId }) {
+  if (ctx.backend === 'sqlite') {
+    return sqliteResumeWorkflowNode(ctx.db, { workflowId, stepId })
+  }
+  const home = normalizeHome(ctx?.stateHome)
+  return jsonResumeWorkflowNode(home, { workflowId, stepId })
+}
+
+/**
+ * C1.2: persist the jobId -> harness-session mapping (future bridge only;
+ * nothing consumes it yet — every profile reports supportsWake=false).
+ */
+export function upsertHarnessOrigin(ctx, row) {
+  if (ctx.backend === 'sqlite') {
+    return sqliteUpsertHarnessOrigin(ctx.db, row)
+  }
+  const home = normalizeHome(ctx?.stateHome)
+  return jsonUpsertHarnessOrigin(home, row)
+}
+
+/**
+ * C1.2: read the jobId -> harness-session mapping, or null when unknown.
+ */
+export function getHarnessOrigin(ctx, jobId) {
+  if (ctx.backend === 'sqlite') {
+    return sqliteGetHarnessOrigin(ctx.db, jobId)
+  }
+  const home = normalizeHome(ctx?.stateHome)
+  return jsonGetHarnessOrigin(home, jobId)
 }
 
 export { getDb, closeDb, resetDbInstances } from './db.mjs'

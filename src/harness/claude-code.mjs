@@ -12,4 +12,7 @@ export const claudeCode = {
   behavior: {
     requiresExplicitContinuation: true,
   },
+  // C1.2: mapping-only (see src/harness/origin.mjs). No wake-up bridge
+  // exists yet, so no profile supports waking its harness session.
+  supportsWake: false,
 }

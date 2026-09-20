@@ -252,8 +252,9 @@ function isFreshDiscoveryRow(entry) {
  * Resolve one shared {modelId: model} map for every pair of `agent` in this
  * agentsStatus() batch, so runPreflight's L1 spawns the models-list command
  * at most once per agent (not once per pair). Prefers a fresh discovery.json
- * row; otherwise spawns live, once per agent (opencode: once per distinct
- * provider actually requested, since its catalog command is provider-scoped).
+ * row; otherwise spawns live, once per agent — opencode's v2 catalog call
+ * (`api model.list`) covers every provider in one shot, so it needs no
+ * per-provider special case here either (E9).
  * Returns null on any failure/timeout so callers fall back to runPreflight's
  * own per-pair spawn — the pre-existing, safe "degraded on timeout" path.
  */
@@ -269,16 +270,6 @@ async function resolveModelsById({ agent, pairs, cwd, env, commandRunner, refres
 
   const adapter = adapterFor(agent)
   const modelsById = {}
-
-  if (agent === 'opencode') {
-    const providers = new Set(pairs.map((p) => String(p.model).split('/')[0] || 'opencode'))
-    for (const provider of providers) {
-      const result = await commandRunner(adapter.cmd, modelsArgv(agent, `${provider}/probe`), { cwd, env, timeoutMs: 60_000 })
-      if (result?.timedOut || !result?.stdout) return null
-      for (const m of adapter.listModels(result.stdout)) modelsById[m.id] = m
-    }
-    return modelsById
-  }
 
   const result = await commandRunner(adapter.cmd, modelsArgv(agent, pairs[0]?.model), { cwd, env, timeoutMs: 60_000 })
   if (result?.timedOut || !result?.stdout) return null
@@ -344,9 +335,17 @@ export async function pingAgent({ agent, model, cwd, env = process.env, commandR
   const key = cacheKey(agent, model)
   const startedAt = Date.now()
   const timeoutS = resolveTimeoutS(agent, model)
-  const argv = adapter.buildArgv({ model, prompt: PING_PROMPT, cwd, mode: agent === 'copilot' ? 'read' : 'plan' })
+  const adapterArgs = { model, prompt: PING_PROMPT, cwd, mode: agent === 'copilot' ? 'read' : 'plan' }
+  const argv = adapter.buildArgv(adapterArgs)
+  // The ping must travel the SAME path as a real job or it stops proving
+  // anything. opencode v2 takes its prompt on stdin (E3/E4) and resolves its
+  // working directory from PWD before chdir'ing (E14): a ping that drops
+  // either sends an empty message from the wrong directory and still spends a
+  // real model call, so a resulting "ready" would be meaningless.
+  const stdin = adapter.stdinFor?.(adapterArgs)
+  const childEnv = { ...env, PWD: cwd }
 
-  const result = await commandRunner(adapter.cmd, argv, { cwd, env, timeoutMs: Math.min(timeoutS, 45) * 1000 })
+  const result = await commandRunner(adapter.cmd, argv, { cwd, env: childEnv, stdin, timeoutMs: Math.min(timeoutS, 45) * 1000 })
   // Combine stdout+stderr before classifying: copilot's --model rejection
   // ("Error: Model ... is not available.") was measured on STDERR, not
   // stdout, while success payloads for all three adapters are stdout-only.
@@ -354,7 +353,7 @@ export async function pingAgent({ agent, model, cwd, env = process.env, commandR
   // the same stdout.log); pingAgent keeps process.mjs's streams separate, so
   // it must combine them explicitly or a stderr-only error is invisible.
   const combinedOutput = `${result.stdout ?? ''}\n${result.stderr ?? ''}`
-  const error = adapter.classifyError(combinedOutput, { timedOut: result.timedOut })
+  const error = adapter.classifyError(combinedOutput, { timedOut: result.timedOut, code: result.code })
 
   if (error) {
     return writeCacheEntry(

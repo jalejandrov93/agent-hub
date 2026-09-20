@@ -137,8 +137,8 @@ test('a single billing failure opens the breaker immediately (no threshold wait,
 
   const { runPreflight } = await fresh(home)
   const runner = fakeRunner([
-    ['--version', { stdout: '1.18.30', stderr: '', code: 0 }],
-    [/models|help config/, { stdout: 'deepseek/deepseek-v4-pro\n{\n"providerID":"deepseek",\n"id":"deepseek-v4-pro",\n"name":"n"\n}\n', stderr: '', code: 0 }],
+    ['--version', { stdout: '2.0.10', stderr: '', code: 0 }],
+    ['api model.list', { stdout: JSON.stringify({ location: { directory: '/tmp' }, data: [{ id: 'deepseek-v4-pro', providerID: 'deepseek', name: 'n' }] }), stderr: '', code: 0 }],
   ])
 
   const entry = await runPreflight({ agent: 'opencode', model: 'deepseek/deepseek-v4-pro', cwd: '/tmp', commandRunner: runner, level: 'L2' })
@@ -362,6 +362,42 @@ test('agentsStatus lists the models-list command only once for 3 pairs of the sa
   assert.equal(modelsCalls.length, 1, 'the models-list command must be spawned once, not once per pair')
 })
 
+test('agentsStatus for opencode issues a single `api model.list` call even when pairs span multiple providers (T6: fan-out removed)', async () => {
+  const home = tmpHome()
+  const { agentsStatus } = await fresh(home)
+  const runner = fakeRunner([
+    ['--version', { stdout: '2.0.10', stderr: '', code: 0 }],
+    [
+      'api model.list',
+      {
+        stdout: JSON.stringify({
+          location: { directory: '/tmp' },
+          data: [
+            { id: 'muse-spark-1.3-contributor-free', providerID: 'opencode', name: 'Muse Spark' },
+            { id: 'deepseek-v4-flash', providerID: 'deepseek', name: 'DeepSeek Flash' },
+          ],
+        }),
+        stderr: '',
+        code: 0,
+      },
+    ],
+  ])
+
+  const results = await agentsStatus({
+    agents: [
+      { agent: 'opencode', model: 'opencode/muse-spark-1.3-contributor-free' },
+      { agent: 'opencode', model: 'deepseek/deepseek-v4-flash' },
+    ],
+    cwd: '/tmp',
+    commandRunner: runner,
+  })
+
+  assert.equal(results.length, 2)
+  assert.ok(results.every((r) => r.status === 'ready'))
+  const modelsCalls = runner.calls.filter((c) => c.args.join(' ') === 'api model.list')
+  assert.equal(modelsCalls.length, 1, 'v2\'s catalog call is not provider-scoped, so one call must cover pairs from different providers')
+})
+
 test('agentsStatus preserves the input pair order in its results', async () => {
   const home = tmpHome()
   const { agentsStatus } = await fresh(home)
@@ -498,4 +534,38 @@ test('agentsStatus emits no "preflight" event when announce is false (the defaul
 
   const events = readTail({ env: { AGENT_HUB_HOME: home } }).filter((e) => e.kind === 'preflight')
   assert.equal(events.length, 0)
+})
+
+test('pingAgent (L3) sends the ping prompt on stdin and pins PWD for adapters that need it', async () => {
+  const { pingAgent } = await fresh(tmpHome())
+  const calls = []
+  const runner = async (cmd, args, opts) => {
+    calls.push({ cmd, args, opts })
+    return { stdout: '{"type":"text","sessionID":"ses_1","part":{"text":"PONG"}}', stderr: '', code: 0, timedOut: false }
+  }
+
+  await pingAgent({ agent: 'opencode', model: 'opencode/big-pickle', cwd: '/tmp', env: { PATH: '/usr/bin' }, commandRunner: runner })
+
+  assert.equal(calls.length, 1)
+  const [call] = calls
+  // v2 takes the prompt on stdin, never as an argv element (E3/E4): a ping
+  // that forgets it sends opencode an EMPTY message and still spends a real
+  // model call, so "ready" would mean nothing.
+  assert.ok(!call.args.some((a) => a.includes('PONG')), `prompt must not appear in argv: ${JSON.stringify(call.args)}`)
+  assert.match(String(call.opts.stdin ?? ''), /PONG/)
+  // Same PWD hazard as a real job (E14).
+  assert.equal(call.opts.env.PWD, '/tmp')
+})
+
+test('pingAgent (L3) forwards the child exit code into classifyError so a 130 (SIGINT) reads as canceled, not a generic empty/crash', async () => {
+  const { pingAgent } = await fresh(tmpHome())
+  // No text event at all and exit 130: without forwarding the code, this
+  // reads as a generic "empty" stream; with it, classifyError recognizes
+  // the SIGINT interrupt from our own kill ladder (E16).
+  const runner = async () => ({ stdout: '', stderr: '', code: 130, timedOut: false })
+
+  const entry = await pingAgent({ agent: 'opencode', model: 'opencode/big-pickle', cwd: '/tmp', commandRunner: runner })
+
+  assert.equal(entry.status, 'unavailable')
+  assert.match(entry.reason, /canceled/)
 })

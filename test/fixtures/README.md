@@ -1,8 +1,16 @@
 # Adapter fixtures — provenance
 
-Recorded 2026-09-11 against `agy` 1.2.1, `opencode` 1.18.30, `copilot` 1.0.31.
+Recorded 2026-09-11 against `agy` 1.2.1, `opencode` 1.18.30 (v1), `copilot` 1.0.31.
 Every command was run with `timeout -k 5 <n>` in the foreground with a tiny
 prompt (`Reply exactly: PONG`), from `~/.claude/mcp-servers/agent-hub` as cwd.
+This applies to every fixture below except the three opencode ones named next:
+`opencode/model-list.json`, `opencode/v2-two-assistant-messages.jsonl` and
+`opencode/v2-no-step-finish.jsonl` were recorded later, on 2026-09-19, against
+`opencode` 2.0.10 (v2) — see `odd/tasks/opencode-v2-migration.md` for the
+evidence they back (E7/E9 and E6 respectively). The remaining `opencode/*`
+fixtures (`success.jsonl`, `billing-402.jsonl`, `empty.jsonl`) are still that
+original v1 1.18.30 capture; `success.jsonl` in particular still carries the v1
+`step_finish.part.tokens.total` field that v2 dropped (E5).
 
 ## REAL (actual CLI output, byte-for-byte)
 
@@ -13,10 +21,6 @@ prompt (`Reply exactly: PONG`), from `~/.claude/mcp-servers/agent-hub` as cwd.
   plan, hung for the full 90s timeout and was SIGKILLed twice in a row — it is
   a real model id per `opencode models opencode --verbose` but was unusable at
   recording time. `muse-spark-1.3-contributor-free` answered in ~3s instead.)
-- `opencode/models-verbose.txt` — `opencode models opencode --verbose` (first ~100 lines; full catalog is much
-  longer, current free ids as of recording: `big-pickle`, `ling-3.0-flash-fin-free`,
-  `mimo-v2.5-free`, `muse-spark-1.2-contributor-free`, `muse-spark-1.3-contributor-free`,
-  `nemotron-3-ultra-free`, `nemotron-3.5-lightning-free`)
 - `copilot/success.jsonl` — `copilot -p "Reply exactly: PONG" -s --output-format json --model auto --no-ask-user --deny-tool=write --deny-tool=shell --add-dir <cwd>`
   (`--model gpt-5-mini` — the id named in the plan and *listed* in `help config`
   — failed every attempt with `Error: Model "gpt-5-mini" from --model flag is
