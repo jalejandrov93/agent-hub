@@ -250,14 +250,17 @@ export function buildServer() {
       outputSchema: DelegateResponse,
       annotations: { readOnlyHint: false, openWorldHint: true },
     },
-    guard(({ agent, model, task, cwd, mode, timeoutS, title, variant, taskType }, extra) =>
-      delegateTool({ agent, model, task, cwd, mode, timeoutS, title, variant, taskType }).then((res) => {
-        // C1.2 origin mapping (best-effort, mapping-only): remember which
-        // harness session this job came from for a future wake-up bridge.
-        recordDispatchOrigin({ jobId: res?.jobId, extra, harness: null, env: process.env })
-        return res
-      })
-    )
+    // delegateTool is SYNCHRONOUS (it returns the job record, it does not wait
+    // for the job) -- do not reach for .then() here. guard() awaits whatever
+    // the handler returns, so a plain object is correct. dispatch() below can
+    // use .then() only because it really is async.
+    guard(({ agent, model, task, cwd, mode, timeoutS, title, variant, taskType }, extra) => {
+      const res = delegateTool({ agent, model, task, cwd, mode, timeoutS, title, variant, taskType })
+      // C1.2 origin mapping (best-effort, mapping-only): remember which
+      // harness session this job came from for a future wake-up bridge.
+      recordDispatchOrigin({ jobId: res?.jobId, extra, harness: null, env: process.env })
+      return res
+    })
   )
 
   register(
