@@ -206,3 +206,28 @@ test('listPrompts shows the three prompts and getPrompt("guided-write", args) co
     await close()
   }
 })
+
+test('delegate returns its job record instead of crashing on the registered handler', async () => {
+  // Regression: the C1.2 origin-mapping wiring wrapped delegateTool(...) in
+  // .then(), but delegateTool is synchronous and returns a plain object, so
+  // EVERY delegate call died with "delegateTool(...).then is not a function".
+  // dispatch() survived the same wrapping only because it really is async.
+  //
+  // Write mode with the (empty) WRITE_ALLOWLIST is rejected before anything
+  // is spawned, so this exercises the whole registered handler -- including
+  // the origin-mapping step -- without starting a real CLI.
+  const { client, close } = await connect()
+  try {
+    const result = await client.callTool({
+      name: 'delegate',
+      arguments: { agent: 'agy', model: 'gemini-3.8-flash-low', task: 'hi', cwd: '/tmp', mode: 'write' },
+    })
+
+    assert.ok(!result.isError, `delegate must not error: ${JSON.stringify(result.content)}`)
+    assert.ok(result.structuredContent?.jobId, 'delegate must return a jobId')
+    assert.equal(result.structuredContent.status, 'failed')
+    assert.equal(result.structuredContent.errorKind, 'worktree_denied')
+  } finally {
+    await close()
+  }
+})
