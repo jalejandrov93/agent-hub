@@ -21,6 +21,7 @@ export const NodeSchema = z
     onFailure: z.any().optional(),
     items: z.union([z.array(z.any()), z.string()]).optional(),
     metadata: z.record(z.any()).optional(),
+    artifacts: z.array(z.string()).optional(),
   })
   .transform((data) => {
     const id = data.id || data.step_id

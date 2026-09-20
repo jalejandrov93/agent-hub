@@ -15,7 +15,9 @@ import {
   existsArtifact,
   listArtifacts,
   collectManifest,
-  resolveArtifactRefs
+  resolveArtifactRefs,
+  manifestPath,
+  writeManifest
 } from '../src/artifacts.mjs'
 
 function makeEnv() {
@@ -184,3 +186,51 @@ test('resolveArtifactRefs inlines content, truncates over maxBytesPerRef, and re
   assert.deepEqual(truncResolved.refs, [{ ref: 'artifact://wf-1/s1/big.txt', bytes: 16, truncated: true }])
   assert.deepEqual(truncResolved.missing, [])
 })
+
+test('manifestPath returns expected path and rejects invalid segments or traversal', () => {
+  const env = makeEnv()
+  const p = manifestPath({ workflowId: 'wf-1', stepId: 'step-1' }, env)
+  assert.equal(p, path.join(env.AGENT_HUB_HOME, 'runs', 'wf-1', 'step-1', 'artifacts.manifest.json'))
+
+  assert.throws(() => manifestPath({ workflowId: '..', stepId: 'step-1' }, env))
+  assert.throws(() => manifestPath({ workflowId: 'wf-1', stepId: '..' }, env))
+  assert.throws(() => manifestPath({ workflowId: 'wf/1', stepId: 'step-1' }, env))
+  assert.throws(() => manifestPath({ workflowId: '', stepId: 'step-1' }, env))
+  assert.throws(() => manifestPath({ workflowId: 'wf-1', stepId: '' }, env))
+  assert.throws(() => manifestPath({ workflowId: null, stepId: 'step-1' }, env))
+  assert.throws(() => manifestPath({ workflowId: 'wf-1', stepId: null }, env))
+})
+
+test('writeManifest writes manifest atomically and round-trips correctly', () => {
+  const env = makeEnv()
+  const manifest = {
+    declared: ['report.md', 'diff.patch'],
+    present: ['report.md'],
+    missing: ['diff.patch'],
+    artifacts: {
+      'report.md': { ref: 'artifact://wf-1/s1/report.md', exists: true, bytes: 10, sha256: 'abc' },
+      'diff.patch': { ref: 'artifact://wf-1/s1/diff.patch', exists: false, bytes: 0, sha256: null }
+    }
+  }
+
+  const written = writeManifest({ workflowId: 'wf-1', stepId: 's1' }, manifest, env)
+  const expectedPath = manifestPath({ workflowId: 'wf-1', stepId: 's1' }, env)
+
+  assert.equal(written.ref, 'artifact://wf-1/s1/manifest.json')
+  assert.equal(written.path, expectedPath)
+  assert.ok(written.updatedAt)
+  assert.deepEqual(written.present, ['report.md'])
+  assert.deepEqual(written.missing, ['diff.patch'])
+
+  assert.ok(fs.existsSync(expectedPath))
+  const parsed = JSON.parse(fs.readFileSync(expectedPath, 'utf8'))
+  assert.equal(parsed.ref, 'artifact://wf-1/s1/manifest.json')
+  assert.equal(parsed.path, expectedPath)
+  assert.equal(parsed.updatedAt, written.updatedAt)
+  assert.deepEqual(parsed.present, ['report.md'])
+  assert.deepEqual(parsed.missing, ['diff.patch'])
+
+  assert.throws(() => writeManifest({ workflowId: '..', stepId: 's1' }, manifest, env))
+  assert.throws(() => writeManifest({ workflowId: 'wf-1', stepId: '..' }, manifest, env))
+})
+

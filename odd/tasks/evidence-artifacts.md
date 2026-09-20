@@ -104,3 +104,16 @@ Out of scope (explicit follow-ups):
 ## Progress log
 
 - 2026-09-20: feature doc created; worktree + branch `feat/c2-artifacts`.
+- 2026-09-20: **T1 done** — `src/artifacts.mjs` + `test/artifacts.test.mjs`
+  (8 tests). Verified independently: `node --test test/artifacts.test.mjs`
+  -> 8 pass / 0 fail. Commit `4b91715`.
+- T2 spec addition: `artifacts.mjs` also exports `manifestPath()` and
+  `writeManifest()` (atomic) so the engine can persist an
+  `artifacts.manifest.json` sibling per node.
+- 2026-09-20: **T2 done** — `NodeSchema.artifacts`, engine wiring (dir +
+  instruction + `artifact://` resolution + manifest + `job.finished.artifacts`)
+  and `test/workflow-artifacts.test.mjs` (3 integration tests).
+  Verified: targeted 13 pass / 0 fail; full `npm test` 1019 pass / 1 fail
+  (pre-existing `worktree-lease` full-suite flake, 6/6 in isolation) /
+  8 cancelled (`quota-codexbar`, pre-existing).
+- T3 pending: README + CHANGELOG.

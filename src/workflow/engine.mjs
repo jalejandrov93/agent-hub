@@ -1,4 +1,11 @@
+import fs from 'node:fs'
 import crypto from 'node:crypto'
+import {
+  artifactsDir,
+  collectManifest,
+  resolveArtifactRefs,
+  writeManifest,
+} from '../artifacts.mjs'
 import {
   getDb,
   upsertWorkflow,
@@ -217,11 +224,31 @@ async function executeNode({
     { env }
   )
 
+  const declared = node.type === 'delegate' && Array.isArray(node.artifacts) ? node.artifacts : []
+
   while (attempt <= maxAttempts) {
     try {
       let result = null
 
       if (node.type === 'delegate') {
+        const resolved = resolveArtifactRefs(node.task ?? '', { env })
+        if (resolved.missing.length > 0) {
+          throw new Error('unresolved artifact ref: ' + resolved.missing[0])
+        }
+        let dispatchedTask = resolved.text
+        if (declared.length > 0) {
+          const dir = artifactsDir({ workflowId: workflow.id, stepId: node.id }, env)
+          fs.mkdirSync(dir, { recursive: true })
+          dispatchedTask =
+            dispatchedTask +
+            '\n\n' +
+            'Evidence artifacts: write these files to ' +
+            dir +
+            ' (absolute path), one file per name, exactly these filenames: ' +
+            declared.join(', ') +
+            '. Do not write any other file there.'
+        }
+
         // C1.6 timeout calculation
         let timeoutS = node.timeoutS
         if (!timeoutS && typeof calculateDispatchTimeoutS === 'function') {
@@ -245,7 +272,7 @@ async function executeNode({
         // legacy cuelgan dentro del dispatch, igual que antes).
         const dispatchPromise = Promise.resolve().then(() =>
           dispatchFn({
-            task: node.task,
+            task: dispatchedTask,
             taskType: node.taskType,
             agent: node.agent,
             model: node.model,
@@ -403,6 +430,12 @@ async function executeNode({
         error: null,
       })
 
+      let manifest = null
+      if (node.type === 'delegate' && declared.length > 0) {
+        manifest = collectManifest({ workflowId: workflow.id, stepId: node.id, declared }, env)
+        writeManifest({ workflowId: workflow.id, stepId: node.id }, manifest, env)
+      }
+
       appendEvent(
         {
           kind: 'job.finished',
@@ -415,6 +448,7 @@ async function executeNode({
           title: node.task ?? node.id,
           harness: nodeHarness,
           waitMode: nodeWaitMode,
+          ...(manifest ? { artifacts: manifest.artifacts } : {}),
         },
         { env }
       )

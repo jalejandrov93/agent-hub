@@ -229,3 +229,35 @@ export function resolveArtifactRefs(text, { env = process.env, maxBytesPerRef = 
 
   return { text: replacedText, refs, missing }
 }
+
+export function manifestPath({ workflowId, stepId } = {}, env = process.env) {
+  assertValidSegment(workflowId, 'workflowId')
+  assertValidSegment(stepId, 'stepId')
+  const base = paths(env).runsDir
+  const fullPath = path.join(base, workflowId, stepId, 'artifacts.manifest.json')
+  const resolved = path.resolve(fullPath)
+  const resolvedBase = path.resolve(base) + path.sep
+  if (!resolved.startsWith(resolvedBase)) {
+    throw new Error(`path traversal detected: ${resolved}`)
+  }
+  return fullPath
+}
+
+export function writeManifest({ workflowId, stepId } = {}, manifest = {}, env = process.env) {
+  const filePath = manifestPath({ workflowId, stepId }, env)
+  const dir = path.dirname(filePath)
+  fs.mkdirSync(dir, { recursive: true })
+
+  const augmented = {
+    ...manifest,
+    ref: 'artifact://' + workflowId + '/' + stepId + '/manifest.json',
+    path: filePath,
+    updatedAt: new Date().toISOString()
+  }
+
+  const tmp = path.join(dir, `.manifest.${process.pid}.${crypto.randomBytes(4).toString('hex')}.tmp`)
+  fs.writeFileSync(tmp, JSON.stringify(augmented, null, 2), 'utf8')
+  fs.renameSync(tmp, filePath)
+
+  return augmented
+}
