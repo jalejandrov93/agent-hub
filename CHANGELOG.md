@@ -6,6 +6,12 @@ and this project adheres to [Semantic Versioning](https://semver.org/).
 
 ## [Unreleased]
 
+### Removed
+
+- Unused per-job `quality_score` field removed from `JobRecord` schema and `createJob`.
+  The SQLite column remains dormant for compatibility, and the derived metrics
+  `qualityScore` (`10 * verifiedRate`) is unaffected.
+
 ### Fixed
 
 - `createJob` now rejects a record without `agent`/`model` instead of writing

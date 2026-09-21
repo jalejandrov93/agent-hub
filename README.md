@@ -502,7 +502,7 @@ plus a `listSessions` search before creating).
 
 `JobRecord` carries nullable workflow columns from the start (`workflow_id`,
 `step_id`, `parent_execution_id`, `root_execution_id`, `attempt`,
-`remote_state`, `quality_score`, `verified`, `judge_verdict`) so the later
+`remote_state`, `verified`, `judge_verdict`) so the later
 workflow engine never needs a breaking migration.
 
 ### C0-real: SQLite as coordination state
@@ -512,7 +512,7 @@ dashboard startup (`AGENT_HUB_HOME/agent-hub.db`, WAL, singleton per state
 dir). Coordination state is partitioned across seven tables:
 - `workflows`: DAG definitions (`definition_json`), run status, and timestamps.
 - `workflow_nodes`: step status (`pending`, `running`, `waiting`, `succeeded`, `failed`, `skipped`, `canceled`), CAS `claimed_by` leases, and result JSON.
-- `jobs`: mirrors execution records, workflow links (`workflow_id`, `step_id`, `parent_execution_id`, `root_execution_id`), `attempt`, `remote_state`, `quality_score`, `verified`, and `judge_verdict`.
+- `jobs`: mirrors execution records, workflow links (`workflow_id`, `step_id`, `parent_execution_id`, `root_execution_id`), `attempt`, `remote_state`, `verified`, and `judge_verdict`.
 - `leases`: distributed single-writer locks for write-mode checkouts (`job_id`, `owner`, `expires_at`).
 - `harness_origins`: maps dispatched jobs to their originating harness sessions for completion waking.
 - `task_handoffs`: structured cross-step handoff payloads per step.
