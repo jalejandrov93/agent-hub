@@ -155,3 +155,74 @@ test('rankCandidates: missing costUsdAvg/qualityScore (undefined) never becomes 
 
   assert.equal(ranking[0].score, 1)
 })
+
+test('rankCandidates: candidate with insufficient samples does not reorder and notes insufficient samples', () => {
+  const candidates = [
+    { agent: 'agy', model: 'gemini-3.8-flash-low', id: 1 },
+    { agent: 'agy', model: 'gemini-3.8-flash-medium', id: 2 },
+  ]
+  const metrics = {
+    [metricKey('agy', 'gemini-3.8-flash-low')]: { qualityScore: 4, samples: 10 },
+    [metricKey('agy', 'gemini-3.8-flash-medium')]: { qualityScore: 9, samples: 1 }, // below threshold
+  }
+  const { ranking } = rankCandidates({
+    candidates,
+    metrics,
+    preferences: { quality: 1, cost: 0, latency: 0 },
+    minSamples: 10,
+  })
+
+  // id 2 has higher quality but insufficient samples, so it gets 0 score.
+  // id 1 has lower quality but enough samples, so it gets score > 0.
+  // Therefore, id 1 should be ranked first, id 2 ranked second.
+  // If both had enough samples, id 2 would be first.
+  assert.equal(ranking.length, 2)
+  assert.equal(ranking[0].id, 1)
+  assert.equal(ranking[1].id, 2)
+
+  const badCandidate = ranking[1]
+  assert.equal(badCandidate.score, 0)
+  assert.equal(badCandidate.reasons[0].note, 'insufficient samples')
+})
+
+test('rankCandidates: candidate with >= threshold samples does reorder', () => {
+  const candidates = [
+    { agent: 'agy', model: 'gemini-3.8-flash-low', id: 1 },
+    { agent: 'agy', model: 'gemini-3.8-flash-medium', id: 2 },
+  ]
+  const metrics = {
+    [metricKey('agy', 'gemini-3.8-flash-low')]: { qualityScore: 4, samples: 10 },
+    [metricKey('agy', 'gemini-3.8-flash-medium')]: { qualityScore: 9, samples: 10 }, // meets threshold
+  }
+  const { ranking } = rankCandidates({
+    candidates,
+    metrics,
+    preferences: { quality: 1, cost: 0, latency: 0 },
+    minSamples: 10,
+  })
+
+  // id 2 has higher quality and enough samples, so it should reorder to first.
+  assert.equal(ranking.length, 2)
+  assert.equal(ranking[0].id, 2)
+  assert.equal(ranking[1].id, 1)
+  assert.equal(ranking[0].reasons[0].note, null)
+})
+
+test('rankCandidates: missing samples behave as no-data (current behaviour)', () => {
+  const candidates = [
+    { agent: 'agy', model: 'gemini-3.8-flash-low', id: 1 },
+  ]
+  const metrics = {
+    [metricKey('agy', 'gemini-3.8-flash-low')]: { p95Ms: 120 }, // no samples field
+  }
+  const { ranking } = rankCandidates({ candidates, metrics })
+
+  assert.equal(ranking.length, 1)
+  const lReason = ranking[0].reasons.find(r => r.dimension === 'latency')
+  assert.equal(lReason.raw, 120) // The latency is used because samples is missing
+  assert.equal(lReason.note, null)
+
+  const qReason = ranking[0].reasons.find(r => r.dimension === 'quality')
+  assert.equal(qReason.raw, null)
+  assert.equal(qReason.note, 'no data') // The missing dimension still reports no data
+})
