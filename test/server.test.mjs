@@ -32,6 +32,10 @@ test('the server boots over stdio and exposes the full tool set', async () => {
     assert.deepEqual(
       tools.map((t) => t.name).sort(),
       [
+        'agent_ack',
+        'agent_inbox',
+        'agent_peers',
+        'agent_send_message',
         'agents_metrics',
         'agents_quota',
         'agents_status',
