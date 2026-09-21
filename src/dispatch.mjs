@@ -1,5 +1,6 @@
 import crypto from 'node:crypto'
 import { route } from './router.mjs'
+import { modelGroupFor } from './providers/profiles.mjs'
 import { policyFor } from './policy/registry.mjs'
 import { executeWithPolicy } from './policy/executor.mjs'
 import { startJob } from './jobrunner.mjs'
@@ -558,9 +559,13 @@ export async function dispatch({
     //    the only gate that survives across processes: the winner records its
     //    executionId, which is what a loser needs to find the job to share.
     const storeCtx = getDb(env)
-    const reservation = reserveDispatchKey(storeCtx, { dispatchKey: key, jobId: execId })
+    let reservation = reserveDispatchKey(storeCtx, { dispatchKey: key, jobId: execId })
     dispatchReservationOwned = reservation.reserved
-    if (!reservation.reserved) {
+    // T2: a stale holder can be taken over by someone else first. Re-evaluate
+    // the (possibly new) holder on every iteration instead of ever deleting a
+    // reservation we did not ourselves just observe — that is what keeps two
+    // waiters that saw the same dead holder from both proceeding as owner.
+    while (!reservation.reserved) {
       const holderAgeMs = nowFn() - (Date.parse(reservation.existingCreatedAt ?? '') || 0)
       const holderInWindow = holderAgeMs >= 0 && holderAgeMs < DISPATCH_WINDOW_MS
       const sharedJob = holderInWindow
@@ -588,9 +593,14 @@ export async function dispatch({
       }
       // The holder died between reserving and creating its job, its job failed,
       // or the reservation outlived the dedup window: take the key over so this
-      // dispatch can proceed instead of sharing a corpse.
-      releaseDispatchReservation(storeCtx, key)
-      dispatchReservationOwned = reserveDispatchKey(storeCtx, { dispatchKey: key, jobId: execId }).reserved
+      // dispatch can proceed instead of sharing a corpse. The release is
+      // conditional on the exact holder we just observed (T2 CAS): if another
+      // dispatcher already took over first, this delete is a no-op, the
+      // following reserve fails again against the NEW holder, and the loop
+      // re-evaluates that holder instead of clobbering it.
+      releaseDispatchReservation(storeCtx, key, reservation.existingJobId)
+      reservation = reserveDispatchKey(storeCtx, { dispatchKey: key, jobId: execId })
+      dispatchReservationOwned = reservation.reserved
     }
 
     // 3. Candidate discovery & TOCTOU revalidation
@@ -794,23 +804,29 @@ export async function dispatch({
         let profileStatus = null
 
         if (candidate?.agent === 'agy') {
-          if (!profileMemo.has(candidate.agent)) {
+          // Quota is per model group (Gemini vs Claude/GPT — see
+          // src/providers/profiles.mjs), so the memo is keyed by agent+group,
+          // not just agent: a fallback in a DIFFERENT group (e.g. a gemini
+          // primary falling back to a claude candidate) must re-resolve
+          // instead of reusing the other group's profile.
+          const memoKey = `${candidate.agent}:${modelGroupFor(candidate.model) ?? 'unknown'}`
+          if (!profileMemo.has(memoKey)) {
             try {
-              const res = await resolveProfileFn({ env })
+              const res = await resolveProfileFn({ env, model: candidate.model })
               if (res && typeof res === 'object') {
                 const p = typeof res.profile === 'string' && res.profile.trim() !== '' ? res.profile.trim() : null
                 const s = typeof (res.profileStatus ?? res.status) === 'string' && (res.profileStatus ?? res.status).trim() !== ''
                   ? (res.profileStatus ?? res.status).trim()
                   : null
-                profileMemo.set(candidate.agent, { profile: p, profileStatus: p ? s : null })
+                profileMemo.set(memoKey, { profile: p, profileStatus: p ? s : null })
               } else {
-                profileMemo.set(candidate.agent, { profile: null, profileStatus: null })
+                profileMemo.set(memoKey, { profile: null, profileStatus: null })
               }
             } catch {
-              profileMemo.set(candidate.agent, { profile: null, profileStatus: null })
+              profileMemo.set(memoKey, { profile: null, profileStatus: null })
             }
           }
-          const memoEntry = profileMemo.get(candidate.agent)
+          const memoEntry = profileMemo.get(memoKey)
           profile = memoEntry?.profile ?? null
           profileStatus = memoEntry?.profileStatus ?? null
         }
@@ -887,9 +903,12 @@ export async function dispatch({
     }
     // A dispatch that never produced a job must not keep its key: otherwise the
     // failed attempt would block every retry for the whole dedup window.
+    // T2: conditional on execId — this dispatcher may have lost the key to a
+    // takeover after `dispatchReservationOwned` was last set true, and an
+    // unconditional release here would delete that takeover's own reservation.
     if (dispatchReservationOwned && !jobProduced) {
       try {
-        releaseDispatchReservation(getDb(env), key)
+        releaseDispatchReservation(getDb(env), key, execId)
       } catch {}
     }
     inFlightDispatches.delete(key)

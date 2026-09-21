@@ -383,6 +383,41 @@ function jsonTouchWorkflowNode(stateHome, { workflowId, stepId, at }) {
   return touched
 }
 
+/**
+ * T1: orphan reclaim as compare-and-set (JSON backend). Same semantics as
+ * RECLAIM_ORPHANED_WORKFLOW_NODE_SQL: release to READY only inside one
+ * critical section, and only if the row still matches the observed
+ * status/owner/updated_at. Uses updateJsonLocked directly (like
+ * touchWorkflowNode/reserveDispatchKey) — never nest with mutateJsonStore.
+ */
+function jsonReclaimOrphanedWorkflowNode(stateHome, { workflowId, stepId, expectedStatus, expectedClaimedBy, expectedUpdatedAt }) {
+  const key = `${workflowId}:${stepId}`
+  let released = false
+  updateJsonLocked(
+    jsonStoragePath(stateHome),
+    (store) => {
+      store.workflow_nodes = store.workflow_nodes || {}
+      const existing = store.workflow_nodes[key]
+      if (
+        !existing ||
+        existing.status !== expectedStatus ||
+        existing.claimed_by !== expectedClaimedBy ||
+        existing.updated_at !== expectedUpdatedAt
+      ) {
+        return store
+      }
+      existing.status = 'ready'
+      existing.claimed_by = null
+      existing.updated_at = new Date().toISOString()
+      existing.updatedAt = existing.updated_at
+      released = true
+      return store
+    },
+    { defaultValue: defaultJsonStore() }
+  )
+  return released
+}
+
 function jsonListContextEntries(stateHome, workflowId, stepId = null) {
   const store = readJsonStore(stateHome)
   const entries = store.task_context || []
@@ -505,12 +540,17 @@ function jsonGetDispatchReservation(stateHome, dispatchKey) {
   return store.dispatch_reservations?.[dispatchKey] ?? null
 }
 
-function jsonReleaseDispatchReservation(stateHome, dispatchKey) {
+function jsonReleaseDispatchReservation(stateHome, dispatchKey, expectedJobId) {
   let removed = false
   updateJsonLocked(
     jsonStoragePath(stateHome),
     (store) => {
-      if (!store.dispatch_reservations || !store.dispatch_reservations[dispatchKey]) return store
+      const existing = store.dispatch_reservations?.[dispatchKey]
+      if (!existing) return store
+      // T2: conditional takeover — only delete a reservation that still
+      // belongs to the exact holder we observed. `expectedJobId === undefined`
+      // preserves the old unconditional-release callers/tests.
+      if (expectedJobId !== undefined && (existing.job_id ?? null) !== (expectedJobId ?? null)) return store
       delete store.dispatch_reservations[dispatchKey]
       removed = true
       return store
@@ -691,6 +731,25 @@ WHERE workflow_id = @workflow_id
   AND (claimed_by IS NULL OR claimed_by = '' OR claimed_by = @claimed_by)
 `
 
+/**
+ * T1: orphan reclaim as compare-and-set. Releases a node back to READY only
+ * if the row still has the exact status/owner/updated_at that justified the
+ * reclaim decision. A peer that reclaimed AND re-claimed the node between our
+ * read and this write leaves a row that no longer matches, so this is a
+ * no-op (changes = 0) instead of clobbering the fresh claim.
+ */
+const RECLAIM_ORPHANED_WORKFLOW_NODE_SQL = `
+UPDATE workflow_nodes
+SET status = 'ready',
+    claimed_by = NULL,
+    updated_at = @updated_at
+WHERE workflow_id = @workflow_id
+  AND step_id = @step_id
+  AND status = @expected_status
+  AND claimed_by = @expected_claimed_by
+  AND updated_at = @expected_updated_at
+`
+
 const PUBLISH_READY_SQL = `
 UPDATE workflow_nodes
 SET status = 'ready',
@@ -755,6 +814,13 @@ ON CONFLICT(dispatch_key) DO NOTHING
 const GET_DISPATCH_RESERVATION_SQL = `SELECT * FROM dispatch_reservations WHERE dispatch_key = ?`
 
 const DELETE_DISPATCH_RESERVATION_SQL = `DELETE FROM dispatch_reservations WHERE dispatch_key = ?`
+
+/**
+ * T2: conditional takeover release. `IS` (not `=`) so a reservation held
+ * with a NULL job_id can still be matched by an explicit `expectedJobId` of
+ * null, the same way `=` would fail to.
+ */
+const DELETE_DISPATCH_RESERVATION_IF_OWNER_SQL = `DELETE FROM dispatch_reservations WHERE dispatch_key = ? AND job_id IS ?`
 
 function sqliteInitDb(stateHome) {
   const dbPath = paths({ AGENT_HUB_HOME: stateHome }).dbFile
@@ -905,6 +971,18 @@ function sqliteTouchWorkflowNode(db, { workflowId, stepId, at }) {
   return info.changes > 0
 }
 
+function sqliteReclaimOrphanedWorkflowNode(db, { workflowId, stepId, expectedStatus, expectedClaimedBy, expectedUpdatedAt }) {
+  const info = db.prepare(RECLAIM_ORPHANED_WORKFLOW_NODE_SQL).run({
+    workflow_id: workflowId,
+    step_id: stepId,
+    expected_status: expectedStatus,
+    expected_claimed_by: expectedClaimedBy,
+    expected_updated_at: expectedUpdatedAt,
+    updated_at: new Date().toISOString(),
+  })
+  return info.changes > 0
+}
+
 function sqliteResumeWorkflowNode(db, { workflowId, stepId }) {
   const now = new Date().toISOString()
   const info = db.prepare(RESUME_WORKFLOW_NODE_SQL).run({
@@ -1028,8 +1106,12 @@ function sqliteGetDispatchReservation(db, dispatchKey) {
   return db.prepare(GET_DISPATCH_RESERVATION_SQL).get(dispatchKey) ?? null
 }
 
-function sqliteReleaseDispatchReservation(db, dispatchKey) {
-  const info = db.prepare(DELETE_DISPATCH_RESERVATION_SQL).run(dispatchKey)
+function sqliteReleaseDispatchReservation(db, dispatchKey, expectedJobId) {
+  if (expectedJobId === undefined) {
+    const info = db.prepare(DELETE_DISPATCH_RESERVATION_SQL).run(dispatchKey)
+    return info.changes > 0
+  }
+  const info = db.prepare(DELETE_DISPATCH_RESERVATION_IF_OWNER_SQL).run(dispatchKey, expectedJobId)
   return info.changes > 0
 }
 
@@ -1231,6 +1313,23 @@ export function touchWorkflowNode(ctx, { workflowId, stepId, at }) {
 }
 
 /**
+ * T1: orphan reclaim as compare-and-set. Releases a RUNNING/WAITING node
+ * back to READY (claimed_by = null) ONLY IF the row still has the exact
+ * status/owner/updated_at that justified the reclaim. Returns false and
+ * changes nothing when another process already reclaimed and re-claimed the
+ * node — the caller (reclaimOrphanedNode) must not treat that as success.
+ * @returns {boolean} true if this call released the node
+ */
+export function reclaimOrphanedWorkflowNode(ctx, { workflowId, stepId, expectedStatus, expectedClaimedBy, expectedUpdatedAt }) {
+  if (!ctx) return false
+  if (ctx.backend === 'sqlite') {
+    return sqliteReclaimOrphanedWorkflowNode(ctx.db, { workflowId, stepId, expectedStatus, expectedClaimedBy, expectedUpdatedAt })
+  }
+  const home = normalizeHome(ctx?.stateHome)
+  return jsonReclaimOrphanedWorkflowNode(home, { workflowId, stepId, expectedStatus, expectedClaimedBy, expectedUpdatedAt })
+}
+
+/**
  * Atomically publish a pending node as ready (conditional: only from pending).
  * Never touches claimed/running rows, so it cannot clobber another
  * scheduler's claim — the CAS claim below stays the single winner gate.
@@ -1388,13 +1487,22 @@ export function getDispatchReservation(ctx, dispatchKey) {
   return jsonGetDispatchReservation(home, dispatchKey)
 }
 
-export function releaseDispatchReservation(ctx, dispatchKey) {
+/**
+ * T2: release a dispatch-key reservation. With no `expectedJobId` this is
+ * the historical unconditional release. With `expectedJobId` (including
+ * `null`, meaning "the reservation had no jobId"), the delete is a
+ * compare-and-set: it only removes the row when it still belongs to the
+ * exact holder that was observed, so a stale-holder takeover can never
+ * delete a reservation someone else already took over.
+ * @returns {boolean} true if a row was deleted
+ */
+export function releaseDispatchReservation(ctx, dispatchKey, expectedJobId) {
   if (!ctx) return false
   if (ctx.backend === 'sqlite') {
-    return sqliteReleaseDispatchReservation(ctx.db, dispatchKey)
+    return sqliteReleaseDispatchReservation(ctx.db, dispatchKey, expectedJobId)
   }
   const home = normalizeHome(ctx?.stateHome)
-  return jsonReleaseDispatchReservation(home, dispatchKey)
+  return jsonReleaseDispatchReservation(home, dispatchKey, expectedJobId)
 }
 
 export function getAgentMessage(ctx, id) {

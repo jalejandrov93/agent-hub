@@ -128,6 +128,29 @@ test('classifyError treats a stream-json SUCCESS with empty response and no text
   assert.equal(error.retriable, true)
 })
 
+test('classifyError classifies a status:"ERROR" envelope with a 429/quota provider error as quota, not crash', () => {
+  const stdout = read('stream-quota-error.jsonl')
+  const error = classifyError(stdout)
+  assert.equal(error.kind, 'quota')
+  assert.equal(error.retriable, true)
+  assert.match(error.message, /Individual quota reached/)
+})
+
+test('classifyError classifies a status:"ERROR" envelope with an auth provider error as auth, not crash', () => {
+  const stdout = read('stream-auth-error.jsonl')
+  const error = classifyError(stdout)
+  assert.equal(error.kind, 'auth')
+  assert.equal(error.retriable, false)
+  assert.match(error.message, /not logged in/)
+})
+
+test('classifyError still classifies a status:"ERROR" envelope with an unrecognized provider error as crash', () => {
+  const stdout = '{"conversation_id":"x","status":"ERROR","error":"internal server error, please retry"}'
+  const error = classifyError(stdout)
+  assert.equal(error.kind, 'crash')
+  assert.match(error.message, /internal server error/)
+})
+
 test('listModels parses the real `agy models` fixture into id/label pairs', () => {
   const models = listModels(read('models.txt'))
   assert.ok(models.length >= 10, `expected at least 10 models, got ${models.length}`)
