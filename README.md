@@ -237,6 +237,16 @@ node bin/agent-hub dashboard
 # http://127.0.0.1:7777
 ```
 
+![Fleet health at a glance](docs/assets/dashboard-overview.png)
+
+| Agents and data policy | Metrics |
+|---|---|
+| ![Agents, models, status and data policy](docs/assets/dashboard-agents.png) | ![Success rate by agent and model](docs/assets/dashboard-metrics.png) |
+
+| Execution tree | Delegation map |
+|---|---|
+| ![Execution tree of multi-agent and workflow runs](docs/assets/dashboard-execution-tree.png) | ![Per-task delegation chains](docs/assets/dashboard-delegation.png) |
+
 It shows agent availability, running jobs, execution history, metrics,
 subagents, the timeline, routing proposals, learnings and configuration.
 
