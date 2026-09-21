@@ -151,6 +151,8 @@ export const JobRecord = z
     // gates, locks, or routes — see src/harness/registry.mjs).
     harness: z.string().nullable().optional(),
     waitMode: z.enum(['none', 'attention', 'terminal']).nullable().optional(),
+    profile: z.string().nullable().optional(),
+    profileStatus: z.string().nullable().optional(),
   })
   .passthrough()
 

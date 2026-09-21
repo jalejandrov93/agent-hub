@@ -1,5 +1,5 @@
 import { runCommand as defaultRunCommand } from '../process.mjs'
-import { normalizeProfile } from './profiles.mjs'
+import { normalizeProfile, selectProfile, profileStateFor } from './profiles.mjs'
 
 /**
  * agys is an external Go CLI (~/.local/bin/agys) that isolates multi-account profiles
@@ -186,3 +186,77 @@ export async function runAgyWithProfile({
     }
   }
 }
+
+export function resolveAgyCommand({ profile = null, agyCmd = 'agy', agyArgv = [] } = {}) {
+  if (profile) {
+    return { cmd: 'agys', args: agysRunArgv({ profile, agyArgv }) }
+  }
+  return { cmd: agyCmd, args: [...agyArgv] }
+}
+
+/**
+ * Synchronous profile resolution from the environment only.
+ *
+ * startJob() is and must stay SYNCHRONOUS: delegate() and dispatch() read
+ * `startJob(...).job` immediately. The async quota-based 'auto' selection
+ * (resolveAgyProfile) therefore belongs to an async caller (dispatch), not
+ * here — resolving it inside startJob would only be possible by returning a
+ * thenable whose `job` is null until it settles, which breaks every caller.
+ */
+export function profileFromEnv(env = process.env) {
+  const value = env?.AGENT_HUB_AGYS_PROFILE
+  return typeof value === 'string' && value.trim() !== ''
+    ? { profile: value.trim(), status: 'selected' }
+    : { profile: null, status: null }
+}
+
+export async function resolveAgyProfile({
+  env = process.env,
+  runCommandFn = defaultRunCommand,
+  listFn,
+  quotaFn,
+  selectFn = selectProfile,
+} = {}) {
+  try {
+    const safeEnv = env || {}
+    const explicit = safeEnv.AGENT_HUB_AGYS_PROFILE
+    if (typeof explicit === 'string' && explicit.trim() !== '') {
+      return { profile: explicit.trim(), status: 'selected' }
+    }
+
+    if (safeEnv.AGENT_HUB_AGYS === 'auto') {
+      const available = await isAgysAvailable({ runCommandFn, env: safeEnv })
+      if (!available) {
+        return { profile: null, status: 'unavailable' }
+      }
+
+      const effectiveListFn = listFn ?? listAgysProfiles
+      const effectiveQuotaFn = quotaFn ?? readAgysQuota
+      const [rawProfiles, quotaMap] = await Promise.all([
+        effectiveListFn({ runCommandFn, env: safeEnv }),
+        effectiveQuotaFn({ runCommandFn, env: safeEnv }),
+      ])
+
+      const profiles = Array.isArray(rawProfiles) ? rawProfiles : []
+      const candidates = profiles.map((p) => {
+        const quotaEntry = quotaMap && typeof quotaMap === 'object' ? quotaMap[p.name] : null
+        const state = p?.state ?? profileStateFor({ profile: p, quotaEntry })
+        return { ...p, state }
+      })
+
+      const chosen = selectFn({ profiles: candidates })
+      if (!chosen) {
+        return { profile: null, status: null }
+      }
+      return {
+        profile: chosen.name ?? null,
+        status: chosen.active ? 'selected' : 'fallback',
+      }
+    }
+
+    return { profile: null, status: null }
+  } catch {
+    return { profile: null, status: null }
+  }
+}
+

@@ -10,6 +10,7 @@ import { resolveEffectiveTimeoutS as defaultResolveEffectiveTimeoutS } from './t
 import { selectLearnings as defaultSelectLearnings, augmentTask as defaultAugmentTask } from './learnings.mjs'
 import { takeSnapshot as defaultTakeSnapshot, diffSnapshots as defaultDiffSnapshots, formatViolation as defaultFormatViolation } from './readguard.mjs'
 import { startRemoteJob as defaultStartRemoteJob } from './cloud/runner.mjs'
+import { resolveAgyCommand, profileFromEnv } from './providers/agys.mjs'
 
 // jobId -> { pgid, leaseToken, heartbeatTimer, leaseTtlMs } for jobs still
 // running in THIS process. Used by cancelJob for an immediate kill; the
@@ -98,6 +99,8 @@ export function startJob({
   runWithTimeout = defaultRunWithTimeout,
   runCommandFn = defaultRunCommand,
   variant,
+  profile = null,
+  profileStatus = null,
   sessionId,
   parentJobId,
   resolveEffectiveTimeoutSFn = defaultResolveEffectiveTimeoutS,
@@ -193,6 +196,12 @@ export function startJob({
     env,
   })
   const effectiveVariant = resolveVariant(agent, model, variant)
+  // agy may run through agys (multi-account profiles). Resolution is env-based
+  // and SYNCHRONOUS on purpose: startJob is synchronous and delegate()/dispatch()
+  // read `.job` immediately. The async quota-based 'auto' selection belongs to an
+  // async caller (dispatch) and is not resolved here.
+  const effectiveProfile = adapter.cmd === 'agy' ? (profile ?? profileFromEnv(env).profile) : null
+  const effectiveProfileStatus = effectiveProfile ? (profileStatus ?? 'selected') : null
   const job = createJob({
     agent,
     model,
@@ -218,6 +227,8 @@ export function startJob({
     step_id,
     harness,
     waitMode,
+    profile: effectiveProfile,
+    profileStatus: effectiveProfileStatus,
   })
   appendEvent({ kind: 'job.queued', agent, model, cwd, title, jobId: job.jobId, taskType, harness: harness ?? null, waitMode: waitMode ?? null }, { env })
 
@@ -282,9 +293,11 @@ export function startJob({
     console.warn('Agent running in compatibility sandbox: environment secrets filtered, HOME inherited. Use isolated-home for stronger credential isolation.')
   }
 
+  const resolved = resolveAgyCommand({ profile: effectiveProfile, agyCmd: adapter.cmd, agyArgv: argv })
+
   let child
   try {
-    child = spawn(adapter.cmd, argv, { cwd, env: childEnv, stdin })
+    child = spawn(resolved.cmd, resolved.args, { cwd, env: childEnv, stdin })
   } catch (error) {
     updateResult(job.jobId, { status: 'failed', errorKind: 'crash', error: String(error?.message ?? error) }, env)
     appendEvent({ kind: 'job.failed', agent, model, cwd, title, jobId: job.jobId, errorKind: 'crash', taskType, summary: String(error?.message ?? error), harness: harness ?? null, waitMode: waitMode ?? null }, { env })
@@ -298,7 +311,7 @@ export function startJob({
   // adapter/runCommandFn are stashed so cancelJob can reach them: a user
   // cancel kills the same process group a timeout does, and must interrupt
   // the server-side session just as the timeout path does.
-  active.set(job.jobId, { pgid: child.pid, leaseToken, adapter, runCommandFn })
+  active.set(job.jobId, { pgid: child.pid, leaseToken, adapter, runCommandFn, profile: effectiveProfile })
   if (mode === 'write') startHeartbeat({ jobId: job.jobId, cwd, token: leaseToken, ttlMs: leaseTtlMs, env })
 
   // Hard-kill at timeoutS + KILL_GRACE_S, not at timeoutS itself: agy is
@@ -314,7 +327,7 @@ export function startJob({
 
   const done = exitPromise
     .then(({ code, timedOut }) =>
-      finishJob({ jobId: job.jobId, agent, model, cwd, title, adapter, mode, env, timedOut, exitCode: code, taskType, snapshot, takeSnapshotFn, diffSnapshotsFn, formatViolationFn, harness, waitMode, runCommandFn })
+      finishJob({ jobId: job.jobId, agent, model, cwd, title, adapter, mode, env, timedOut, exitCode: code, taskType, snapshot, takeSnapshotFn, diffSnapshotsFn, formatViolationFn, harness, waitMode, runCommandFn, profile: effectiveProfile })
     )
     .finally(() => {
       stopHeartbeat(job.jobId)
@@ -338,7 +351,7 @@ export function startJob({
  * block it beyond INTERRUPT_TIMEOUT_MS — both are enforced here rather than
  * relied upon from the adapter or runCommandFn.
  */
-async function attemptServerInterrupt({ adapter, agent, model, cwd, title, jobId, taskType, sessionId, env, harness, waitMode, runCommandFn }) {
+async function attemptServerInterrupt({ adapter, agent, model, cwd, title, jobId, taskType, sessionId, env, harness, waitMode, runCommandFn, profile = null }) {
   if (!sessionId || typeof adapter.interruptArgv !== 'function') return
 
   let argv
@@ -352,7 +365,8 @@ async function attemptServerInterrupt({ adapter, agent, model, cwd, title, jobId
   let interrupted = null
   let ranOk = false
   try {
-    const result = await runCommandFn(adapter.cmd, argv, { env, timeoutMs: INTERRUPT_TIMEOUT_MS })
+    const resolved = resolveAgyCommand({ profile, agyCmd: adapter.cmd, agyArgv: argv })
+    const result = await runCommandFn(resolved.cmd, resolved.args, { env, timeoutMs: INTERRUPT_TIMEOUT_MS })
     ranOk = result?.code === 0 && !result?.timedOut
     if (ranOk) {
       try {
@@ -404,6 +418,7 @@ async function finishJob({
   harness = null,
   waitMode = null,
   runCommandFn = defaultRunCommand,
+  profile = null,
 }) {
   const current = readResult(jobId, env)
   if (current.status === 'canceled') return // cancelJob already finalized this job
@@ -471,6 +486,7 @@ async function finishJob({
         harness: eventHarness,
         waitMode: eventWaitMode,
         runCommandFn,
+        profile,
       })
     }
     return
@@ -584,6 +600,7 @@ export async function cancelJob(jobId, { env = process.env } = {}) {
       harness: result.harness ?? null,
       waitMode: result.waitMode ?? null,
       runCommandFn: entry?.runCommandFn ?? defaultRunCommand,
+      profile: entry?.profile ?? result.profile ?? null,
     })
   }
 
