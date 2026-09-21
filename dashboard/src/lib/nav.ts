@@ -10,6 +10,7 @@ import {
   Settings,
   Cloud,
   GitFork,
+  Network,
   Wrench,
   type LucideIcon,
 } from "lucide-react"
@@ -24,6 +25,7 @@ export type RouteName =
   | "subagents"
   | "timeline"
   | "work-graph"
+  | "graph"
   | "approvals"
   | "config"
   | "cloud"
@@ -56,8 +58,10 @@ export const NAV_GROUPS: NavGroup[] = [
       { name: "subagents", label: "Claude subagents", path: "/subagents", icon: Users },
       { name: "timeline", label: "Timeline", path: "/timeline", icon: Activity, badge: "timeline" },
       { name: "work-graph", label: "Work graph", path: "/work-graph", icon: GitFork },
+      { name: "graph", label: "Graph", path: "/graph", icon: Network },
     ],
   },
+
   {
     label: "System",
     items: [

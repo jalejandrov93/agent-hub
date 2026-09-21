@@ -13,7 +13,9 @@ import { MetricsView } from "@/views/metrics"
 import { SubagentsView } from "@/views/subagents"
 import { TimelineView } from "@/views/timeline"
 import { WorkGraphView } from "@/views/work-graph"
+import { GraphView } from "@/views/graph"
 import { ApprovalsView } from "@/views/approvals"
+
 import { ConfigView } from "@/views/config"
 import { CloudView } from "@/views/cloud"
 import { ToolsView } from "@/views/tools"
@@ -89,6 +91,12 @@ const workGraphRoute = createRoute({
   component: WorkGraphView,
 })
 
+const graphRoute = createRoute({
+  getParentRoute: () => rootRoute,
+  path: "/graph",
+  component: GraphView,
+})
+
 const approvalsRoute = createRoute({
   getParentRoute: () => rootRoute,
   path: "/approvals",
@@ -126,6 +134,7 @@ const routeTree = rootRoute.addChildren([
   subagentsRoute,
   timelineRoute,
   workGraphRoute,
+  graphRoute,
   approvalsRoute,
   configRoute,
   cloudRoute,
