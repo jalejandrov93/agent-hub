@@ -142,6 +142,44 @@ export function transitionNode(ctx, { workflowId, stepId, from, to, attempt, res
   return getWorkflowNode(ctx, workflowId, stepId)
 }
 
+/**
+ * Adopt a status an external actor already wrote for this node instead of
+ * overwriting it. Terminal statuses have no outgoing transitions, so writing
+ * FAILED (or READY) over CANCELED/FAILED/SUCCEEDED throws and escapes
+ * runWorkflow; adopting keeps the workflow honest about what really happened.
+ * @returns {boolean} true when an external terminal state was adopted.
+ */
+function adoptExternalTerminal(ctx, { workflow, node, nodeStates, attempt, revision, error }) {
+  const row = getWorkflowNode(ctx, workflow.id, node.id)
+  if (!row || !isTerminalStatus(row.status)) return false
+  nodeStates.set(node.id, {
+    ...(nodeStates.get(node.id) || {}),
+    status: row.status,
+    attempt: row.attempt ?? attempt,
+    ...(error ? { error } : {}),
+    revision,
+  })
+  return true
+}
+
+/**
+ * A canceled job is terminal: mark the node canceled (valid from running or
+ * waiting) and stop. Never retry it, never overwrite it with FAILED.
+ */
+function finalizeCanceledNode(ctx, { workflow, node, nodeStates, attempt, revision, error }) {
+  const row = getWorkflowNode(ctx, workflow.id, node.id)
+  if (!isTerminalStatus(row?.status)) {
+    transitionNode(ctx, { workflowId: workflow.id, stepId: node.id, to: NODE_STATUS.CANCELED, attempt })
+  }
+  nodeStates.set(node.id, {
+    ...(nodeStates.get(node.id) || {}),
+    status: NODE_STATUS.CANCELED,
+    attempt,
+    ...(error ? { error } : {}),
+    revision,
+  })
+}
+
 function isHandleLike(value) {
   if (!value || typeof value !== 'object') return false
   if (typeof value.abort === 'function' && typeof value.jobId === 'string') return true
@@ -777,6 +815,15 @@ async function executeNode({
       return
     } catch (err) {
       lastError = err
+
+      // A canceled job is terminal, and a node an external actor already
+      // finalized must never be written over (see the helpers below).
+      if (err.code === 'ECANCELED') {
+        finalizeCanceledNode(ctx, { workflow, node, nodeStates, attempt, revision, error: err })
+        return
+      }
+      if (adoptExternalTerminal(ctx, { workflow, node, nodeStates, attempt, revision, error: err })) return
+
       if (err.code === 'REVISION_REQUESTED' && revision < maxRevisionAttempts) {
         revisionFeedback = buildRevisionFeedback({ judge: err.judge, verification: err.verification })
         revision++
@@ -809,7 +856,9 @@ async function executeNode({
     }
   }
 
-  // Attempts exhausted -> FAILED
+  // Attempts exhausted -> FAILED. If an external actor finalized the node
+  // meanwhile, adopt that instead of writing over a terminal state.
+  if (adoptExternalTerminal(ctx, { workflow, node, nodeStates, attempt, revision, error: lastError })) return
   const now = new Date().toISOString()
   const errorPayload = {
     error: lastError?.message || String(lastError),
