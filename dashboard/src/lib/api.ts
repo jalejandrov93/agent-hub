@@ -123,6 +123,10 @@ export function getProviders(): Promise<AgysSnapshotResponseT> {
   return fetchJson(AgysSnapshotResponse, "/api/providers")
 }
 
+export function setProvidersMode(params: { mode: "off" | "profile" | "auto"; profile?: string | null }): Promise<AgysSnapshotResponseT> {
+  return fetchJson(AgysSnapshotResponse, "/api/providers/mode", writeInit("POST", params))
+}
+
 const ProposalsPayload = z.object({ proposals: z.array(Proposal) })
 export function getProposals(): Promise<{ proposals: ProposalT[] }> {
   return fetchJson(ProposalsPayload, "/api/proposals")

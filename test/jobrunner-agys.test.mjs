@@ -236,3 +236,72 @@ test('startJob with faked sync resolver without agys env stays plain agy', async
   assert.equal(record.profileStatus, null)
 })
 
+test('job.started and job.finished events carry resolved profile and profileStatus', async () => {
+  const home = tmpHome()
+  const { startJob } = await freshModules(home)
+  const spawn = () => {
+    const child = fakeChild()
+    process.nextTick(() => {
+      child.stdout.emit('data', JSON.stringify({ status: 'SUCCESS', response: 'all good' }))
+    })
+    return child
+  }
+
+  const { job, done } = startJob({
+    agent: 'agy',
+    model: 'gemini-3.8-flash-low',
+    task: 'test events profile',
+    cwd: '/tmp',
+    mode: 'read',
+    adapterFor,
+    spawn,
+    profile: 'work',
+    profileStatus: 'selected',
+    env: { AGENT_HUB_HOME: home },
+  })
+  await done
+
+  const eventsFile = path.join(home, 'events.jsonl')
+  const lines = fs.readFileSync(eventsFile, 'utf8').trim().split('\n').map(JSON.parse)
+  const started = lines.find((e) => e.kind === 'job.started' && e.jobId === job.jobId)
+  const finished = lines.find((e) => e.kind === 'job.finished' && e.jobId === job.jobId)
+
+  assert.ok(started, 'job.started event was emitted')
+  assert.equal(started.profile, 'work')
+  assert.equal(started.profileStatus, 'selected')
+
+  assert.ok(finished, 'job.finished event was emitted')
+  assert.equal(finished.profile, 'work')
+  assert.equal(finished.profileStatus, 'selected')
+})
+
+test('job.failed event carries resolved profile and profileStatus when job fails', async () => {
+  const home = tmpHome()
+  const { startJob } = await freshModules(home)
+  const spawn = () => {
+    throw new Error('spawn crash')
+  }
+
+  const { job, done } = startJob({
+    agent: 'agy',
+    model: 'gemini-3.8-flash-low',
+    task: 'test fail events profile',
+    cwd: '/tmp',
+    mode: 'read',
+    adapterFor,
+    spawn,
+    profile: 'backup',
+    profileStatus: 'fallback',
+    env: { AGENT_HUB_HOME: home },
+  })
+  await done
+
+  const eventsFile = path.join(home, 'events.jsonl')
+  const lines = fs.readFileSync(eventsFile, 'utf8').trim().split('\n').map(JSON.parse)
+  const failed = lines.find((e) => e.kind === 'job.failed' && e.jobId === job.jobId)
+
+  assert.ok(failed, 'job.failed event was emitted')
+  assert.equal(failed.profile, 'backup')
+  assert.equal(failed.profileStatus, 'fallback')
+})
+

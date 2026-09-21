@@ -1,12 +1,19 @@
-import * as React from "react"
 import { PageHeader } from "@/components/PageHeader"
 import { EmptyState } from "@/components/EmptyState"
 import { Badge } from "@/components/ui/badge"
 import { Alert, AlertTitle, AlertDescription } from "@/components/ui/alert"
-import { Card, CardHeader, CardTitle, CardContent } from "@/components/ui/card"
-import { Skeleton } from "@/components/ui/skeleton"
-import { useProvidersQuery } from "@/lib/queries"
-import { VIEW_META } from "@/lib/nav"
+import { Card, CardHeader, CardTitle, CardContent } from '@/components/ui/card'
+import { Skeleton } from '@/components/ui/skeleton'
+import {
+  Select,
+  SelectContent,
+  SelectGroup,
+  SelectItem,
+  SelectTrigger,
+  SelectValue,
+} from '@/components/ui/select'
+import { useProvidersQuery, useSetProvidersModeMutation } from '@/lib/queries'
+import { VIEW_META } from '@/lib/nav'
 import { cn } from "@/lib/utils"
 import { Layers, ServerOff } from "lucide-react"
 import type { AgysBucketT } from "@/lib/types"
@@ -126,14 +133,29 @@ function QuotaBucketBar({ bucket }: { bucket: AgysBucketT }) {
 
 export function ProvidersView() {
   const { data, isLoading, error } = useProvidersQuery()
+  const setModeMutation = useSetProvidersModeMutation()
 
-  const modeLabel = React.useMemo(() => {
-    if (!data) return "off"
-    if (data.mode === "profile") {
-      return `pinned ${data.pinnedProfile ?? ""}`.trim()
+  const isEnvOverride = data?.source === 'env'
+
+  const handleModeChange = (val: string | null) => {
+    if (!val) return
+    const nextMode = val as 'auto' | 'profile' | 'off'
+    if (nextMode === 'profile') {
+      const nextProfile =
+        data?.pinnedProfile ||
+        data?.selected?.name ||
+        data?.profiles[0]?.name ||
+        null
+      setModeMutation.mutate({ mode: 'profile', profile: nextProfile })
+    } else {
+      setModeMutation.mutate({ mode: nextMode, profile: null })
     }
-    return data.mode
-  }, [data])
+  }
+
+  const handleProfileChange = (val: string | null) => {
+    if (!val) return
+    setModeMutation.mutate({ mode: 'profile', profile: val })
+  }
 
   return (
     <div className="space-y-6">
@@ -171,23 +193,92 @@ export function ProvidersView() {
         </Alert>
       ) : (
         <>
-          <div className="flex flex-wrap items-center gap-3 p-3 rounded-lg border bg-muted/20 text-sm">
-            <div className="flex items-center gap-1.5">
-              <span className="text-muted-foreground">Mode:</span>
-              <Badge variant="outline" className="font-mono font-medium">
-                {modeLabel}
-              </Badge>
+          <div className='flex flex-wrap items-center gap-3 p-3 rounded-lg border bg-muted/20 text-sm'>
+            <div className='flex items-center gap-1.5'>
+              <span className='text-muted-foreground'>Mode:</span>
+              <Select
+                value={data.mode}
+                disabled={isEnvOverride || setModeMutation.isPending}
+                onValueChange={handleModeChange}
+              >
+                <SelectTrigger
+                  aria-label='Mode toggle'
+                  disabled={isEnvOverride || setModeMutation.isPending}
+                  className='h-7 text-xs font-mono'
+                >
+                  <SelectValue />
+                </SelectTrigger>
+                <SelectContent>
+                  <SelectGroup>
+                    <SelectItem value='auto'>auto</SelectItem>
+                    <SelectItem value='profile'>profile</SelectItem>
+                    <SelectItem value='off'>off</SelectItem>
+                  </SelectGroup>
+                </SelectContent>
+              </Select>
             </div>
-            <div className="flex items-center gap-1.5">
-              <span className="text-muted-foreground">Selected:</span>
+
+            {data.mode === 'profile' && data.profiles.length > 0 ? (
+              <div className='flex items-center gap-1.5'>
+                <span className='text-muted-foreground'>Profile:</span>
+                <Select
+                  value={
+                    data.pinnedProfile ??
+                    data.selected?.name ??
+                    data.profiles[0]?.name ??
+                    ''
+                  }
+                  disabled={isEnvOverride || setModeMutation.isPending}
+                  onValueChange={handleProfileChange}
+                >
+                  <SelectTrigger
+                    aria-label='Profile toggle'
+                    disabled={isEnvOverride || setModeMutation.isPending}
+                    className='h-7 text-xs font-mono'
+                  >
+                    <SelectValue />
+                  </SelectTrigger>
+                  <SelectContent>
+                    <SelectGroup>
+                      {data.profiles.map((p) => (
+                        <SelectItem key={p.name} value={p.name}>
+                          {p.name}
+                        </SelectItem>
+                      ))}
+                    </SelectGroup>
+                  </SelectContent>
+                </Select>
+              </div>
+            ) : null}
+
+            {data.source ? (
+              <div className='flex items-center gap-1.5'>
+                <span className='text-muted-foreground'>Source:</span>
+                <Badge variant='outline' className='text-xs' data-testid='providers-source-badge'>
+                  {data.source}
+                </Badge>
+              </div>
+            ) : null}
+
+            <div className='flex items-center gap-1.5'>
+              <span className='text-muted-foreground'>Selected:</span>
               {data.selected?.name ? (
-                <Badge variant="secondary" className="font-mono font-medium">
+                <Badge variant='secondary' className='font-mono font-medium'>
                   {data.selected.name}
                 </Badge>
               ) : (
-                <span className="text-muted-foreground italic">none</span>
+                <span className='text-muted-foreground italic'>none</span>
               )}
             </div>
+
+            {isEnvOverride ? (
+              <span
+                data-testid='env-override-hint'
+                className='text-xs text-muted-foreground italic ml-auto'
+              >
+                Overridden by environment (AGENT_HUB_AGYS or AGENT_HUB_AGYS_PROFILE)
+              </span>
+            ) : null}
           </div>
 
           {data.profiles.length === 0 ? (

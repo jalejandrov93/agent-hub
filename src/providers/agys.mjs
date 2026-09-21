@@ -1,6 +1,8 @@
 import child_process from 'node:child_process'
 import { runCommand as defaultRunCommand } from '../process.mjs'
 import { normalizeProfile, selectProfile, profileStateFor } from './profiles.mjs'
+import { paths } from '../config.mjs'
+import { writeJsonAtomic, readJsonSafe } from '../fsutil.mjs'
 
 /**
  * agys is an external Go CLI (~/.local/bin/agys) that isolates multi-account profiles
@@ -234,6 +236,63 @@ export function profileFromEnv(env = process.env) {
     : { profile: null, status: null }
 }
 
+export function getAgysMode(env = process.env) {
+  try {
+    const safeEnv = env || {}
+    const explicitProfile = safeEnv.AGENT_HUB_AGYS_PROFILE
+    if (typeof explicitProfile === 'string' && explicitProfile.trim() !== '') {
+      return { mode: 'profile', profile: explicitProfile.trim(), source: 'env' }
+    }
+
+    const agysMode = safeEnv.AGENT_HUB_AGYS
+    if (agysMode === 'auto') {
+      return { mode: 'auto', profile: null, source: 'env' }
+    }
+    if (agysMode === 'off') {
+      return { mode: 'off', profile: null, source: 'env' }
+    }
+
+    const modeFile = paths(safeEnv).agysModeFile
+    const setting = readJsonSafe(modeFile, null)
+    if (setting && typeof setting === 'object') {
+      if (setting.mode === 'off') {
+        return { mode: 'off', profile: null, source: 'setting' }
+      }
+      if (setting.mode === 'auto') {
+        return { mode: 'auto', profile: null, source: 'setting' }
+      }
+      if (setting.mode === 'profile' && typeof setting.profile === 'string' && setting.profile.trim() !== '') {
+        return { mode: 'profile', profile: setting.profile.trim(), source: 'setting' }
+      }
+    }
+
+    return { mode: 'off', profile: null, source: 'default' }
+  } catch {
+    return { mode: 'off', profile: null, source: 'default' }
+  }
+}
+
+export function setAgysMode({ mode, profile = null } = {}, env = process.env) {
+  if (!['off', 'profile', 'auto'].includes(mode)) {
+    throw new Error(`invalid mode: ${mode}`)
+  }
+  let effectiveProfile = null
+  if (mode === 'profile') {
+    if (typeof profile !== 'string' || profile.trim() === '') {
+      throw new Error('profile is required when mode is profile')
+    }
+    effectiveProfile = profile.trim()
+  }
+
+  const safeEnv = env || {}
+  const modeFile = paths(safeEnv).agysModeFile
+  writeJsonAtomic(modeFile, { mode, profile: effectiveProfile })
+  resetSyncProfileCache()
+  resetSnapshotCache()
+
+  return { mode, profile: effectiveProfile, source: 'setting' }
+}
+
 export async function resolveAgyProfile({
   env = process.env,
   runCommandFn = defaultRunCommand,
@@ -243,17 +302,26 @@ export async function resolveAgyProfile({
 } = {}) {
   try {
     const safeEnv = env || {}
-    const explicit = safeEnv.AGENT_HUB_AGYS_PROFILE
-    if (typeof explicit === 'string' && explicit.trim() !== '') {
-      return { profile: explicit.trim(), status: 'selected' }
+    const modeInfo = getAgysMode(safeEnv)
+
+    if (modeInfo.mode === 'off') {
+      return { profile: null, status: null }
     }
 
-    if (safeEnv.AGENT_HUB_AGYS === 'auto') {
-      const available = await isAgysAvailable({ runCommandFn, env: safeEnv })
-      if (!available) {
-        return { profile: null, status: 'unavailable' }
-      }
+    if (modeInfo.source === 'env' && modeInfo.mode === 'profile') {
+      return { profile: modeInfo.profile, status: 'selected' }
+    }
 
+    const available = await isAgysAvailable({ runCommandFn, env: safeEnv })
+    if (!available) {
+      return { profile: null, status: 'unavailable' }
+    }
+
+    if (modeInfo.mode === 'profile') {
+      return { profile: modeInfo.profile, status: 'selected' }
+    }
+
+    if (modeInfo.mode === 'auto') {
       const effectiveListFn = listFn ?? listAgysProfiles
       const effectiveQuotaFn = quotaFn ?? readAgysQuota
       const [rawProfiles, quotaMap] = await Promise.all([
@@ -299,21 +367,18 @@ export function resolveAgyProfileSync({
 } = {}) {
   try {
     const safeEnv = env || {}
-    const explicit = safeEnv.AGENT_HUB_AGYS_PROFILE
-    if (typeof explicit === 'string' && explicit.trim() !== '') {
-      const profile = explicit.trim()
-      return { profile, status: 'selected', profiles: [{ name: profile, status: 'selected' }] }
-    }
+    const modeInfo = getAgysMode(safeEnv)
 
-    const agysMode = safeEnv.AGENT_HUB_AGYS
-    const isAuto = agysMode === 'auto'
-    const isAgysSet = typeof agysMode === 'string' && agysMode.trim() !== ''
-
-    if (!isAgysSet) {
+    if (modeInfo.mode === 'off') {
       return { profile: null, status: null, profiles: [] }
     }
 
-    const cacheKey = `agys:${agysMode}`
+    if (modeInfo.source === 'env' && modeInfo.mode === 'profile') {
+      const profile = modeInfo.profile
+      return { profile, status: 'selected', profiles: [{ name: profile, status: 'selected' }] }
+    }
+
+    const cacheKey = `agys:${modeInfo.mode}:${modeInfo.profile ?? ''}:${modeInfo.source}`
     if (cache && typeof cache.get === 'function') {
       const cached = cache.get(cacheKey)
       if (cached && typeof cached.expiresAt === 'number' && now() < cached.expiresAt) {
@@ -376,13 +441,13 @@ export function resolveAgyProfileSync({
     }))
 
     let chosen = null
-    if (isAuto) {
+    if (modeInfo.mode === 'auto') {
       chosen = selectProfile({ profiles: candidates })
     }
 
     const result = {
-      profile: chosen?.name ?? null,
-      status: chosen ? (chosen.active ? 'selected' : 'fallback') : null,
+      profile: modeInfo.mode === 'profile' ? modeInfo.profile : (chosen?.name ?? null),
+      status: modeInfo.mode === 'profile' ? 'selected' : (chosen ? (chosen.active ? 'selected' : 'fallback') : null),
       profiles: annotatedProfiles,
     }
 
@@ -475,16 +540,9 @@ export async function agysProfilesSnapshot({
   now = Date.now,
 } = {}) {
   const safeEnv = env || {}
-  const rawPinned = safeEnv.AGENT_HUB_AGYS_PROFILE
-  const pinnedProfile = typeof rawPinned === 'string' && rawPinned.trim() !== '' ? rawPinned.trim() : null
-  let mode = 'off'
-  if (pinnedProfile) {
-    mode = 'profile'
-  } else if (safeEnv.AGENT_HUB_AGYS === 'auto') {
-    mode = 'auto'
-  }
+  const { mode, profile: pinnedProfile, source } = getAgysMode(safeEnv)
 
-  const cacheKey = `snapshot:${pinnedProfile ?? ''}:${safeEnv.AGENT_HUB_AGYS ?? ''}`
+  const cacheKey = `snapshot:${mode}:${pinnedProfile ?? ''}:${source}`
   if (cache && typeof cache.get === 'function') {
     const cached = cache.get(cacheKey)
     if (cached && typeof cached.expiresAt === 'number' && now() < cached.expiresAt) {
@@ -503,6 +561,7 @@ export async function agysProfilesSnapshot({
         available: false,
         reason,
         mode,
+        source,
         pinnedProfile,
         selected: null,
         profiles: [],
@@ -527,6 +586,7 @@ export async function agysProfilesSnapshot({
         available: false,
         reason,
         mode,
+        source,
         pinnedProfile,
         selected: null,
         profiles: [],
@@ -575,6 +635,7 @@ export async function agysProfilesSnapshot({
     const result = {
       available: true,
       mode,
+      source,
       pinnedProfile,
       selected,
       profiles,
@@ -590,6 +651,7 @@ export async function agysProfilesSnapshot({
       available: false,
       reason: String(error?.message ?? error),
       mode,
+      source,
       pinnedProfile,
       selected: null,
       profiles: [],

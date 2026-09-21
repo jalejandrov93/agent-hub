@@ -234,6 +234,8 @@ export const HubEvent = z
     // Harness profile id + dispatch waitMode on job.* events (informational).
     harness: nullableString,
     waitMode: nullableString,
+    profile: nullableString,
+    profileStatus: nullableString,
   })
   .passthrough()
 
@@ -850,6 +852,7 @@ export const AgysSnapshotResponse = z
     available: z.boolean(),
     reason: z.string().optional(),
     mode: z.enum(['off', 'profile', 'auto']),
+    source: z.enum(['env', 'setting', 'default']).optional(),
     pinnedProfile: nullableString,
     selected: z
       .object({

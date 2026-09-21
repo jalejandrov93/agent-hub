@@ -1,5 +1,5 @@
 import { describe, it, expect, vi, beforeEach } from "vitest"
-import { render, screen } from "@testing-library/react"
+import { render, screen, fireEvent, waitFor } from "@testing-library/react"
 import { QueryClient, QueryClientProvider } from "@tanstack/react-query"
 import * as api from "@/lib/api"
 import { ProvidersView, JobProfileBadge } from "./index"
@@ -69,6 +69,7 @@ const MOCK_SNAPSHOT: AgysSnapshotResponseT = {
 
 describe("ProvidersView", () => {
   beforeEach(() => {
+    vi.clearAllMocks()
     vi.mocked(api.getProviders).mockResolvedValue(MOCK_SNAPSHOT)
   })
 
@@ -119,4 +120,66 @@ describe("ProvidersView", () => {
     rerender(<JobProfileBadge profile={null} status={null} />)
     expect(screen.queryByTestId("job-profile-badge")).toBeNull()
   })
+
+  it("renders the toggle with current mode and calls the mutation on change", async () => {
+    vi.mocked(api.setProvidersMode).mockResolvedValue({
+      ...MOCK_SNAPSHOT,
+      mode: "off",
+    })
+
+    renderView()
+
+    const toggle = await screen.findByRole("combobox", { name: /mode toggle/i })
+    expect(toggle).toBeTruthy()
+
+    fireEvent.click(toggle)
+    const offOption = await screen.findByRole("option", { name: "off" })
+    fireEvent.pointerDown(offOption)
+    fireEvent.click(offOption)
+
+    await waitFor(() => {
+      expect(api.setProvidersMode).toHaveBeenCalledWith({ mode: "off", profile: null })
+    })
+  })
+
+  it("disables the mode toggle and shows hint when source is env", async () => {
+    vi.mocked(api.getProviders).mockResolvedValue({
+      ...MOCK_SNAPSHOT,
+      source: "env",
+    })
+
+    renderView()
+
+    const toggle = await screen.findByRole("combobox", { name: /mode toggle/i })
+    expect((toggle as HTMLButtonElement).disabled).toBe(true)
+    expect(screen.getByTestId("env-override-hint")).toBeTruthy()
+  })
+
+  it('allows selecting a specific profile when in profile mode', async () => {
+    vi.mocked(api.getProviders).mockResolvedValue({
+      ...MOCK_SNAPSHOT,
+      mode: 'profile',
+      pinnedProfile: 'work',
+    })
+    vi.mocked(api.setProvidersMode).mockResolvedValue({
+      ...MOCK_SNAPSHOT,
+      mode: 'profile',
+      pinnedProfile: 'backup',
+    })
+
+    renderView()
+
+    const profileToggle = await screen.findByRole('combobox', { name: /profile toggle/i })
+    expect(profileToggle).toBeTruthy()
+
+    fireEvent.click(profileToggle)
+    const backupOption = await screen.findByRole('option', { name: 'backup' })
+    fireEvent.pointerDown(backupOption)
+    fireEvent.click(backupOption)
+
+    await waitFor(() => {
+      expect(api.setProvidersMode).toHaveBeenCalledWith({ mode: 'profile', profile: 'backup' })
+    })
+  })
 })
+

@@ -38,6 +38,7 @@ export function paths(env = process.env) {
     quotaCacheFile: path.join(home, 'quota-cache.json'),
     runsDir: path.join(home, 'runs'),
     locksDir: path.join(home, 'runs', '.locks'),
+    agysModeFile: path.join(home, 'agys-mode.json'),
   }
 }
 

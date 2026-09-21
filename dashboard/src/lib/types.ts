@@ -61,6 +61,7 @@ export type LearningInputT = z.infer<typeof LearningInput>
 export type AgysSnapshotResponseT = z.infer<typeof AgysSnapshotResponse>
 export type AgysProfileT = z.infer<typeof AgysProfile>
 export type AgysBucketT = z.infer<typeof AgysBucket>
+export type AgysModeInput = { mode: "off" | "profile" | "auto"; profile?: string | null }
 
 /**
  * Cloud view types, inferred from the shared server contracts (@shared ==
