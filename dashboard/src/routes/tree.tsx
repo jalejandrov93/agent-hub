@@ -7,16 +7,18 @@ import { createHashHistory } from "@tanstack/react-router"
 import { AppShell } from "@/components/shell/app-shell"
 import { OverviewView } from "@/views/overview"
 import { AgentsView } from "@/views/agents"
+import { ProvidersView } from "@/views/providers"
 import { JobsView } from "@/views/jobs"
 import { HistoryView } from "@/views/history"
 import { MetricsView } from "@/views/metrics"
 import { SubagentsView } from "@/views/subagents"
 import { TimelineView } from "@/views/timeline"
 import { WorkGraphView } from "@/views/work-graph"
+import { GraphView } from "@/views/graph"
 import { ApprovalsView } from "@/views/approvals"
+
 import { ConfigView } from "@/views/config"
 import { CloudView } from "@/views/cloud"
-import { ToolsView } from "@/views/tools"
 import {
   AgentsSearch,
   HistorySearch,
@@ -48,6 +50,12 @@ const agentsRoute = createRoute({
   path: "/agents",
   validateSearch: AgentsSearch,
   component: AgentsView,
+})
+
+const providersRoute = createRoute({
+  getParentRoute: () => rootRoute,
+  path: "/providers",
+  component: ProvidersView,
 })
 
 const jobsRoute = createRoute({
@@ -89,6 +97,12 @@ const workGraphRoute = createRoute({
   component: WorkGraphView,
 })
 
+const graphRoute = createRoute({
+  getParentRoute: () => rootRoute,
+  path: "/graph",
+  component: GraphView,
+})
+
 const approvalsRoute = createRoute({
   getParentRoute: () => rootRoute,
   path: "/approvals",
@@ -113,19 +127,26 @@ const cloudRoute = createRoute({
 const toolsRoute = createRoute({
   getParentRoute: () => rootRoute,
   path: "/tools",
-  component: ToolsView,
+  beforeLoad: () => {
+    throw redirect({
+      to: "/config",
+      search: { section: "tools" },
+    })
+  },
 })
 
 const routeTree = rootRoute.addChildren([
   indexRoute,
   overviewRoute,
   agentsRoute,
+  providersRoute,
   jobsRoute,
   historyRoute,
   metricsRoute,
   subagentsRoute,
   timelineRoute,
   workGraphRoute,
+  graphRoute,
   approvalsRoute,
   configRoute,
   cloudRoute,

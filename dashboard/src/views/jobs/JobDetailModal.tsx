@@ -3,12 +3,12 @@ import { StatusBadge } from "@/components/StatusBadge"
 import { Badge } from "@/components/ui/badge"
 import { Separator } from "@/components/ui/separator"
 import {
-  Sheet,
-  SheetContent,
-  SheetDescription,
-  SheetHeader,
-  SheetTitle,
-} from "@/components/ui/sheet"
+  Dialog,
+  DialogContent,
+  DialogDescription,
+  DialogHeader,
+  DialogTitle,
+} from "@/components/ui/dialog"
 import { formatModel } from "@/lib/format"
 import type { Job } from "@/lib/types"
 import { JobResultPanel } from "./JobResultPanel"
@@ -22,7 +22,7 @@ function DetailRow({ label, children }: { label: string; children: React.ReactNo
   )
 }
 
-export function JobDetailSheet({
+export function JobDetailModal({
   job,
   open,
   onOpenChange,
@@ -32,18 +32,18 @@ export function JobDetailSheet({
   onOpenChange: (open: boolean) => void
 }) {
   return (
-    <Sheet open={open} onOpenChange={onOpenChange}>
-      <SheetContent className="flex w-full flex-col gap-4 overflow-auto sm:max-w-lg">
-        <SheetHeader>
-          <SheetTitle className="truncate pr-8">{job.title || "Untitled job"}</SheetTitle>
-          <SheetDescription className="flex flex-wrap items-center gap-2">
+    <Dialog open={open} onOpenChange={onOpenChange}>
+      <DialogContent className="max-h-[85vh] overflow-y-auto sm:max-w-lg">
+        <DialogHeader>
+          <DialogTitle className="truncate pr-8">{job.title || "Untitled job"}</DialogTitle>
+          <DialogDescription className="flex flex-wrap items-center gap-2">
             <StatusBadge kind="status" value={job.status} />
             <span>{job.agent}</span>
             <span className="text-muted-foreground">{formatModel(job.model)}</span>
             {job.mode ? <Badge variant="secondary">{job.mode}</Badge> : null}
             {job.taskType ? <Badge variant="outline">{job.taskType}</Badge> : null}
-          </SheetDescription>
-        </SheetHeader>
+          </DialogDescription>
+        </DialogHeader>
 
         <Separator />
 
@@ -62,7 +62,7 @@ export function JobDetailSheet({
           <h3 className="text-sm font-medium">Partial output</h3>
           <JobResultPanel jobId={job.jobId} open={open} />
         </div>
-      </SheetContent>
-    </Sheet>
+      </DialogContent>
+    </Dialog>
   )
 }

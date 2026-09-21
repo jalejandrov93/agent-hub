@@ -1,9 +1,17 @@
+/**
+ * Job store and persistence.
+ *
+ * Architecture Invariant: SQLite is coordination state, the filesystem is content.
+ * In sqlite mode (C0.1.3/C0.1.4), SQLite acts as the index and coordination state.
+ * result.json continues to be written on createJob and updateResult as a durability
+ * and content artifact, but is no longer the primary index for queries.
+ */
 import fs from 'node:fs'
 import path from 'node:path'
 import crypto from 'node:crypto'
 import { paths } from './config.mjs'
 import { updateJsonLocked } from './fsutil.mjs'
-import { getDb, upsertJob } from './storage/index.mjs'
+import { getDb, upsertJob, getJob, listJobIds } from './storage/index.mjs'
 
 function ensureDir(dir) {
   fs.mkdirSync(dir, { recursive: true })
@@ -65,14 +73,15 @@ function mirrorJobToDb(job, env = process.env) {
       return
     }
     upsertJob(ctx, {
-      job_id: job.jobId,
+      job_id: job.jobId ?? job.job_id ?? null,
       workflow_id: job.workflow_id ?? null,
       step_id: job.step_id ?? null,
       parent_execution_id: job.parent_execution_id ?? null,
       root_execution_id: job.root_execution_id ?? null,
       attempt: job.attempt ?? null,
       remote_state: job.remote_state ?? (job.remote?.state ?? null),
-      quality_score: job.quality_score ?? null,
+      // Column is kept for compatibility and no longer produced (the UPSERT binds @quality_score, so it must still be passed).
+      quality_score: null,
       verified: job.verified === true ? 1 : (job.verified === false ? 0 : (job.verified ?? null)),
       judge_verdict: job.judge_verdict ?? null,
       result_json: JSON.stringify(job),
@@ -112,9 +121,9 @@ export function createJob({
   root_execution_id = null,
   attempt = null,
   remote_state = null,
-  quality_score = null,
   verified = null,
   judge_verdict = null,
+  revision = null,
   // A1 dispatch params
   executionId = null,
   execution_id = null,
@@ -124,7 +133,20 @@ export function createJob({
   // so every pre-existing record and caller stays valid).
   harness = null,
   waitMode = null,
+  profile = null,
+  profileStatus = null,
 }) {
+  // A job record without an identity is not a job. `JobRecord` (src/schemas.mjs)
+  // requires agent/model, and the dashboard validates /api/state as ONE payload,
+  // so a record missing either blanks every job-list view. Reject at the source,
+  // before a run directory is allocated.
+  if (typeof agent !== 'string' || agent.trim() === '') {
+    throw new Error('createJob: agent is required')
+  }
+  if (typeof model !== 'string' || model.trim() === '') {
+    throw new Error('createJob: model is required')
+  }
+
   const jobId = newJobId()
   const dir = jobDir(jobId, env)
   ensureDir(dir)
@@ -164,9 +186,9 @@ export function createJob({
     root_execution_id: root_execution_id ?? null,
     attempt: attempt ?? null,
     remote_state: remote_state ?? null,
-    quality_score: quality_score ?? null,
     verified: verified ?? null,
     judge_verdict: judge_verdict ?? null,
+    revision: revision ?? null,
     // A1 dispatch provenance fields
     executionId: resolvedExecutionId,
     execution_id: resolvedExecutionId,
@@ -176,6 +198,8 @@ export function createJob({
     // never gates, locks, or routes — see src/harness/registry.mjs).
     harness: harness ?? null,
     waitMode: waitMode ?? null,
+    profile: profile ?? null,
+    profileStatus: profileStatus ?? null,
   }
   // Dual state: if remote_state is provided, mirror it into remote.state for compat.
   if (remote_state != null) {
@@ -186,13 +210,123 @@ export function createJob({
   return result
 }
 
-export function readResult(jobId, env = process.env) {
+const COMPARE_FIELDS = ['jobId', 'status', 'updatedAt', 'verified', 'judge_verdict', 'revision']
+
+export const _warnedDivergentJobIds = new Set()
+
+function readJsonResult(jobId, env = process.env) {
   try {
     return JSON.parse(fs.readFileSync(resultPath(jobId, env), 'utf8'))
   } catch (error) {
     if (error.code === 'ENOENT') throw new Error(`job not found: ${jobId}`)
     throw error
   }
+}
+
+export function compareJobReadPaths(jobId, env = process.env) {
+  let json = null
+  try {
+    json = JSON.parse(fs.readFileSync(resultPath(jobId, env), 'utf8'))
+  } catch {
+    json = null
+  }
+
+  let sqlite = null
+  try {
+    const ctx = getDb(env)
+    if (ctx) {
+      const row = getJob(ctx, jobId)
+      if (row?.result_json) {
+        sqlite = typeof row.result_json === 'string' ? JSON.parse(row.result_json) : row.result_json
+      }
+    }
+  } catch {
+    sqlite = null
+  }
+
+  const divergences = []
+  if (!json && !sqlite) {
+    return { json: null, sqlite: null, divergences: [] }
+  }
+
+  if (json && !sqlite) {
+    for (const field of COMPARE_FIELDS) {
+      divergences.push({ field, json: json[field] ?? null, sqlite: null })
+    }
+    return { json, sqlite: null, divergences }
+  }
+
+  if (!json && sqlite) {
+    for (const field of COMPARE_FIELDS) {
+      divergences.push({ field, json: null, sqlite: sqlite[field] ?? null })
+    }
+    return { json: null, sqlite, divergences }
+  }
+
+  for (const field of COMPARE_FIELDS) {
+    const jsonVal = json[field] ?? null
+    const sqliteVal = sqlite[field] ?? null
+    if (jsonVal !== sqliteVal) {
+      divergences.push({ field, json: json[field], sqlite: sqlite[field] })
+    }
+  }
+
+  return { json, sqlite, divergences }
+}
+
+function warnIfDivergent(jobId, env = process.env) {
+  const comparison = compareJobReadPaths(jobId, env)
+  if (comparison.divergences.length > 0 && !_warnedDivergentJobIds.has(jobId)) {
+    _warnedDivergentJobIds.add(jobId)
+    console.warn(`[agent-hub] job read divergence for ${jobId}:`, comparison.divergences)
+  }
+  return comparison
+}
+
+/**
+ * Read a job result.
+ *
+ * In sqlite mode (C0.1.3/C0.1.4), SQLite is coordination state and primary index:
+ * readResult reads the DB row first. When absent, it falls back to result.json
+ * and best-effort backfills/mirrors it into SQLite so legacy jobs are indexed.
+ *
+ * In shadow mode (C0.1.2), reads compare JSON and SQLite, warning once per
+ * divergent jobId while JSON always wins (returns JSON record).
+ *
+ * Default (json) mode preserves legacy filesystem-only behaviour.
+ */
+export function readResult(jobId, env = process.env) {
+  const storeMode = env?.AGENT_HUB_STORE || 'json'
+
+  if (storeMode === 'sqlite') {
+    assertValidJobId(jobId)
+    const ctx = getDb(env)
+    if (ctx) {
+      try {
+        const row = getJob(ctx, jobId)
+        if (row?.result_json) {
+          return typeof row.result_json === 'string' ? JSON.parse(row.result_json) : row.result_json
+        }
+      } catch {
+        // fall back to JSON file below
+      }
+    }
+    const result = readJsonResult(jobId, env)
+    try {
+      if (!result.jobId) result.jobId = jobId
+      mirrorJobToDb(result, env)
+    } catch {
+      // best-effort backfill into SQLite
+    }
+    return result
+  }
+
+  if (storeMode === 'shadow') {
+    warnIfDivergent(jobId, env)
+    return readJsonResult(jobId, env)
+  }
+
+  return readJsonResult(jobId, env)
 }
 
 /**
@@ -221,8 +355,106 @@ export function updateResult(jobId, patchOrUpdater, env = process.env) {
   })
 }
 
+/**
+ * List all jobs, sorted by createdAt descending.
+ *
+ * In sqlite mode (C0.1.3/C0.1.4), SQLite is coordination state and primary index.
+ * result.json is no longer the index; listJobs computes the UNION of DB job IDs
+ * and runs/ directory names, reading each DB-first with fallback to result.json
+ * (and backfilling legacy jobs into SQLite).
+ *
+ * In shadow mode (C0.1.2), reads compare JSON and SQLite for every job,
+ * warning once per divergent jobId without altering returned JSON data.
+ *
+ * Default (json) mode preserves byte-for-byte legacy filesystem-scanning behaviour.
+ */
 export function listJobs(env = process.env) {
   const { runsDir } = paths(env)
+  const storeMode = env?.AGENT_HUB_STORE || 'json'
+
+  if (storeMode === 'sqlite') {
+    const ctx = getDb(env)
+    let dbIds = []
+    if (ctx) {
+      try {
+        dbIds = listJobIds(ctx)
+      } catch {
+        dbIds = []
+      }
+    }
+
+    let runIds = []
+    try {
+      const entries = fs.readdirSync(runsDir, { withFileTypes: true })
+      for (const entry of entries) {
+        if (entry.isDirectory() && entry.name !== '.locks') {
+          runIds.push(entry.name)
+        }
+      }
+    } catch (error) {
+      if (error.code !== 'ENOENT') throw error
+    }
+
+    const unionIds = new Set([...dbIds, ...runIds])
+    const jobs = []
+    for (const id of unionIds) {
+      try {
+        jobs.push(readResult(id, env))
+      } catch {
+        // skip missing or unreadable jobs
+      }
+    }
+    jobs.sort((a, b) => (b.createdAt || '').localeCompare(a.createdAt || ''))
+    return jobs
+  }
+
+  if (storeMode === 'shadow') {
+    let entries = []
+    try {
+      entries = fs.readdirSync(runsDir, { withFileTypes: true })
+    } catch (error) {
+      if (error.code !== 'ENOENT') throw error
+    }
+
+    const ctx = getDb(env)
+    let dbIds = []
+    if (ctx) {
+      try {
+        dbIds = listJobIds(ctx)
+      } catch {
+        dbIds = []
+      }
+    }
+
+    const runIds = []
+    for (const entry of entries) {
+      if (entry.isDirectory() && entry.name !== '.locks') {
+        runIds.push(entry.name)
+      }
+    }
+
+    const allIds = new Set([...runIds, ...dbIds])
+    for (const id of allIds) {
+      try {
+        warnIfDivergent(id, env)
+      } catch {
+        // ignore
+      }
+    }
+
+    const jobs = []
+    for (const entry of entries) {
+      if (!entry.isDirectory() || entry.name === '.locks') continue
+      try {
+        jobs.push(readJsonResult(entry.name, env))
+      } catch {
+        // skip a job directory without a readable result.json
+      }
+    }
+    jobs.sort((a, b) => (b.createdAt || '').localeCompare(a.createdAt || ''))
+    return jobs
+  }
+
   let entries
   try {
     entries = fs.readdirSync(runsDir, { withFileTypes: true })
@@ -235,7 +467,7 @@ export function listJobs(env = process.env) {
   for (const entry of entries) {
     if (!entry.isDirectory() || entry.name === '.locks') continue
     try {
-      jobs.push(readResult(entry.name, env))
+      jobs.push(readJsonResult(entry.name, env))
     } catch {
       // skip a job directory without a readable result.json
     }

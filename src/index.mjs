@@ -15,8 +15,10 @@ import { julesDelegateTool, julesSourcesTool, julesCheckTool, julesSessionsTool,
 import { computeAttention } from './cloud/check.mjs'
 import { agentsQuotaTool } from './tools/agents.mjs'
 import { resumeRemoteJobs } from './cloud/runner.mjs'
-import { metricsTool } from './tools/insights.mjs'
+import { metricsTool, executionGraphTool } from './tools/insights.mjs'
+import { planTaskTool, executePlanTool } from './tools/planner.mjs'
 import { learningProposeTool } from './tools/learnings.mjs'
+import { agentSendMessageTool, agentInboxTool, agentAckTool, agentPeersTool } from './tools/messaging.mjs'
 import { scheduleStartupDiscovery, scheduleQuotaWarmup } from './startup.mjs'
 import { dispatch } from './dispatch.mjs'
 import { recordDispatchOrigin } from './harness/origin.mjs'
@@ -57,6 +59,53 @@ const log = (...args) => console.error('[agent-hub]', ...args)
 const AgentsStatusResponse = z.object({ agents: z.array(AgentStatusRow) }).passthrough()
 const AgentsQuotaResponseWrapper = z.object({ agents: z.array(AgentQuotaRow) }).passthrough()
 const LearningProposeResponse = z.object({ learning: Learning, note: z.string() }).passthrough()
+
+const AgentSendMessageResponse = z.object({
+  ok: z.boolean(),
+  messageId: z.number().optional(),
+  status: z.string().optional(),
+  truncated: z.boolean().optional(),
+  error: z.string().optional(),
+}).passthrough()
+
+const AgentInboxMessage = z.object({
+  id: z.number(),
+  from: z.string(),
+  kind: z.string(),
+  text: z.string(),
+  createdAt: z.string(),
+  deliveredAt: z.string().nullable().optional(),
+  ackAt: z.string().nullable().optional(),
+})
+
+const AgentInboxResponse = z.object({
+  ok: z.boolean(),
+  messages: z.array(AgentInboxMessage).optional(),
+  error: z.string().optional(),
+}).passthrough()
+
+const AgentAckResponse = z.object({
+  ok: z.boolean(),
+  acked: z.boolean().optional(),
+  ackAt: z.string().optional(),
+  error: z.string().optional(),
+}).passthrough()
+
+const AgentPeerRow = z.object({
+  jobId: z.string(),
+  agent: z.string(),
+  model: z.string(),
+  status: z.string(),
+  stepId: z.string().nullable().optional(),
+  messagingTurnBoundary: z.boolean(),
+  messagingMidRun: z.boolean(),
+})
+
+const AgentPeersResponse = z.object({
+  ok: z.boolean(),
+  peers: z.array(AgentPeerRow).optional(),
+  error: z.string().optional(),
+}).passthrough()
 
 const ok = (payload, structuredContent) => ({
   content: [{ type: 'text', text: JSON.stringify(payload, null, 2) }],
@@ -169,6 +218,90 @@ export function buildServer() {
   }
 
   register(
+    'agent_send_message',
+    {
+      title: 'Send a message to a peer agent',
+      description:
+        'Send an inter-agent message to a peer mailbox, scoped to a root execution. ' +
+        'ACK SEMANTICS: an ACK means the message was deposited into the peer context envelope; ' +
+        'it NEVER means the peer read, understood, agreed, or acted on it.',
+      inputSchema: {
+        to: z.string().min(1).describe('Recipient peer: an agent name or jobId. Wildcards are not supported.'),
+        text: z.string().min(1).describe('Message text (truncated to 4000 characters).'),
+        kind: z.enum(['notice', 'query', 'response']).optional().describe('Message kind (notice, query, response; default notice).'),
+        rootExecutionId: z.string().optional().describe('Root execution ID scoping this conversation. Inferred from recipient jobId if omitted.'),
+        from: z.string().optional().describe('Sender identifier (default: orchestrator).'),
+        workflowId: z.string().optional().describe('Optional workflow ID scoping the message.'),
+      },
+      outputSchema: AgentSendMessageResponse,
+      annotations: { readOnlyHint: false, idempotentHint: false },
+    },
+    guard(({ to, text, kind, rootExecutionId, from, workflowId }) =>
+      agentSendMessageTool({ to, text, kind, rootExecutionId, from, workflowId, env: process.env })
+    )
+  )
+
+  register(
+    'agent_inbox',
+    {
+      title: 'Read agent inbox messages',
+      description:
+        'Read messages from the agent mailbox, oldest first, and mark returned messages delivered. ' +
+        'ACK SEMANTICS: an ACK means the message was deposited into the peer context envelope; ' +
+        'it NEVER means the peer read, understood, agreed, or acted on it.',
+      inputSchema: {
+        to: z.string().optional().describe('Filter messages by recipient agent name or jobId.'),
+        rootExecutionId: z.string().optional().describe('Filter messages by root execution ID.'),
+        unreadOnly: z.boolean().optional().describe('When true, return only undelivered messages and mark them delivered (default true).'),
+      },
+      outputSchema: AgentInboxResponse,
+      annotations: { readOnlyHint: false, idempotentHint: false },
+    },
+    guard(({ to, rootExecutionId, unreadOnly }) =>
+      agentInboxTool({ to, rootExecutionId, unreadOnly, env: process.env })
+    )
+  )
+
+  register(
+    'agent_ack',
+    {
+      title: 'Acknowledge an agent message',
+      description:
+        'Acknowledge receipt of a message into the context envelope. ' +
+        'ACK SEMANTICS: an ACK means the message was deposited into the peer context envelope; ' +
+        'it NEVER means the peer read, understood, agreed, or acted on it.',
+      inputSchema: {
+        messageId: z.number().describe('Message ID to acknowledge.'),
+      },
+      outputSchema: AgentAckResponse,
+      annotations: { readOnlyHint: false, idempotentHint: false },
+    },
+    guard(({ messageId }) =>
+      agentAckTool({ messageId, env: process.env })
+    )
+  )
+
+  register(
+    'agent_peers',
+    {
+      title: 'List peers participating in root execution',
+      description:
+        'List active peers participating in a root execution, including their messaging capabilities ' +
+        '(messagingTurnBoundary, messagingMidRun). ' +
+        'ACK SEMANTICS: an ACK means the message was deposited into the peer context envelope; ' +
+        'it NEVER means the peer read, understood, agreed, or acted on it.',
+      inputSchema: {
+        rootExecutionId: z.string().describe('Root execution ID to find peers for.'),
+      },
+      outputSchema: AgentPeersResponse,
+      annotations: { readOnlyHint: false, idempotentHint: true },
+    },
+    guard(({ rootExecutionId }) =>
+      agentPeersTool({ rootExecutionId, env: process.env })
+    )
+  )
+
+  register(
     'agents_quota',
     {
       title: 'Agent quota usage',
@@ -211,8 +344,10 @@ export function buildServer() {
     {
       title: 'Pick an agent+model for a task type',
       description:
-        `Look up the delegation map for one task type and return {primary, fallbacks, reason}, skipping any ` +
-        `pair whose cached preflight is unavailable or whose circuit breaker is open. Known task types: ` +
+        `Look up the delegation map for one task type and return {primary, fallbacks, reason, ranking}, skipping any ` +
+        `pair whose cached preflight is unavailable or whose circuit breaker is open. The result includes a ranking ` +
+        `array (per candidate: agent, model, score, reasons per dimension); adaptive reorders only when asked. ` +
+        `Known task types: ` +
         knownTaskTypes().join(', '),
       inputSchema: {
         taskType: z.enum(knownTaskTypes()),
@@ -221,11 +356,35 @@ export function buildServer() {
           .boolean()
           .optional()
           .describe('Return the full discovered model catalog per CLI instead of a {binPath, version, modelCount, checkedAt, error} summary.'),
+        requirements: z
+          .array(z.string())
+          .optional()
+          .describe(
+            'Capability keys a candidate must satisfy: read, write, git, github, web, sessionResume, largeContext. A candidate missing one is skipped with a missing_capabilities reason.'
+          ),
+        preferences: z
+          .object({
+            quality: z.number().nonnegative().optional(),
+            cost: z.number().nonnegative().optional(),
+            latency: z.number().nonnegative().optional(),
+          })
+          .optional()
+          .describe(
+            'Weights for the ranking; higher means more important. Omitted/zero weights fall back to the defaults (quality .5, cost .2, latency .3).'
+          ),
+        adaptive: z
+          .boolean()
+          .optional()
+          .describe(
+            'When true, reorder primary/fallbacks by the computed ranking. Default false keeps the static chain order; ranking is always returned for transparency.'
+          ),
       },
       outputSchema: RouteResult,
       annotations: { readOnlyHint: true, idempotentHint: true },
     },
-    guard(({ taskType, mode, includeCatalog }) => routeTool({ taskType, mode, includeCatalog: !!includeCatalog }))
+    guard(({ taskType, mode, includeCatalog, requirements, preferences, adaptive }) =>
+      routeTool({ taskType, mode, includeCatalog: !!includeCatalog, requirements, preferences, adaptive })
+    )
   )
 
   register(
@@ -617,7 +776,8 @@ export function buildServer() {
     'agents_metrics',
     {
       title: 'Delegation metrics',
-      description: 'Success rate, p50/p95 latency, error kinds and tokens per agent/model/mode/taskType from job history.',
+      description:
+        'Success rate, p50/p95 latency, error kinds, tokens, costUsd, verified, quality, revisions and retries per agent/model/mode/taskType from job history.',
       inputSchema: {
         groupBy: z
           .array(z.enum(['agent', 'model', 'mode', 'taskType']))
@@ -628,6 +788,55 @@ export function buildServer() {
       annotations: { readOnlyHint: true, idempotentHint: true },
     },
     guard(({ groupBy }) => metricsTool({ groupBy }))
+  )
+
+  register(
+    'execution_graph',
+    {
+      title: 'Execution graph',
+      description:
+        'Read-only lineage of agent executions: roots, nodes (id, agent, model, status, workflow_id, step_id, attempt, parent, root) ' +
+        'and parent->child edges derived from rootExecutionId/parentExecutionId/executionId. The relation label is best-effort ' +
+        '(retry when attempt > 1, resume when the session matches the parent, else delegate). Pass rootExecutionId to get one subtree.',
+      inputSchema: {
+        rootExecutionId: z.string().min(1).optional().describe('Return only the subtree rooted at this execution id.'),
+      },
+      annotations: { readOnlyHint: true, idempotentHint: true },
+    },
+    guard(({ rootExecutionId }) => executionGraphTool({ rootExecutionId: rootExecutionId ?? null }))
+  )
+
+  register(
+    'plan_task',
+    {
+      title: 'Plan a task',
+      description:
+        'Validate a WorkflowPlan (goal + steps with roles) and materialize it into a runnable workflow WITHOUT executing anything. ' +
+        'Pass the plan object you wrote (the calling orchestrator plans); pass intent only when a planner is configured. ' +
+        'Returns { ok, plan, workflow } or the validation errors.',
+      inputSchema: {
+        plan: z.any().optional().describe('The WorkflowPlan to validate: { goal, steps: [{ id, role, dependsOn?, task?, taskType? }] }.'),
+        intent: z.string().min(1).optional().describe('A goal to decompose when a planner is configured.'),
+        maxSteps: z.number().int().min(1).max(50).optional().describe('Reject a plan with more steps than this (default 12).'),
+      },
+      annotations: { readOnlyHint: true, idempotentHint: true },
+    },
+    guard(({ plan, intent, maxSteps }) => planTaskTool({ plan: plan ?? null, intent, maxSteps }))
+  )
+
+  register(
+    'execute_plan',
+    {
+      title: 'Execute a plan',
+      description:
+        'Validate a WorkflowPlan, materialize it and run it. REQUIRES approve:true — review the plan first (plan_task). ' +
+        'Never executes an invalid plan and never partially executes.',
+      inputSchema: {
+        plan: z.any().describe('The WorkflowPlan to execute.'),
+        approve: z.boolean().describe('Must be true; confirms the plan was reviewed.'),
+      },
+    },
+    guard(({ plan, approve }) => executePlanTool({ plan, approve }))
   )
 
   register(

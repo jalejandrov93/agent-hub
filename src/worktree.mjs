@@ -83,10 +83,12 @@ function normalizeTtlMs(ttlMs) {
   return Number.isFinite(n) && n > 0 ? n : LEASE_TTL_MS_DEFAULT
 }
 
-/** A parsed lock holder is stale when its pid is dead or its lease expired. */
-function isHolderStale(holder) {
+/** A parsed lock holder is stale when its pid is dead or its lease expired.
+ * `nowMs` is injectable so a caller (or a test) can judge staleness against a
+ * chosen instant instead of wall-clock; it defaults to the real clock. */
+function isHolderStale(holder, nowMs = Date.now()) {
   if (!isPidAlive(holder.pid)) return true
-  if (holder.expiresAt) return Date.now() >= new Date(holder.expiresAt).getTime()
+  if (holder.expiresAt) return nowMs >= new Date(holder.expiresAt).getTime()
   return false
 }
 
@@ -151,7 +153,7 @@ function mirrorLeaseRelease({ jobId, token, env = process.env }) {
  * dead OR whose expiresAt passed is reclaimed automatically by the next
  * acquirer.
  */
-export function acquireWriteLock({ cwd, jobId, env = process.env, ttlMs = LEASE_TTL_MS_DEFAULT }) {
+export function acquireWriteLock({ cwd, jobId, env = process.env, ttlMs = LEASE_TTL_MS_DEFAULT, nowMs = Date.now() }) {
   const { locksDir } = paths(env)
   fs.mkdirSync(locksDir, { recursive: true })
   const file = lockFilePath(cwd, env)
@@ -183,22 +185,22 @@ export function acquireWriteLock({ cwd, jobId, env = process.env, ttlMs = LEASE_
     raw = fs.readFileSync(file, 'utf8')
   } catch {
     // Vanished between our failed open() and this read — retry (fresh token).
-    return acquireWriteLock({ cwd, jobId, env, ttlMs: ttl })
+    return acquireWriteLock({ cwd, jobId, env, ttlMs: ttl, nowMs })
   }
 
   let holder = null
   let stale = false
   try {
     holder = JSON.parse(raw)
-    stale = isHolderStale(holder)
+    stale = isHolderStale(holder, nowMs)
   } catch {
     // Unreadable/garbled lock file: only counts as stale once it is older
     // than the ttl by mtime — a lock mid-write by its holder is not stale
     // just because we can't parse it this instant.
     try {
-      stale = Date.now() - fs.statSync(file).mtimeMs > ttl
+      stale = nowMs - fs.statSync(file).mtimeMs > ttl
     } catch {
-      return acquireWriteLock({ cwd, jobId, env, ttlMs: ttl }) // vanished — retry
+      return acquireWriteLock({ cwd, jobId, env, ttlMs: ttl, nowMs }) // vanished — retry
     }
   }
 
@@ -210,7 +212,7 @@ export function acquireWriteLock({ cwd, jobId, env = process.env, ttlMs = LEASE_
     try {
       current = fs.readFileSync(file, 'utf8')
     } catch {
-      return acquireWriteLock({ cwd, jobId, env, ttlMs: ttl }) // already gone — retry
+      return acquireWriteLock({ cwd, jobId, env, ttlMs: ttl, nowMs }) // already gone — retry
     }
     let sameInstance = current === raw
     if (holder && holder.token) {
@@ -227,7 +229,7 @@ export function acquireWriteLock({ cwd, jobId, env = process.env, ttlMs = LEASE_
         // Lost the race — retry below regardless.
       }
     }
-    return acquireWriteLock({ cwd, jobId, env, ttlMs: ttl })
+    return acquireWriteLock({ cwd, jobId, env, ttlMs: ttl, nowMs })
   }
 
   if (holder) return { acquired: false, reason: `locked by pid ${holder.pid} (job ${holder.jobId})` }

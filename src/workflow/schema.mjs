@@ -16,11 +16,15 @@ export const NodeSchema = z
     dependsOn: z.array(z.string()).default([]),
     condition: z.string().optional(),
     maxAttempts: z.number().int().min(1).default(1),
+    maxRevisionAttempts: z.number().int().min(0).optional(),
     timeoutS: z.number().positive().optional(),
     onSuccess: z.any().optional(),
     onFailure: z.any().optional(),
+    verify: z.any().optional(),
     items: z.union([z.array(z.any()), z.string()]).optional(),
     metadata: z.record(z.any()).optional(),
+    artifacts: z.array(z.string()).optional(),
+    handoff: z.any().optional(),
   })
   .transform((data) => {
     const id = data.id || data.step_id

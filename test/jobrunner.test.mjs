@@ -171,7 +171,7 @@ test('startJob redacts JULES_API_KEY (and other secrets) via the sandbox filter,
   }
 
   assert.ok(capturedOptions.env, 'spawn must receive an explicit env')
-  assert.equal(capturedOptions.env.JULES_API_KEY, '***', 'JULES_API_KEY is redacted to *** by the sandbox filter')
+  assert.equal(Object.prototype.hasOwnProperty.call(capturedOptions.env, 'JULES_API_KEY'), false, 'JULES_API_KEY is omitted from child env by the sandbox filter')
   assert.equal(capturedOptions.env.PATH, process.env.PATH)
 })
 
@@ -261,7 +261,7 @@ test('startJob passes {model,prompt,cwd,mode,timeoutS} through the REAL adapterF
   ]
 
   for (const c of cases) {
-    const { done } = startJob({ agent: c.agent, model: c.model, task: 'hi', cwd: c.cwd, mode: c.mode, adapterFor, spawn })
+    const { done } = startJob({ agent: c.agent, model: c.model, task: 'hi', cwd: c.cwd, mode: c.mode, adapterFor, spawn, env: { ...process.env, AGENT_HUB_AGYS: 'off' } })
     await done
   }
 

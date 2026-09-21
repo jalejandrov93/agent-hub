@@ -41,6 +41,8 @@ export const EVENT_KINDS = [
   'proposal.decided',
   'learning.proposed',
   'learning.decided',
+  'harness.wake',
+  'workflow.completed',
 ]
 
 export const LEARNING_TEXT_MAX = 300
@@ -138,9 +140,9 @@ export const JobRecord = z
     root_execution_id: z.string().nullable().optional(),
     attempt: z.number().int().nullable().optional(),
     remote_state: z.string().nullable().optional(),
-    quality_score: z.number().nullable().optional(),
     verified: z.boolean().nullable().optional(),
     judge_verdict: z.string().nullable().optional(),
+    revision: z.number().int().nonnegative().nullable().optional(),
     // A1 dispatch provenance fields
     execution_id: z.string().nullable().optional(),
     executionId: z.string().nullable().optional(),
@@ -150,6 +152,8 @@ export const JobRecord = z
     // gates, locks, or routes — see src/harness/registry.mjs).
     harness: z.string().nullable().optional(),
     waitMode: z.enum(['none', 'attention', 'terminal']).nullable().optional(),
+    profile: z.string().nullable().optional(),
+    profileStatus: z.string().nullable().optional(),
   })
   .passthrough()
 
@@ -232,6 +236,8 @@ export const HubEvent = z
     // Harness profile id + dispatch waitMode on job.* events (informational).
     harness: nullableString,
     waitMode: nullableString,
+    profile: nullableString,
+    profileStatus: nullableString,
   })
   .passthrough()
 
@@ -331,6 +337,17 @@ export const MetricsRow = z
     errorKinds: z.record(z.number()),
     tokensTotal: z.number(),
     tokensAvg: z.number().nullable(),
+    costUsdTotal: z.number().nullable().optional(),
+    costUsdAvg: z.number().nullable().optional(),
+    verifiedCount: z.number().int().nonnegative().optional(),
+    verifiedSamples: z.number().int().nonnegative().optional(),
+    verifiedRate: z.number().min(0).max(1).nullable().optional(),
+    verificationFailures: z.number().int().nonnegative().optional(),
+    judgeVerdicts: z.record(z.number()).optional(),
+    revisionTotal: z.number().optional(),
+    revisionAvg: z.number().nullable().optional(),
+    retryCount: z.number().int().nonnegative().optional(),
+    qualityScore: z.number().nullable().optional(),
   })
   .passthrough()
 
@@ -802,3 +819,49 @@ export const WorkGraphResponse = z
     edges: z.array(WorkGraphEdge),
   })
   .passthrough()
+
+export const AgysBucket = z
+  .object({
+    id: z.string(),
+    label: z.string(),
+    window: nullableString,
+    resetTime: nullableString,
+    usedPercent: nullableNumber,
+    remainingPercent: nullableNumber,
+    description: nullableString,
+  })
+  .passthrough()
+
+export const AgysProfileQuota = z
+  .object({
+    buckets: z.array(AgysBucket),
+  })
+  .passthrough()
+
+export const AgysProfile = z
+  .object({
+    name: z.string(),
+    email: nullableString,
+    active: z.boolean(),
+    priority: z.number(),
+    state: z.enum(['selected', 'fallback', 'exhausted', 'unavailable']),
+    quota: AgysProfileQuota,
+  })
+  .passthrough()
+
+export const AgysSnapshotResponse = z
+  .object({
+    available: z.boolean(),
+    reason: z.string().optional(),
+    mode: z.enum(['off', 'profile', 'auto']),
+    source: z.enum(['env', 'setting', 'default']).optional(),
+    pinnedProfile: nullableString,
+    selected: z
+      .object({
+        name: z.string(),
+      })
+      .nullable(),
+    profiles: z.array(AgysProfile),
+  })
+  .passthrough()
+

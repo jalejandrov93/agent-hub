@@ -1,6 +1,8 @@
 import fs from 'node:fs'
 import path from 'node:path'
 import { paths } from '../config.mjs'
+import { routeEvent } from './adapters.mjs'
+import { DEFAULT_POLICY, normalizePolicy, decideNotification } from './policy.mjs'
 
 function fileSize(eventsFile) {
   try {
@@ -47,11 +49,14 @@ function readChunk(eventsFile, from, to) {
  * @returns {{ close(): void, poll(): Promise<void>, getOffset(): number,
  *   eventsFile: string, closed: boolean }}
  */
-export function watchEvents({ env = process.env, sinceOffset = null, onEvent, signal = null } = {}) {
+export function watchEvents({ env = process.env, sinceOffset = null, onEvent, signal = null, policy = DEFAULT_POLICY } = {}) {
   if (typeof onEvent !== 'function') throw new Error('watchEvents requires onEvent(event)')
   const { eventsFile } = paths(env)
   const dir = path.dirname(eventsFile)
   const base = path.basename(eventsFile)
+
+  const activePolicy = normalizePolicy(policy)
+  const history = {}
 
   let offset = sinceOffset ?? fileSize(eventsFile)
   let closed = false
@@ -78,8 +83,15 @@ export function watchEvents({ env = process.env, sinceOffset = null, onEvent, si
         } catch {
           continue
         }
+        const category = event?.category ?? routeEvent(event)
+        const now = Date.now()
+        const decision = decideNotification({ category, policy: activePolicy, history, now })
+        if (!decision.deliver) continue
+        if (category) {
+          history[category] = now
+        }
         try {
-          await onEvent(event)
+          await onEvent(event, decision)
         } catch (error) {
           console.error('[agent-hub] watch onEvent failed:', error?.message ?? error)
         }
@@ -125,6 +137,7 @@ export function watchEvents({ env = process.env, sinceOffset = null, onEvent, si
     close,
     poll,
     getOffset: () => offset,
+    getHistory: () => ({ ...history }),
     eventsFile,
     get closed() {
       return closed

@@ -17,7 +17,23 @@ function isolated() {
 function neverResolvesUntilAborted() {
   return (url, { signal } = {}) =>
     new Promise((resolve, reject) => {
-      if (signal) signal.addEventListener('abort', () => reject(Object.assign(new Error('aborted'), { name: 'TimeoutError' })))
+      const abortError = () => Object.assign(new Error('aborted'), { name: 'TimeoutError' })
+      if (signal?.aborted) {
+        return reject(abortError())
+      }
+      let timer
+      const onAbort = () => {
+        if (timer) clearTimeout(timer)
+        reject(abortError())
+      }
+      if (signal) {
+        signal.addEventListener('abort', onAbort, { once: true })
+      }
+      // AbortSignal.timeout creates an unref'd timer in Node.js. Real fetch keeps
+      // the event loop alive via its network socket; a mock fetchImpl without
+      // sockets must hold a ref'd timer so the event loop does not drain before
+      // the abort event fires.
+      timer = setTimeout(() => {}, 10_000)
     })
 }
 

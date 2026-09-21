@@ -25,6 +25,8 @@ const VALID_KINDS = new Set([
   'proposal.decided',
   'learning.proposed',
   'learning.decided',
+  'harness.wake',
+  'workflow.completed',
 ])
 
 function ensureDir(dir) {

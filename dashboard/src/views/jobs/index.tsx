@@ -2,6 +2,7 @@ import * as React from "react"
 import { Link } from "@tanstack/react-router"
 import { PlayCircle } from "lucide-react"
 import { PageHeader } from "@/components/PageHeader"
+import { ProviderMark } from "@/components/ProviderMark"
 import { EmptyState } from "@/components/EmptyState"
 import { DataTable, type DataTableColumn } from "@/components/DataTable"
 import { ConfirmDialog } from "@/components/ConfirmDialog"
@@ -16,8 +17,9 @@ import { runningJobs } from "@/lib/badges"
 import { formatDuration, formatModel } from "@/lib/format"
 import { useCancelJobMutation, useStateQuery } from "@/lib/queries"
 import type { Job } from "@/lib/types"
+import { JobProfileBadge } from "@/views/providers"
 import { ElapsedCell } from "./ElapsedCell"
-import { JobDetailSheet } from "./JobDetailSheet"
+import { JobDetailModal } from "./JobDetailModal"
 
 const PAGE_HEADER = {
   title: "Running jobs",
@@ -63,11 +65,14 @@ export function JobsView() {
       key: "agent",
       header: "Agent & model",
       cell: (job) => (
-        <div className="flex min-w-0 flex-col gap-0.5">
-          <span className="font-medium">{job.agent}</span>
-          <span className="truncate text-xs text-muted-foreground" title={job.model}>
-            {formatModel(job.model)}
-          </span>
+        <div className="flex items-center gap-2">
+          <ProviderMark agent={job.agent} size="sm" />
+          <div className="flex min-w-0 flex-col gap-0.5">
+            <span className="font-medium">{job.agent}</span>
+            <span className="truncate text-xs text-muted-foreground" title={job.model}>
+              {formatModel(job.model)}
+            </span>
+          </div>
         </div>
       ),
     },
@@ -89,6 +94,16 @@ export function JobsView() {
       key: "taskType",
       header: "Task type",
       cell: (job) => (job.taskType ? <Badge variant="outline">{job.taskType}</Badge> : "—"),
+    },
+    {
+      key: "profile",
+      header: "Profile",
+      cell: (job) =>
+        job.profile ? (
+          <JobProfileBadge profile={job.profile} status={job.profileStatus} />
+        ) : (
+          <span className="text-muted-foreground">—</span>
+        ),
     },
     {
       key: "cwd",
@@ -185,7 +200,7 @@ export function JobsView() {
       ) : null}
 
       {selected ? (
-        <JobDetailSheet
+        <JobDetailModal
           job={selected}
           open={Boolean(selected)}
           onOpenChange={(open) => {

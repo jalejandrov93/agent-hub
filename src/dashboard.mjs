@@ -5,6 +5,7 @@ import { fileURLToPath } from 'node:url'
 import { readTail, appendEvent } from './eventlog.mjs'
 import { listJobs } from './jobstore.mjs'
 import { getWorkGraph } from './workGraph.mjs'
+import { buildExecutionGraph } from './execution-graph.mjs'
 import { readCache, agentsStatus, pingAgent, breakerStatus } from './preflight.mjs'
 import { cancelJob } from './jobrunner.mjs'
 import { paths, stateHome, DEFAULT_TIMEOUTS_S, CIRCUIT_BREAKER, PREFLIGHT_TTL_MS, WRITE_ALLOWLIST, MODEL_REGISTRY } from './config.mjs'
@@ -18,6 +19,7 @@ import { computeMetrics } from './metrics.mjs'
 import { listProposals, refreshProposals, decideProposal } from './proposals.mjs'
 import { listLearnings, proposeLearning, decideLearning, deleteLearning } from './learnings.mjs'
 import { jobResultTool } from './tools/jobs.mjs'
+import { JobRecord } from './schemas.mjs'
 import { listMcpTools } from './index.mjs'
 import { startScheduler, runScheduleNow } from './scheduler.mjs'
 import { createAccount, updateAccount, deleteAccount, setPolicy, listAccounts } from './accounts.mjs'
@@ -29,6 +31,7 @@ import { keyForAccount } from './cloud/credentials.mjs'
 import { stdoutPath } from './jobstore.mjs'
 import * as defaultClient from './cloud/jules/client.mjs'
 import * as defaultAdapter from './cloud/jules/adapter.mjs'
+import { agysProfilesSnapshot, setAgysMode } from './providers/agys.mjs'
 
 const HERE = path.dirname(fileURLToPath(import.meta.url))
 // The Vite-built React app lands here (built by a separate package); this
@@ -241,6 +244,8 @@ export function isAllowedOrigin(origin) {
   }
 }
 
+let invalidJobsWarned = false
+
 /** State for GET /api/state: agents (from the preflight cache), jobs, and the last 200 events (subagents included). */
 export function buildState({ env = process.env } = {}) {
   const discovery = readDiscovery(env)
@@ -250,7 +255,19 @@ export function buildState({ env = process.env } = {}) {
     binPath: discovery[a.agent]?.binPath ?? null,
     cliVersion: discovery[a.agent]?.version ?? null,
   }))
-  const jobs = listJobs(env)
+  // `/api/state` is validated by the client as ONE payload (`StateResponse`,
+  // jobs: JobRecord[]). One record that does not satisfy JobRecord used to
+  // blank every job-list view, so drop exactly the invalid ones here instead.
+  const jobs = []
+  let dropped = 0
+  for (const job of listJobs(env)) {
+    if (JobRecord.safeParse(job).success) jobs.push(job)
+    else dropped++
+  }
+  if (dropped > 0 && !invalidJobsWarned) {
+    invalidJobsWarned = true
+    console.warn(`[agent-hub] /api/state dropped ${dropped} job record(s) that do not satisfy JobRecord; the dashboard shows the rest`)
+  }
   const events = readTail({ n: 200, env })
   const subagents = events.filter((e) => e.source === 'claude-hook')
   return { agents, jobs, subagents, events }
@@ -445,8 +462,50 @@ export function createServer({ env = process.env, commandRunner = runCommand, di
       return
     }
 
+    if (url.pathname === '/api/execution-graph' && req.method === 'GET') {
+      try {
+        const rootExecutionId = url.searchParams.get('root') || null
+        const jobs = listJobs(env)
+        sendJson(res, 200, buildExecutionGraph({ jobs, rootExecutionId }))
+      } catch (error) {
+        sendError(res, domainError(error))
+      }
+      return
+    }
+
     if (url.pathname === '/api/config' && req.method === 'GET') {
       sendJson(res, 200, buildConfig({ env }))
+      return
+    }
+
+    if ((url.pathname === '/api/providers' || url.pathname === '/api/agys') && req.method === 'GET') {
+      agysProfilesSnapshot({ env })
+        .then((snapshot) => sendJson(res, 200, snapshot))
+        .catch((error) =>
+          sendJson(res, 200, {
+            available: false,
+            reason: String(error?.message ?? error),
+            mode: 'off',
+            pinnedProfile: null,
+            selected: null,
+            profiles: [],
+          })
+        )
+      return
+    }
+
+    if (url.pathname === '/api/providers/mode' && req.method === 'POST') {
+      readJsonBody(req)
+        .then(async (body) => {
+          try {
+            setAgysMode(body, env)
+          } catch (err) {
+            return sendJson(res, 400, { error: err.message })
+          }
+          const snapshot = await agysProfilesSnapshot({ env })
+          return sendJson(res, 200, snapshot)
+        })
+        .catch((error) => sendError(res, domainError(error)))
       return
     }
 

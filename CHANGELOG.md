@@ -6,8 +6,52 @@ and this project adheres to [Semantic Versioning](https://semver.org/).
 
 ## [Unreleased]
 
+### Removed
+
+- Unused per-job `quality_score` field removed from `JobRecord` schema and `createJob`.
+  The SQLite column remains dormant for compatibility, and the derived metrics
+  `qualityScore` (`10 * verifiedRate`) is unaffected.
+
+### Fixed
+
+- `createJob` now rejects a record without `agent`/`model` instead of writing
+  one that violates `JobRecord`, and `/api/state` (`buildState`) drops job
+  records that do not satisfy `JobRecord` instead of returning a payload the
+  dashboard client cannot parse. One malformed record used to blank every
+  job-list view ("Could not load jobs").
+
 ### Added
 
+- Quality/cost/latency intelligence in `computeMetrics` (`agents_metrics`,
+  `GET /api/metrics`): `costUsdTotal`/`costUsdAvg`, `verifiedCount`/
+  `verifiedSamples`/`verifiedRate`/`verificationFailures`, `judgeVerdicts`,
+  `revisionTotal`/`revisionAvg`, `retryCount` and `qualityScore`
+  (`10 * verifiedRate`, null without verification evidence). The engine mirrors
+  `judge_verdict`/`revision` onto the job record as soon as the judge decides,
+  so rejected/blocked verdicts are recorded too. The dashboard Metrics view
+  gains Verified, Quality, Avg cost and Avg revisions columns.
+- Workflow judge and revision loop (`src/judge.mjs`): a delegate node can set
+  `maxRevisionAttempts` and the engine turns the verifier verdict into
+  `accepted | needs_revision | rejected | blocked` — `needs_revision`
+  re-dispatches the worker (no backoff, bounded), `blocked` short-circuits on
+  missing upstream evidence, and the verdict is persisted as
+  `artifacts/judge.json` and carried on the node result and `job.finished`/
+  `job.failed`.
+- Workflow verifier (`src/verify.mjs`): a delegate node can declare `verify`
+  checks (`argv` commands, `artifact` evidence existence, `forbid` diff scope)
+  and the engine records a `{ verified, required, checks }` verdict next to the
+  result — persisted as `artifacts/verification.json`, carried on
+  `job.finished`/`job.failed`, and mirrored onto the job record's `verified`
+  column (`required: true` makes a failed verdict fatal and skips the retry
+  loop).
+- Workflow evidence artifacts (`src/artifacts.mjs`): a delegate node can
+  declare `artifacts: ['plan.md', ...]`, the engine creates
+  `runs/<workflowId>/<stepId>/artifacts/`, tells the agent to write exactly
+  those files there, and records an `artifacts.manifest.json`
+  (`present`/`missing`, bytes, sha256) that also travels on `job.finished`.
+  Downstream nodes pass evidence with `artifact://<workflowId>/<stepId>/<name>`
+  refs, inlined into the task (64 KiB per ref) instead of inlining a whole
+  response; an unresolved ref fails the node.
 - Harness profiles (`src/harness/`: `generic`, `claude-code`, `opencode`)
   with a default `dispatch()` wait contract per caller. `dispatch()` accepts
   `waitMode` (`none` = return at create/start, `attention` = also return on

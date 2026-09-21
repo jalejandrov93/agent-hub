@@ -7,6 +7,7 @@ import { fetchJson } from "@/lib/api"
 import { useStateQuery } from "@/lib/queries"
 import { HistorySearch, type HistorySearchT } from "@/routes/search"
 import type { Job } from "@/lib/types"
+import { JobProfileBadge } from "@/views/providers"
 import { formatModel, formatNumber, formatDuration } from "@/lib/format"
 import { PageHeader } from "@/components/PageHeader"
 import { DataTable, type DataTableColumn } from "@/components/DataTable"
@@ -217,6 +218,16 @@ export function HistoryView() {
             <Badge variant="outline" className="font-mono text-xs">
               {job.taskType}
             </Badge>
+          ) : (
+            <span className="text-muted-foreground">—</span>
+          ),
+      },
+      {
+        key: "profile",
+        header: "Profile",
+        cell: (job) =>
+          job.profile ? (
+            <JobProfileBadge profile={job.profile} status={job.profileStatus} />
           ) : (
             <span className="text-muted-foreground">—</span>
           ),

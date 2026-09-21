@@ -9,6 +9,14 @@ export function stateHome(env = process.env) {
   return env.AGENT_HUB_HOME || path.join(os.homedir(), '.local', 'share', 'agent-hub')
 }
 
+/**
+ * Opt-in flag for read-purity guard: when '1', snapshot includes gitignored files.
+ * Default is OFF (0/unset).
+ */
+export function readguardIgnoredEnabled(env = process.env) {
+  return env?.AGENT_HUB_READGUARD_IGNORED === '1'
+}
+
 export function paths(env = process.env) {
   const home = stateHome(env)
   return {
@@ -30,6 +38,7 @@ export function paths(env = process.env) {
     quotaCacheFile: path.join(home, 'quota-cache.json'),
     runsDir: path.join(home, 'runs'),
     locksDir: path.join(home, 'runs', '.locks'),
+    agysModeFile: path.join(home, 'agys-mode.json'),
   }
 }
 
@@ -135,10 +144,17 @@ export function resolveTimeoutS(agent, model) {
  * explicit override wins, then the model's MODEL_REGISTRY default, else none.
  */
 /**
- * Sandbox configuration. 'compatibility' is the DEFAULT profile — it only
- * redacts known secret env vars but INHERITS the real HOME directory.
- * compatibility is NOT a security sandbox. Use 'isolated-home' or 'isolated'
- * for stronger credential isolation (HOME points to a fresh temp dir).
+ * Sandbox configuration.
+ * - 'compatibility' (DEFAULT): redacts known secret env vars but INHERITS the real HOME.
+ *   Not a security sandbox.
+ * - 'isolated-home': redacts secret env vars and sets HOME to a fresh empty temp dir.
+ * - 'isolated': redacts secret env vars, sets HOME, TMPDIR, and XDG_* directories to a
+ *   fresh per-call sandbox dir, with opt-in copy via AGENT_HUB_SANDBOX_INCLUDE.
+ *
+ * What these levels do and do NOT protect:
+ * None of these profiles use OS containers, Linux namespaces, cgroups, or network
+ * policies. 'isolated' is still NOT a container; child processes retain regular process
+ * privileges and unrestricted network access.
  */
 export const SANDBOX = {
   defaultProfile: 'compatibility',

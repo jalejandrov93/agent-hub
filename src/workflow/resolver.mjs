@@ -16,6 +16,7 @@ function createSafeSteps(stepsMap) {
       result: state?.result ?? null,
       output: state?.result?.output ?? state?.result ?? null,
       error: state?.error ?? null,
+      handoff: state?.handoff ?? null,
     }
   }
 
@@ -30,6 +31,7 @@ function createSafeSteps(stepsMap) {
         result: null,
         output: null,
         error: null,
+        handoff: null,
       }
     },
   })

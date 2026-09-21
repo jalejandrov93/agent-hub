@@ -40,7 +40,7 @@ if (!fs.existsSync(distIndex)) {
 
 // Replace only the payload directories, so the target keeps its node_modules
 // (a reinstall stays fast) and never inherits stale files from an older copy.
-const payload = ['bin', 'src', 'skills', 'systemd']
+const payload = ['bin', 'src', 'skills', 'systemd', 'integrations']
 fs.mkdirSync(target, { recursive: true })
 for (const dir of [...payload, 'dashboard']) fs.rmSync(path.join(target, dir), { recursive: true, force: true })
 for (const dir of payload) fs.cpSync(path.join(REPO, dir), path.join(target, dir), { recursive: true })

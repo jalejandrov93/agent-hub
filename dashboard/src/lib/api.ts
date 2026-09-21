@@ -26,12 +26,14 @@ import {
   AgentsQuotaResponse,
   WorkGraphResponse,
   McpToolsResponse,
+  AgysSnapshotResponse,
 } from "@shared"
 import type {
   StateResponseT,
   ConfigResponseT,
   MetricsResponseT,
   AgentsQuotaResponseT,
+  AgysSnapshotResponseT,
   ProposalT,
   LearningT,
   LearningInputT,
@@ -51,7 +53,9 @@ import type {
   CloudSourceCacheEntryT,
   WorkGraphResponseT,
   McpToolsResponseT,
+  ExecutionGraphResponseT,
 } from "./types"
+
 
 export class ApiError extends Error {
   status: number
@@ -113,6 +117,14 @@ export function getMetrics(): Promise<MetricsResponseT> {
 
 export function getQuota(): Promise<AgentsQuotaResponseT> {
   return fetchJson(AgentsQuotaResponse, "/api/quota")
+}
+
+export function getProviders(): Promise<AgysSnapshotResponseT> {
+  return fetchJson(AgysSnapshotResponse, "/api/providers")
+}
+
+export function setProvidersMode(params: { mode: "off" | "profile" | "auto"; profile?: string | null }): Promise<AgysSnapshotResponseT> {
+  return fetchJson(AgysSnapshotResponse, "/api/providers/mode", writeInit("POST", params))
 }
 
 const ProposalsPayload = z.object({ proposals: z.array(Proposal) })
@@ -250,3 +262,42 @@ export function fetchWorkGraph(): Promise<WorkGraphResponseT> {
 export function getTools(): Promise<McpToolsResponseT> {
   return fetchJson(McpToolsResponse, "/api/tools")
 }
+
+export const ExecutionGraphNode = z
+  .object({
+    id: z.string(),
+    jobId: z.string().nullable().default(null),
+    agent: z.string().nullable().default(null),
+    model: z.string().nullable().default(null),
+    status: z.string().nullable().default(null),
+    workflow_id: z.string().nullable().default(null),
+    step_id: z.string().nullable().default(null),
+    attempt: z.number().nullable().default(null),
+    parent: z.string().nullable().default(null),
+    root: z.string().nullable().default(null),
+    relation: z.string().default('delegate'),
+  })
+  .passthrough()
+
+export const ExecutionGraphEdge = z
+  .object({
+    from: z.string(),
+    to: z.string(),
+    relation: z.string().default('delegate'),
+  })
+  .passthrough()
+
+
+export const ExecutionGraphResponse = z
+  .object({
+    roots: z.array(z.string()),
+    nodes: z.record(z.string(), ExecutionGraphNode),
+    edges: z.array(ExecutionGraphEdge),
+  })
+  .passthrough()
+
+export function getExecutionGraph(root?: string | null): Promise<ExecutionGraphResponseT> {
+  const query = root ? `?root=${encodeURIComponent(root)}` : ''
+  return fetchJson(ExecutionGraphResponse, `/api/execution-graph${query}`)
+}
+

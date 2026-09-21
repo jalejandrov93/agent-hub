@@ -1,4 +1,15 @@
+import fs from 'node:fs'
 import crypto from 'node:crypto'
+import {
+  artifactsDir,
+  collectManifest,
+  readArtifact,
+  resolveArtifactRefs,
+  writeArtifact,
+  writeManifest,
+} from '../artifacts.mjs'
+import { validateHandoff, resolveHandoffSchema } from '../handoff.mjs'
+import { writeHandoff, readHandoff } from '../context.mjs'
 import {
   getDb,
   upsertWorkflow,
@@ -12,7 +23,10 @@ import {
 import { appendEvent } from '../eventlog.mjs'
 import { resolveHarness } from '../harness/registry.mjs'
 import { calculateDispatchTimeoutS, dispatch, waitExecution as defaultWaitExecution } from '../dispatch.mjs'
-import { readResult as readJobResult } from '../jobstore.mjs'
+import { readResult as readJobResult, updateResult } from '../jobstore.mjs'
+import { runVerification, normalizeVerifyConfig } from '../verify.mjs'
+import { judgeVerdict } from '../judge.mjs'
+import { buildRevisionFeedback } from '../revision.mjs'
 import { createWorkflow } from './schema.mjs'
 import { NODE_STATUS, WAITING_REASONS, isTerminalStatus, assertValidTransition } from './state.mjs'
 import { resolveDependencies, evaluateCondition } from './resolver.mjs'
@@ -41,6 +55,37 @@ const sleep = (ms) => new Promise((resolve) => setTimeout(resolve, ms))
 /** Default claim-lease TTL: a running node owned by someone else may only be
  * revived after this long without an update. */
 export const CLAIM_LEASE_TTL_MS = 30_000
+
+/**
+ * Normalizes a node's handoff configuration.
+ * undefined/null/false -> null
+ * true -> { required: false, schema: 'BaseHandoff' }
+ * object -> { required: value.required === true, schema: typeof value.schema === 'string' ? value.schema : 'BaseHandoff' }
+ * An unknown schema name throws via resolveHandoffSchema.
+ * @param {object} node
+ * @returns {{ required: boolean, schema: string } | null}
+ */
+export function normalizeHandoffConfig(node) {
+  const value = node?.handoff
+  if (value === undefined || value === null || value === false) {
+    return null
+  }
+  if (value === true) {
+    return { required: false, schema: 'BaseHandoff' }
+  }
+  if (typeof value === 'object' && !Array.isArray(value)) {
+    const schema = typeof value.schema === 'string' ? value.schema : 'BaseHandoff'
+    const schemaObj = resolveHandoffSchema(schema)
+    if (!schemaObj) {
+      throw new Error(`unknown handoff schema: ${schema}`)
+    }
+    return {
+      required: value.required === true,
+      schema,
+    }
+  }
+  return null
+}
 
 function refreshNodeStates(ctx, workflowId, nodeStates) {
   const rows = listWorkflowNodes(ctx, workflowId)
@@ -163,6 +208,189 @@ export function resolveFanoutItems({ node, nodeStates }) {
 }
 
 /**
+ * Executes the evidence sequence: prepares artifacts directory and instructions,
+ * optionally executes the dispatch action, then processes post-terminal evidence
+ * (verification, judge verdict, handoff validation, manifest collection).
+ */
+export async function executeEvidenceSequence({
+  workflow,
+  node,
+  childId = null,
+  ctx,
+  env = process.env,
+  runCommandFn = null,
+  nodeStates,
+  task = '',
+  result = null,
+  revision = 0,
+  maxRevisionAttempts = 0,
+  allowRevision = true,
+  execute = null,
+}) {
+  const stepId = childId || node.id
+  const declared = Array.isArray(node.artifacts) ? node.artifacts : []
+  const handoffConfig = normalizeHandoffConfig(node)
+
+  let dispatchedTask = task
+
+  if (declared.length > 0) {
+    const dir = artifactsDir({ workflowId: workflow.id, stepId }, env)
+    fs.mkdirSync(dir, { recursive: true })
+    dispatchedTask =
+      dispatchedTask +
+      '\n\n' +
+      'Evidence artifacts: write these files to ' +
+      dir +
+      ' (absolute path), one file per name, exactly these filenames: ' +
+      declared.join(', ') +
+      '. Do not write any other file there.'
+  }
+
+  if (handoffConfig) {
+    const dir = artifactsDir({ workflowId: workflow.id, stepId }, env)
+    fs.mkdirSync(dir, { recursive: true })
+    const schemaObj = resolveHandoffSchema(handoffConfig.schema)
+    const requiresStr = schemaObj?.requires ? schemaObj.requires.join(', ') : 'summary'
+    dispatchedTask =
+      dispatchedTask +
+      '\n\n' +
+      'Structured handoff: also write handoff.json to ' +
+      dir +
+      ' (absolute path): a JSON object with summary (a non-empty string) and the arrays findings/decisions/constraints/changedFiles/openQuestions/artifacts (arrays of strings). ' +
+      'Required fields for schema ' +
+      handoffConfig.schema +
+      ': ' +
+      requiresStr +
+      '.'
+  }
+
+  let finalResult = result
+  if (typeof execute === 'function') {
+    finalResult = await execute(dispatchedTask)
+  }
+
+  let verification = null
+  let judge = null
+  if (normalizeVerifyConfig(node)) {
+    verification = await runVerification({
+      node: { ...node, id: stepId },
+      workflowId: workflow.id,
+      stepId,
+      cwd: node.cwd ?? null,
+      env,
+      runCommandFn: runCommandFn ?? undefined,
+    })
+    if (verification) {
+      try {
+        writeArtifact(
+          {
+            workflowId: workflow.id,
+            stepId,
+            name: 'verification.json',
+            content: JSON.stringify(verification, null, 2),
+          },
+          env
+        )
+      } catch {}
+      judge = judgeVerdict({
+        verification,
+        stepId,
+        revision,
+        maxRevisionAttempts,
+        required: verification.required,
+      })
+      try {
+        writeArtifact(
+          {
+            workflowId: workflow.id,
+            stepId,
+            name: 'judge.json',
+            content: JSON.stringify(judge, null, 2),
+          },
+          env
+        )
+      } catch {}
+    }
+  }
+
+  const jobId = finalResult?.job?.jobId ?? finalResult?.jobId ?? null
+  if (judge && jobId) {
+    try {
+      updateResult(jobId, { verified: verification.verified, judge_verdict: judge.verdict, revision }, env)
+    } catch {}
+  }
+
+  if (allowRevision && judge && judge.verdict === 'needs_revision') {
+    const err = new Error(judge.reason)
+    err.code = 'REVISION_REQUESTED'
+    err.judge = judge
+    err.verification = verification
+    throw err
+  }
+
+  if (!allowRevision && judge && judge.required && !verification?.verified) {
+    const err = new Error(judge.reason)
+    err.code = 'JUDGE_REJECTED'
+    err.judge = judge
+    err.verification = verification
+    throw err
+  }
+
+  if (judge && (judge.verdict === 'rejected' || judge.verdict === 'blocked') && judge.required) {
+    const err = new Error(judge.reason)
+    err.code = 'JUDGE_REJECTED'
+    err.judge = judge
+    err.verification = verification
+    throw err
+  }
+
+  let producedHandoff = null
+  if (handoffConfig) {
+    let handoffRaw = null
+    try {
+      const art = readArtifact({ workflowId: workflow.id, stepId, name: 'handoff.json' }, env)
+      if (art?.content) {
+        handoffRaw = JSON.parse(art.content)
+      }
+    } catch {}
+
+    const validation = validateHandoff(handoffRaw, { schema: handoffConfig.schema })
+    if (validation.ok) {
+      producedHandoff = writeHandoff(
+        {
+          workflowId: workflow.id,
+          stepId,
+          handoff: validation.value,
+          schema: handoffConfig.schema,
+        },
+        env
+      )
+    } else {
+      if (handoffConfig.required) {
+        const err = new Error('handoff required: ' + JSON.stringify(validation.errors))
+        err.code = 'HANDOFF_INVALID'
+        throw err
+      }
+    }
+  }
+
+  let manifest = null
+  if (declared.length > 0) {
+    manifest = collectManifest({ workflowId: workflow.id, stepId, declared }, env)
+    writeManifest({ workflowId: workflow.id, stepId }, manifest, env)
+  }
+
+  return {
+    result: finalResult,
+    task: dispatchedTask,
+    verification,
+    judge,
+    handoff: producedHandoff,
+    manifest,
+  }
+}
+
+/**
  * Executes a single node with retry backoff and timeout enforcement.
  *
  * C1.1 delegate semantics: dispatch() returns a handle; waitExecution()
@@ -178,6 +406,7 @@ async function executeNode({
   ctx,
   env,
   dispatchFn,
+  runCommandFn = null,
   nodeStates,
   claimedBy,
   backoffMs,
@@ -187,8 +416,12 @@ async function executeNode({
   waitingTimeoutS = 300,
   pollIntervalMs = 25,
 }) {
+  const handoffConfig = normalizeHandoffConfig(node)
   const maxAttempts = node.maxAttempts ?? 1
   let attempt = nodeStates.get(node.id)?.attempt || 1
+  const maxRevisionAttempts = Number.isInteger(node.maxRevisionAttempts) && node.maxRevisionAttempts > 0 ? node.maxRevisionAttempts : 0
+  let revision = 0
+  let revisionFeedback = ''
   let lastError = null
   const readRecord = readResultFn ?? ((jobId) => readJobResult(jobId, env))
   // Harness defaults from env for the started event (emitted before the
@@ -220,91 +453,151 @@ async function executeNode({
   while (attempt <= maxAttempts) {
     try {
       let result = null
+      let verification = null
+      let judge = null
+      let producedHandoff = null
+      let manifest = null
 
       if (node.type === 'delegate') {
-        // C1.6 timeout calculation
-        let timeoutS = node.timeoutS
-        if (!timeoutS && typeof calculateDispatchTimeoutS === 'function') {
-          try {
-            timeoutS = calculateDispatchTimeoutS({
-              agent: node.agent,
-              model: node.model,
-              mode: node.mode,
-              taskType: node.taskType,
-              attempt,
-              env,
-            })
-          } catch {
-            timeoutS = 30
+        const resolved = resolveArtifactRefs(node.task ?? '', { env })
+        if (resolved.missing.length > 0) {
+          throw new Error('unresolved artifact ref: ' + resolved.missing[0])
+        }
+        let dispatchedTask = resolved.text
+        if (revisionFeedback) {
+          dispatchedTask = revisionFeedback + '\n\n' + dispatchedTask
+        }
+
+        const deps = Array.isArray(node.dependsOn) ? node.dependsOn : []
+        const upstreamHandoffs = []
+        for (const depId of deps) {
+          const depHandoff = nodeStates.get(depId)?.handoff
+          if (depHandoff) {
+            let json = JSON.stringify(depHandoff, null, 0)
+            if (json.length > 4000) {
+              json = json.slice(0, 4000) + '...'
+            }
+            upstreamHandoffs.push(`${depId}: ${json}`)
           }
         }
-        timeoutS = timeoutS || 30
-        const attemptDeadline = Date.now() + timeoutS * 1000
+        if (upstreamHandoffs.length > 0) {
+          dispatchedTask =
+            dispatchedTask +
+            '\n\n' +
+            'Upstream context:\n' +
+            upstreamHandoffs.join('\n')
+        }
 
-        // Sin await previo: el timeout cubre el dispatch mismo (los mocks
-        // legacy cuelgan dentro del dispatch, igual que antes).
-        const dispatchPromise = Promise.resolve().then(() =>
-          dispatchFn({
-            task: node.task,
-            taskType: node.taskType,
-            agent: node.agent,
-            model: node.model,
-            cwd: node.cwd,
-            mode: node.mode,
-            workflowStep: node.id,
-            workflow_id: workflow.id,
-            step_id: node.id,
-            attempt,
-            timeoutS,
-            env,
-          })
-        )
-        const timeoutPromise = new Promise((_, reject) => {
-          const timer = setTimeout(() => {
-            const err = new Error(`Node "${node.id}" timed out after ${timeoutS}s (attempt ${attempt}/${maxAttempts})`)
-            err.code = 'ETIMEDOUT'
-            reject(err)
-          }, timeoutS * 1000)
-          if (timer.unref) timer.unref()
+        const evidenceOutcome = await executeEvidenceSequence({
+          workflow,
+          node,
+          childId: node.id,
+          ctx,
+          env,
+          runCommandFn,
+          nodeStates,
+          task: dispatchedTask,
+          revision,
+          maxRevisionAttempts,
+          allowRevision: true,
+          execute: async (finalTask) => {
+            let timeoutS = node.timeoutS
+            if (!timeoutS && typeof calculateDispatchTimeoutS === 'function') {
+              try {
+                timeoutS = calculateDispatchTimeoutS({
+                  agent: node.agent,
+                  model: node.model,
+                  mode: node.mode,
+                  taskType: node.taskType,
+                  attempt,
+                  env,
+                })
+              } catch {
+                timeoutS = 30
+              }
+            }
+            timeoutS = timeoutS || 30
+            const attemptDeadline = Date.now() + timeoutS * 1000
+
+            let parentExecutionId = null
+            const firstDepId = Array.isArray(node.dependsOn) && node.dependsOn.length > 0 ? node.dependsOn[0] : null
+            if (firstDepId) {
+              const depResult = nodeStates.get(firstDepId)?.result
+              parentExecutionId = depResult?.job?.jobId ?? depResult?.jobId ?? null
+            }
+
+            const dispatchPromise = Promise.resolve().then(() =>
+              dispatchFn({
+                task: finalTask,
+                taskType: node.taskType,
+                agent: node.agent,
+                model: node.model,
+                cwd: node.cwd,
+                mode: node.mode,
+                workflowStep: node.id,
+                workflow_id: workflow.id,
+                step_id: node.id,
+                attempt,
+                timeoutS,
+                env,
+                rootExecutionId: workflow.id,
+                parentExecutionId,
+              })
+            )
+            const timeoutPromise = new Promise((_, reject) => {
+              const timer = setTimeout(() => {
+                const err = new Error(`Node "${node.id}" timed out after ${timeoutS}s (attempt ${attempt}/${maxAttempts})`)
+                err.code = 'ETIMEDOUT'
+                reject(err)
+              }, timeoutS * 1000)
+              if (timer.unref) timer.unref()
+            })
+
+            const dispatched = await Promise.race([dispatchPromise, timeoutPromise])
+            dispatchPromise.catch(() => {})
+            adoptHarness(dispatched)
+
+            const handle = unwrapHandle(dispatched) ?? pendingJobHandle(dispatched)
+            if (!handle) {
+              return dispatched
+            }
+            const remainingS = Math.max(0.05, (attemptDeadline - Date.now()) / 1000)
+            return await waitForHandleTerminal({
+              workflow,
+              node,
+              ctx,
+              env,
+              handle,
+              timeoutS: remainingS,
+              attempt,
+              maxAttempts,
+              nodeStates,
+              claimedBy,
+              waitExecutionFn,
+              readRecord,
+              onWaiting,
+              waitingTimeoutS,
+              pollIntervalMs,
+            })
+          },
         })
 
-        const dispatched = await Promise.race([dispatchPromise, timeoutPromise])
-        // Evita unhandled rejection si el dispatch pierde la carrera y falla tarde.
-        dispatchPromise.catch(() => {})
-        adoptHarness(dispatched)
-
-        const handle = unwrapHandle(dispatched) ?? pendingJobHandle(dispatched)
-        if (!handle) {
-          // Legacy dispatch (valor plano, sin jobId): el resultado ya está aquí.
-          result = dispatched
-        } else {
-          // C1.1: espera el record terminal REAL con el presupuesto restante
-          // del intento; nunca avanza sobre un pendiente.
-          const remainingS = Math.max(0.05, (attemptDeadline - Date.now()) / 1000)
-          result = await waitForHandleTerminal({
-            workflow,
-            node,
-            ctx,
-            env,
-            handle,
-            timeoutS: remainingS,
-            attempt,
-            maxAttempts,
-            nodeStates,
-            claimedBy,
-            waitExecutionFn,
-            readRecord,
-            onWaiting,
-            waitingTimeoutS,
-            pollIntervalMs,
-          })
-        }
+        result = evidenceOutcome.result
+        verification = evidenceOutcome.verification
+        judge = evidenceOutcome.judge
+        producedHandoff = evidenceOutcome.handoff
+        manifest = evidenceOutcome.manifest
       } else if (node.type === 'fanout') {
-        // C1.5 Fanout node generates N children (C1.1: no new Function)
         const items = resolveFanoutItems({ node, nodeStates })
+        const childMaxRevisionAttempts =
+          Number.isInteger(node.maxRevisionAttempts) && node.maxRevisionAttempts > 0
+            ? node.maxRevisionAttempts
+            : 0
 
-        // Execute N children in parallel with distinct workflowStep -> distinct dispatchKey
-        const childResults = await Promise.all(
+        const childResults = []
+        const failingChildIds = []
+
+        await Promise.all(
           items.map(async (item, idx) => {
             const childStepId = `${node.id}_${idx}`
             const now = new Date().toISOString()
@@ -316,61 +609,140 @@ async function executeNode({
               updated_at: now,
               claimed_by: claimedBy,
             })
+            nodeStates.set(childStepId, {
+              status: NODE_STATUS.RUNNING,
+              attempt: 1,
+              result: null,
+              error: null,
+              claimed_by: claimedBy,
+            })
 
             const itemTask =
               typeof item === 'string'
                 ? `${node.task ? node.task + ': ' : ''}${item}`
                 : `${node.task || 'Process item'} ${JSON.stringify(item)}`
 
-            const childRes = await dispatchFn({
-              task: itemTask,
-              taskType: node.taskType,
-              agent: node.agent,
-              model: node.model,
-              cwd: node.cwd,
-              mode: node.mode,
-              workflowStep: childStepId,
-              workflow_id: workflow.id,
-              step_id: childStepId,
-              attempt: 1,
-              env,
-            })
-
-            const childHandle = unwrapHandle(childRes) ?? pendingJobHandle(childRes)
-            adoptHarness(childRes)
-            let finalChild = childRes
-            if (childHandle) {
-              finalChild = await waitForHandleTerminal({
+            try {
+              const evidenceOutcome = await executeEvidenceSequence({
                 workflow,
-                node: { ...node, id: childStepId },
+                node,
+                childId: childStepId,
                 ctx,
                 env,
-                handle: childHandle,
-                timeoutS: node.timeoutS || 30,
-                attempt: 1,
-                maxAttempts: 1,
+                runCommandFn,
                 nodeStates,
-                claimedBy,
-                waitExecutionFn,
-                readRecord,
-                onWaiting,
-                waitingTimeoutS,
-                pollIntervalMs,
+                task: itemTask,
+                revision: 0,
+                maxRevisionAttempts: childMaxRevisionAttempts,
+                allowRevision: false,
+                execute: async (dispatchedTask) => {
+                  // Fanout child: parentExecutionId is null because the fanout node
+                  // itself produces no job (has no jobId).
+                  const childRes = await dispatchFn({
+                    task: dispatchedTask,
+                    taskType: node.taskType,
+                    agent: node.agent,
+                    model: node.model,
+                    cwd: node.cwd,
+                    mode: node.mode,
+                    workflowStep: childStepId,
+                    workflow_id: workflow.id,
+                    step_id: childStepId,
+                    attempt: 1,
+                    env,
+                    rootExecutionId: workflow.id,
+                    parentExecutionId: null,
+                  })
+
+                  const childHandle = unwrapHandle(childRes) ?? pendingJobHandle(childRes)
+                  adoptHarness(childRes)
+                  let finalChild = childRes
+                  if (childHandle) {
+                    finalChild = await waitForHandleTerminal({
+                      workflow,
+                      node: { ...node, id: childStepId },
+                      ctx,
+                      env,
+                      handle: childHandle,
+                      timeoutS: node.timeoutS || 30,
+                      attempt: 1,
+                      maxAttempts: 1,
+                      nodeStates,
+                      claimedBy,
+                      waitExecutionFn,
+                      readRecord,
+                      onWaiting,
+                      waitingTimeoutS,
+                      pollIntervalMs,
+                    })
+                  }
+                  return finalChild
+                },
               })
+
+              const finalChild = evidenceOutcome.result
+              upsertWorkflowNode(ctx, {
+                workflow_id: workflow.id,
+                step_id: childStepId,
+                status: NODE_STATUS.SUCCEEDED,
+                attempt: 1,
+                updated_at: new Date().toISOString(),
+                result_json: JSON.stringify(finalChild ?? { success: true }),
+              })
+              nodeStates.set(childStepId, {
+                ...nodeStates.get(childStepId),
+                status: NODE_STATUS.SUCCEEDED,
+                attempt: 1,
+                result: finalChild ?? { success: true },
+                error: null,
+                ...(evidenceOutcome.verification ? { verification: evidenceOutcome.verification } : {}),
+                ...(evidenceOutcome.judge ? { judge: evidenceOutcome.judge } : {}),
+                ...(evidenceOutcome.handoff ? { handoff: evidenceOutcome.handoff } : {}),
+                revision: 0,
+              })
+
+              childResults[idx] = finalChild
+            } catch (err) {
+              failingChildIds.push(childStepId)
+              const childErrorPayload = {
+                error: err?.message || String(err),
+                code: err?.code || null,
+                attempts: 1,
+                ...(err?.verification ? { verification: err.verification } : {}),
+                ...(err?.judge ? { judge: err.judge } : {}),
+                revision: 0,
+              }
+              upsertWorkflowNode(ctx, {
+                workflow_id: workflow.id,
+                step_id: childStepId,
+                status: NODE_STATUS.FAILED,
+                attempt: 1,
+                updated_at: new Date().toISOString(),
+                result_json: JSON.stringify(childErrorPayload),
+              })
+              nodeStates.set(childStepId, {
+                ...nodeStates.get(childStepId),
+                status: NODE_STATUS.FAILED,
+                attempt: 1,
+                error: err,
+                result: childErrorPayload,
+                ...(err?.verification ? { verification: err.verification } : {}),
+                ...(err?.judge ? { judge: err.judge } : {}),
+                revision: 0,
+              })
+              childResults[idx] = childErrorPayload
             }
-
-            upsertWorkflowNode(ctx, {
-              workflow_id: workflow.id,
-              step_id: childStepId,
-              status: NODE_STATUS.SUCCEEDED,
-              attempt: 1,
-              updated_at: new Date().toISOString(),
-              result_json: JSON.stringify(finalChild ?? { success: true }),
-            })
-
-            return finalChild
           })
         )
+
+        if (failingChildIds.length > 0) {
+          const err = new Error(`fanout children failed: ${failingChildIds.join(', ')}`)
+          err.code = 'FANOUT_CHILDREN_FAILED'
+          err.failingChildIds = failingChildIds
+          err.items = childResults
+          err.count = items.length
+          throw err
+        }
 
         result = { items: childResults, count: items.length }
       } else if (node.type === 'fanin') {
@@ -401,6 +773,10 @@ async function executeNode({
         attempt,
         result,
         error: null,
+        ...(verification ? { verification } : {}),
+        ...(judge ? { judge } : {}),
+        ...(producedHandoff ? { handoff: producedHandoff } : {}),
+        revision,
       })
 
       appendEvent(
@@ -415,6 +791,11 @@ async function executeNode({
           title: node.task ?? node.id,
           harness: nodeHarness,
           waitMode: nodeWaitMode,
+          ...(manifest ? { artifacts: manifest.artifacts } : {}),
+          ...(verification ? { verification } : {}),
+          ...(judge ? { judge } : {}),
+          ...(producedHandoff ? { handoff: producedHandoff } : {}),
+          revision,
         },
         { env }
       )
@@ -422,6 +803,27 @@ async function executeNode({
       return
     } catch (err) {
       lastError = err
+      if (err.code === 'REVISION_REQUESTED' && revision < maxRevisionAttempts) {
+        revisionFeedback = buildRevisionFeedback({ judge: err.judge, verification: err.verification })
+        revision++
+        attempt = 1
+        upsertWorkflowNode(ctx, {
+          workflow_id: workflow.id,
+          step_id: node.id,
+          status: NODE_STATUS.RUNNING,
+          attempt,
+          updated_at: new Date().toISOString(),
+        })
+        nodeStates.set(node.id, {
+          ...nodeStates.get(node.id),
+          attempt,
+          revision,
+        })
+        continue
+      }
+      if (err.code === 'REVISION_REQUESTED' || err.code === 'JUDGE_REJECTED' || err.code === 'FANOUT_CHILDREN_FAILED') {
+        break
+      }
       if (attempt < maxAttempts) {
         const delay = backoffMs * attempt
         if (delay > 0) await sleep(delay)
@@ -449,6 +851,9 @@ async function executeNode({
     error: lastError?.message || String(lastError),
     code: lastError?.code || null,
     attempts: attempt,
+    ...(lastError?.verification ? { verification: lastError.verification } : {}),
+    ...(lastError?.judge ? { judge: lastError.judge } : {}),
+    revision,
   }
   upsertWorkflowNode(ctx, {
     workflow_id: workflow.id,
@@ -464,6 +869,8 @@ async function executeNode({
     attempt,
     error: lastError,
     result: errorPayload,
+    ...(lastError?.judge ? { judge: lastError.judge } : {}),
+    revision,
   })
 
   appendEvent(
@@ -479,6 +886,9 @@ async function executeNode({
       summary: lastError?.message,
       harness: nodeHarness,
       waitMode: nodeWaitMode,
+      ...(lastError?.verification ? { verification: lastError.verification } : {}),
+      ...(lastError?.judge ? { judge: lastError.judge } : {}),
+      revision,
     },
     { env }
   )
@@ -643,6 +1053,7 @@ export async function runWorkflow({
   ctx,
   env = process.env,
   dispatchFn = dispatch,
+  runCommandFn = null,
   claimedBy = `scheduler_${crypto.randomUUID()}`,
   pollIntervalMs = 25,
   backoffMs = 50,
@@ -730,12 +1141,18 @@ export async function runWorkflow({
         }
       }
 
+      let existingHandoff = null
+      try {
+        existingHandoff = readHandoff({ workflowId: workflow.id, stepId: node.id }, env)
+      } catch {}
+
       nodeStates.set(node.id, {
         status,
         attempt: row.attempt || 0,
         result,
         error: null,
         claimed_by: status === NODE_STATUS.READY ? null : (status === row.status ? claimed : claimed),
+        ...(existingHandoff ? { handoff: existingHandoff } : {}),
       })
     } else {
       const now = new Date().toISOString()
@@ -841,6 +1258,7 @@ export async function runWorkflow({
           ctx: dbCtx,
           env,
           dispatchFn,
+          runCommandFn,
           nodeStates,
           claimedBy,
           backoffMs,
@@ -863,12 +1281,42 @@ export async function runWorkflow({
   )
 
   const finalStatus = allSucceeded ? 'succeeded' : 'failed'
+  const existingWorkflow = getWorkflow(dbCtx, workflow.id)
+  const previousStatus = existingWorkflow?.status
+
   upsertWorkflow(dbCtx, {
     id: workflow.id,
     name: workflow.name,
     status: finalStatus,
     updated_at: new Date().toISOString(),
   })
+
+  if (!isTerminalStatus(previousStatus)) {
+    const counts = {
+      total: 0,
+      succeeded: 0,
+      failed: 0,
+      skipped: 0,
+      canceled: 0,
+    }
+    for (const state of nodeStates.values()) {
+      counts.total++
+      if (state?.status === NODE_STATUS.SUCCEEDED) counts.succeeded++
+      else if (state?.status === NODE_STATUS.FAILED) counts.failed++
+      else if (state?.status === NODE_STATUS.SKIPPED) counts.skipped++
+      else if (state?.status === NODE_STATUS.CANCELED) counts.canceled++
+    }
+
+    appendEvent(
+      {
+        kind: 'workflow.completed',
+        workflow_id: workflow.id,
+        status: finalStatus,
+        counts,
+      },
+      { env }
+    )
+  }
 
   return {
     workflowId: workflow.id,

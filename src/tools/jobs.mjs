@@ -9,6 +9,7 @@ import { isWaitingRemoteState } from '../cloud/poller.mjs'
 import { interactWithSession } from './jules.mjs'
 import * as defaultJulesClient from '../cloud/jules/client.mjs'
 import * as defaultJulesAdapter from '../cloud/jules/adapter.mjs'
+import { getDb, listAgentMessages, markAgentMessageDelivered } from '../storage/index.mjs'
 
 /** Reject a caller-supplied taskType that is not one of schemas.mjs TASK_TYPES. */
 function assertTaskType(taskType) {
@@ -132,7 +133,7 @@ export async function jobReplyTool({
   env = process.env,
 }) {
   assertTaskType(taskType)
-  const parent = readResult(jobId)
+  const parent = readResult(jobId, env)
 
   // Each reply deepens the conversation by one turn; a resumed conversation
   // carries the parent's depth forward (root = 0).
@@ -186,10 +187,64 @@ export async function jobReplyTool({
   const effectiveMode = mode ?? parent.mode ?? 'read'
   const effectiveTitle = title ?? `${parent.title || parent.jobId} (reply)`
 
+  let effectiveMessage = message
+  try {
+    const rootExecutionId = parent.root_execution_id ?? parent.rootExecutionId ?? parent.executionId ?? parent.execution_id ?? null
+    if (rootExecutionId) {
+      const ctx = getDb(env)
+      const targetRecipients = [
+        jobId,
+        parent.jobId,
+        parent.job_id,
+        parent.step_id,
+        parent.stepId,
+        parent.agent,
+      ].filter(Boolean)
+      const undelivered = listAgentMessages(ctx, {
+        to: [...new Set(targetRecipients)],
+        rootExecutionId,
+        unreadOnly: true,
+      })
+
+      if (undelivered && undelivered.length > 0) {
+        const MAX_NOTICE_CHARS = 4000
+        const noticeBlocks = []
+        let totalChars = 0
+        const deliveredIds = []
+        const now = new Date().toISOString()
+
+        for (const msg of undelivered) {
+          const from = msg.from_agent ?? msg.from ?? 'unknown'
+          const block = `[Inter-Agent Notice from ${from}]: ${msg.text}`
+          if (totalChars + block.length > MAX_NOTICE_CHARS) {
+            const remaining = MAX_NOTICE_CHARS - totalChars
+            if (remaining > 50) {
+              noticeBlocks.push(block.slice(0, remaining) + '...[truncated]')
+              deliveredIds.push(msg.id)
+            }
+            break
+          }
+          noticeBlocks.push(block)
+          deliveredIds.push(msg.id)
+          totalChars += block.length
+        }
+
+        if (noticeBlocks.length > 0) {
+          effectiveMessage = `${noticeBlocks.join('\n\n')}\n\n${message}`
+          for (const id of deliveredIds) {
+            markAgentMessageDelivered(ctx, id, now)
+          }
+        }
+      }
+    }
+  } catch {
+    // Best-effort: a mailbox failure must never break job_reply
+  }
+
   const { job } = startJobFn({
     agent: parent.agent,
     model: parent.model,
-    task: message,
+    task: effectiveMessage,
     cwd: parent.cwd,
     mode: effectiveMode,
     title: effectiveTitle,
