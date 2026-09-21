@@ -8,6 +8,8 @@
  * Today all registered bridges declare supportsWake(...) === false.
  */
 
+import { isSupportedOpencodeVersion, opencodeBridge } from './opencode-bridge.mjs'
+
 export const NOOP_BRIDGE = Object.freeze({
   id: 'noop',
   canWake: () => false,
@@ -27,20 +29,35 @@ export const BRIDGES = Object.freeze({
   }),
   opencode: Object.freeze({
     id: 'opencode',
-    supportsWake: (_version = null) => false,
+    supportsWake: (version = null, { env = process.env } = {}) => {
+      const e = env ?? process.env
+      if (e?.AGENT_HUB_OPENCODE_BRIDGE !== '1') return false
+      return isSupportedOpencodeVersion(version)
+    },
+    createBridge: (opts) => opencodeBridge(opts),
+    get bridge() {
+      return opencodeBridge()
+    },
   }),
 })
 
-export function bridgeSupportsWake(harnessId, { version = null } = {}) {
+export function bridgeSupportsWake(harnessId, { version = null, env = process.env } = {}) {
   const entry = BRIDGES[harnessId]
   if (!entry || typeof entry.supportsWake !== 'function') return false
-  return Boolean(entry.supportsWake(version))
+  return Boolean(entry.supportsWake(version, { env }))
 }
 
-export function resolveBridge(harnessId, { version = null } = {}) {
+export function resolveBridge(harnessId, { version = null, env = process.env, ...options } = {}) {
   const entry = BRIDGES[harnessId]
-  if (!entry || !entry.supportsWake?.(version)) {
+  if (!entry || !entry.supportsWake?.(version, { env })) {
     return NOOP_BRIDGE
+  }
+  if (typeof entry.createBridge === 'function') {
+    return entry.createBridge({ version, env, ...options })
+  }
+  if (typeof entry.bridge === 'function') {
+    return entry.bridge({ version, env, ...options })
   }
   return entry.bridge ?? (typeof entry.wake === 'function' ? entry : NOOP_BRIDGE)
 }
+
