@@ -1,7 +1,8 @@
 import { runCommand } from './process.mjs'
-import { artifactRef, existsArtifact } from './artifacts.mjs'
+import { artifactRef, existsArtifact, readArtifact } from './artifacts.mjs'
+import { resolveHandoffSchema, validateHandoff } from './handoff.mjs'
 
-export const VERIFY_CHECK_KINDS = Object.freeze(['argv', 'artifact', 'diff'])
+export const VERIFY_CHECK_KINDS = Object.freeze(['argv', 'artifact', 'diff', 'schema'])
 
 export function normalizeVerifyCheck(check) {
   if (!check || typeof check !== 'object' || typeof check.name !== 'string' || check.name.trim() === '') {
@@ -9,6 +10,21 @@ export function normalizeVerifyCheck(check) {
   }
 
   const name = check.name
+
+  if (typeof check.schema === 'string') {
+    if (!resolveHandoffSchema(check.schema)) {
+      throw new Error(`unknown handoff schema: ${check.schema}`)
+    }
+    const artifact = typeof check.artifact === 'string' ? check.artifact : 'handoff.json'
+    const from = typeof check.from === 'string' ? check.from : null
+    return {
+      name,
+      kind: 'schema',
+      schema: check.schema,
+      artifact,
+      from
+    }
+  }
 
   if (Array.isArray(check.argv)) {
     if (check.argv.length === 0 || !check.argv.every(s => typeof s === 'string' && s.length > 0)) {
@@ -131,6 +147,27 @@ export async function runVerification({
       const forbidden = changed.filter(p => check.forbid.some(f => p === f || p.startsWith(f.endsWith('/') ? f : f + '/')))
       const passed = !res.timedOut && res.code === 0 && forbidden.length === 0
       const detail = { base: check.base, changed, forbidden }
+      results.push({ name: check.name, kind: check.kind, passed, ...detail })
+    } else if (check.kind === 'schema') {
+      const ref = artifactRef(workflowId, check.from ?? stepId, check.artifact)
+      let passed = false
+      let errors = []
+      try {
+        const { content } = readArtifact(ref, env)
+        try {
+          const value = JSON.parse(content)
+          const validation = validateHandoff(value, { schema: check.schema })
+          passed = validation.ok
+          errors = validation.errors ?? []
+        } catch (err) {
+          passed = false
+          errors = [{ path: 'json', message: err.message }]
+        }
+      } catch (err) {
+        passed = false
+        errors = [{ path: 'artifact', message: err.message }]
+      }
+      const detail = { ref, schema: check.schema, errors }
       results.push({ name: check.name, kind: check.kind, passed, ...detail })
     }
   }
