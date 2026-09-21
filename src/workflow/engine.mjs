@@ -1,4 +1,12 @@
+import fs from 'node:fs'
 import crypto from 'node:crypto'
+import {
+  artifactsDir,
+  collectManifest,
+  resolveArtifactRefs,
+  writeArtifact,
+  writeManifest,
+} from '../artifacts.mjs'
 import {
   getDb,
   upsertWorkflow,
@@ -12,7 +20,8 @@ import {
 import { appendEvent } from '../eventlog.mjs'
 import { resolveHarness } from '../harness/registry.mjs'
 import { calculateDispatchTimeoutS, dispatch, waitExecution as defaultWaitExecution } from '../dispatch.mjs'
-import { readResult as readJobResult } from '../jobstore.mjs'
+import { readResult as readJobResult, updateResult } from '../jobstore.mjs'
+import { runVerification, normalizeVerifyConfig } from '../verify.mjs'
 import { createWorkflow } from './schema.mjs'
 import { NODE_STATUS, WAITING_REASONS, isTerminalStatus, assertValidTransition } from './state.mjs'
 import { resolveDependencies, evaluateCondition } from './resolver.mjs'
@@ -178,6 +187,7 @@ async function executeNode({
   ctx,
   env,
   dispatchFn,
+  runCommandFn = null,
   nodeStates,
   claimedBy,
   backoffMs,
@@ -217,11 +227,31 @@ async function executeNode({
     { env }
   )
 
+  const declared = node.type === 'delegate' && Array.isArray(node.artifacts) ? node.artifacts : []
+
   while (attempt <= maxAttempts) {
     try {
       let result = null
 
       if (node.type === 'delegate') {
+        const resolved = resolveArtifactRefs(node.task ?? '', { env })
+        if (resolved.missing.length > 0) {
+          throw new Error('unresolved artifact ref: ' + resolved.missing[0])
+        }
+        let dispatchedTask = resolved.text
+        if (declared.length > 0) {
+          const dir = artifactsDir({ workflowId: workflow.id, stepId: node.id }, env)
+          fs.mkdirSync(dir, { recursive: true })
+          dispatchedTask =
+            dispatchedTask +
+            '\n\n' +
+            'Evidence artifacts: write these files to ' +
+            dir +
+            ' (absolute path), one file per name, exactly these filenames: ' +
+            declared.join(', ') +
+            '. Do not write any other file there.'
+        }
+
         // C1.6 timeout calculation
         let timeoutS = node.timeoutS
         if (!timeoutS && typeof calculateDispatchTimeoutS === 'function') {
@@ -245,7 +275,7 @@ async function executeNode({
         // legacy cuelgan dentro del dispatch, igual que antes).
         const dispatchPromise = Promise.resolve().then(() =>
           dispatchFn({
-            task: node.task,
+            task: dispatchedTask,
             taskType: node.taskType,
             agent: node.agent,
             model: node.model,
@@ -385,6 +415,38 @@ async function executeNode({
         result = { notified: true, stepId: node.id }
       }
 
+      let verification = null
+      if (node.type === 'delegate' && normalizeVerifyConfig(node)) {
+        verification = await runVerification({
+          node,
+          workflowId: workflow.id,
+          stepId: node.id,
+          cwd: node.cwd ?? null,
+          env,
+          runCommandFn: runCommandFn ?? undefined,
+        })
+        if (verification) {
+          try {
+            writeArtifact(
+              {
+                workflowId: workflow.id,
+                stepId: node.id,
+                name: 'verification.json',
+                content: JSON.stringify(verification, null, 2),
+              },
+              env
+            )
+          } catch {}
+          if (verification.required && !verification.verified) {
+            const failed = verification.checks.filter((c) => !c.passed).map((c) => c.name)
+            const err = new Error('verification failed: ' + failed.join(', '))
+            err.code = 'VERIFICATION_FAILED'
+            err.verification = verification
+            throw err
+          }
+        }
+      }
+
       // Transition to SUCCEEDED (only reachable after a real terminal outcome)
       const now = new Date().toISOString()
       upsertWorkflowNode(ctx, {
@@ -401,7 +463,21 @@ async function executeNode({
         attempt,
         result,
         error: null,
+        ...(verification ? { verification } : {}),
       })
+
+      const jobId = result?.job?.jobId ?? result?.jobId ?? null
+      if (verification && jobId) {
+        try {
+          updateResult(jobId, { verified: verification.verified }, env)
+        } catch {}
+      }
+
+      let manifest = null
+      if (node.type === 'delegate' && declared.length > 0) {
+        manifest = collectManifest({ workflowId: workflow.id, stepId: node.id, declared }, env)
+        writeManifest({ workflowId: workflow.id, stepId: node.id }, manifest, env)
+      }
 
       appendEvent(
         {
@@ -415,6 +491,8 @@ async function executeNode({
           title: node.task ?? node.id,
           harness: nodeHarness,
           waitMode: nodeWaitMode,
+          ...(manifest ? { artifacts: manifest.artifacts } : {}),
+          ...(verification ? { verification } : {}),
         },
         { env }
       )
@@ -422,6 +500,9 @@ async function executeNode({
       return
     } catch (err) {
       lastError = err
+      if (err.code === 'VERIFICATION_FAILED') {
+        break
+      }
       if (attempt < maxAttempts) {
         const delay = backoffMs * attempt
         if (delay > 0) await sleep(delay)
@@ -449,6 +530,7 @@ async function executeNode({
     error: lastError?.message || String(lastError),
     code: lastError?.code || null,
     attempts: attempt,
+    ...(lastError?.verification ? { verification: lastError.verification } : {}),
   }
   upsertWorkflowNode(ctx, {
     workflow_id: workflow.id,
@@ -479,6 +561,7 @@ async function executeNode({
       summary: lastError?.message,
       harness: nodeHarness,
       waitMode: nodeWaitMode,
+      ...(lastError?.verification ? { verification: lastError.verification } : {}),
     },
     { env }
   )
@@ -643,6 +726,7 @@ export async function runWorkflow({
   ctx,
   env = process.env,
   dispatchFn = dispatch,
+  runCommandFn = null,
   claimedBy = `scheduler_${crypto.randomUUID()}`,
   pollIntervalMs = 25,
   backoffMs = 50,
@@ -841,6 +925,7 @@ export async function runWorkflow({
           ctx: dbCtx,
           env,
           dispatchFn,
+          runCommandFn,
           nodeStates,
           claimedBy,
           backoffMs,
