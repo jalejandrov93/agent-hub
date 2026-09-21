@@ -17,6 +17,7 @@ import { runningJobs } from "@/lib/badges"
 import { formatDuration, formatModel } from "@/lib/format"
 import { useCancelJobMutation, useStateQuery } from "@/lib/queries"
 import type { Job } from "@/lib/types"
+import { JobProfileBadge } from "@/views/providers"
 import { ElapsedCell } from "./ElapsedCell"
 import { JobDetailModal } from "./JobDetailModal"
 
@@ -93,6 +94,16 @@ export function JobsView() {
       key: "taskType",
       header: "Task type",
       cell: (job) => (job.taskType ? <Badge variant="outline">{job.taskType}</Badge> : "—"),
+    },
+    {
+      key: "profile",
+      header: "Profile",
+      cell: (job) =>
+        job.profile ? (
+          <JobProfileBadge profile={job.profile} status={job.profileStatus} />
+        ) : (
+          <span className="text-muted-foreground">—</span>
+        ),
     },
     {
       key: "cwd",

@@ -25,6 +25,10 @@ export function useQuotaQuery() {
   return useQuery({ queryKey: ['quota'], queryFn: api.getQuota })
 }
 
+export function useProvidersQuery() {
+  return useQuery({ queryKey: qk.providers, queryFn: api.getProviders })
+}
+
 export function useProposalsQuery() {
   return useQuery({ queryKey: qk.proposals, queryFn: api.getProposals })
 }

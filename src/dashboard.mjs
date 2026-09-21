@@ -31,6 +31,7 @@ import { keyForAccount } from './cloud/credentials.mjs'
 import { stdoutPath } from './jobstore.mjs'
 import * as defaultClient from './cloud/jules/client.mjs'
 import * as defaultAdapter from './cloud/jules/adapter.mjs'
+import { agysProfilesSnapshot } from './providers/agys.mjs'
 
 const HERE = path.dirname(fileURLToPath(import.meta.url))
 // The Vite-built React app lands here (built by a separate package); this
@@ -474,6 +475,22 @@ export function createServer({ env = process.env, commandRunner = runCommand, di
 
     if (url.pathname === '/api/config' && req.method === 'GET') {
       sendJson(res, 200, buildConfig({ env }))
+      return
+    }
+
+    if ((url.pathname === '/api/providers' || url.pathname === '/api/agys') && req.method === 'GET') {
+      agysProfilesSnapshot({ env })
+        .then((snapshot) => sendJson(res, 200, snapshot))
+        .catch((error) =>
+          sendJson(res, 200, {
+            available: false,
+            reason: String(error?.message ?? error),
+            mode: 'off',
+            pinnedProfile: null,
+            selected: null,
+            profiles: [],
+          })
+        )
       return
     }
 

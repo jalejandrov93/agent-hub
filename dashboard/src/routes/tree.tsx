@@ -7,6 +7,7 @@ import { createHashHistory } from "@tanstack/react-router"
 import { AppShell } from "@/components/shell/app-shell"
 import { OverviewView } from "@/views/overview"
 import { AgentsView } from "@/views/agents"
+import { ProvidersView } from "@/views/providers"
 import { JobsView } from "@/views/jobs"
 import { HistoryView } from "@/views/history"
 import { MetricsView } from "@/views/metrics"
@@ -49,6 +50,12 @@ const agentsRoute = createRoute({
   path: "/agents",
   validateSearch: AgentsSearch,
   component: AgentsView,
+})
+
+const providersRoute = createRoute({
+  getParentRoute: () => rootRoute,
+  path: "/providers",
+  component: ProvidersView,
 })
 
 const jobsRoute = createRoute({
@@ -132,6 +139,7 @@ const routeTree = rootRoute.addChildren([
   indexRoute,
   overviewRoute,
   agentsRoute,
+  providersRoute,
   jobsRoute,
   historyRoute,
   metricsRoute,

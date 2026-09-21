@@ -1,6 +1,7 @@
 import {
   LayoutDashboard,
   Bot,
+  Layers,
   PlayCircle,
   History,
   BarChart3,
@@ -18,6 +19,7 @@ import type { NavBadgeKey } from "./badges"
 export type RouteName =
   | "overview"
   | "agents"
+  | "providers"
   | "jobs"
   | "history"
   | "metrics"
@@ -64,6 +66,10 @@ export const VIEW_META: Record<RouteName, ViewMeta> = {
   agents: {
     label: "Agents",
     tip: "CLI agents this dashboard can delegate to.",
+  },
+  providers: {
+    label: "Providers",
+    tip: "Multi-account agys profiles and quotas. Agent-hub selects a profile per dispatch only when AGENT_HUB_AGYS is set.",
   },
   subagents: {
     label: "Subagents",
@@ -161,6 +167,13 @@ export const NAV_GROUPS: NavGroup[] = [
         path: "/agents",
         icon: Bot,
         badge: "agents",
+      },
+      {
+        name: "providers",
+        label: VIEW_META.providers.label,
+        tip: VIEW_META.providers.tip,
+        path: "/providers",
+        icon: Layers,
       },
       {
         name: "subagents",

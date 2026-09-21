@@ -37,6 +37,9 @@ import type {
   WorkGraphWorktree,
   WorkGraphNode,
   WorkGraphEdge,
+  AgysSnapshotResponse,
+  AgysProfile,
+  AgysBucket,
 } from "@shared"
 
 export type AgentRow = z.infer<typeof AgentStatusRow>
@@ -55,6 +58,9 @@ export type OverrideT = z.infer<typeof Override>
 export type ProposalT = z.infer<typeof Proposal>
 export type LearningT = z.infer<typeof Learning>
 export type LearningInputT = z.infer<typeof LearningInput>
+export type AgysSnapshotResponseT = z.infer<typeof AgysSnapshotResponse>
+export type AgysProfileT = z.infer<typeof AgysProfile>
+export type AgysBucketT = z.infer<typeof AgysBucket>
 
 /**
  * Cloud view types, inferred from the shared server contracts (@shared ==

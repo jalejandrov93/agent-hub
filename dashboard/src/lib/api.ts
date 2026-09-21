@@ -26,12 +26,14 @@ import {
   AgentsQuotaResponse,
   WorkGraphResponse,
   McpToolsResponse,
+  AgysSnapshotResponse,
 } from "@shared"
 import type {
   StateResponseT,
   ConfigResponseT,
   MetricsResponseT,
   AgentsQuotaResponseT,
+  AgysSnapshotResponseT,
   ProposalT,
   LearningT,
   LearningInputT,
@@ -115,6 +117,10 @@ export function getMetrics(): Promise<MetricsResponseT> {
 
 export function getQuota(): Promise<AgentsQuotaResponseT> {
   return fetchJson(AgentsQuotaResponse, "/api/quota")
+}
+
+export function getProviders(): Promise<AgysSnapshotResponseT> {
+  return fetchJson(AgysSnapshotResponse, "/api/providers")
 }
 
 const ProposalsPayload = z.object({ proposals: z.array(Proposal) })
