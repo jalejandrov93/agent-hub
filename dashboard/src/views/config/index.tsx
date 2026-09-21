@@ -9,7 +9,7 @@ import { ProcessTab } from "./process-tab"
 import { BreakerTab } from "./breaker-tab"
 import { OverridesTab } from "./overrides-tab"
 import { PathsTab } from "./paths-tab"
-import { ToolsView } from "@/views/tools"
+import { ToolsTab } from "./tools-tab"
 
 export function ConfigView() {
   const search = useSearch({ strict: false }) as Record<string, unknown>
@@ -43,7 +43,7 @@ export function ConfigView() {
         </TabsList>
 
         <TabsContent value="tools">
-          <ToolsView embedded />
+          <ToolsTab />
         </TabsContent>
 
         {isLoading || !config ? (
