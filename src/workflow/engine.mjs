@@ -19,6 +19,7 @@ import {
   listWorkflowNodes,
   claimWorkflowNode,
   publishWorkflowNodeReady,
+  touchWorkflowNode,
 } from '../storage/index.mjs'
 import { appendEvent } from '../eventlog.mjs'
 import { resolveHarness } from '../harness/registry.mjs'
@@ -207,6 +208,41 @@ function reclaimOrphanedNode(ctx, { workflowId, stepId, row, claimedBy, ownerAli
   if (!leaseExpired || !ownerConfirmedDead) return false
   transitionNode(ctx, { workflowId, stepId, to: NODE_STATUS.READY, attempt: row.attempt, claimedBy: null })
   return true
+}
+
+/**
+ * Claim heartbeat: while a node is in flight, keep its lease timestamp fresh so
+ * a peer scheduler (and the stall bound) can tell "slow but alive" from "dead".
+ * Without it `updated_at` is written once at claim time, so any job running
+ * longer than the lease looks like a dead owner and gets preempted.
+ *
+ * Returns a stop function. A failed heartbeat never breaks the run it protects.
+ */
+function startNodeHeartbeat(ctx, { workflowId, stepId, intervalMs, touchFn }) {
+  if (!(intervalMs > 0) || typeof touchFn !== 'function') return () => {}
+  const timer = setInterval(() => {
+    try {
+      touchFn(ctx, { workflowId, stepId })
+    } catch {
+      // A heartbeat must never break the run it protects.
+    }
+  }, intervalMs)
+  if (timer.unref) timer.unref()
+  return () => clearInterval(timer)
+}
+
+/**
+ * Is any non-terminal node still holding a fresh lease? A live owner that is
+ * heartbeating is progress, even when no status changed: that is what keeps a
+ * slow-but-alive peer from being declared stalled.
+ */
+function hasFreshLease(ctx, { workflow, leaseTtlMs, now = Date.now() }) {
+  return workflow.nodes.some((n) => {
+    const row = getWorkflowNode(ctx, workflow.id, n.id)
+    if (!row || isTerminalStatus(row.status)) return false
+    const updatedAt = Date.parse(row.updated_at ?? '') || 0
+    return updatedAt > 0 && now - updatedAt <= leaseTtlMs
+  })
 }
 
 function isHandleLike(value) {
@@ -1090,6 +1126,8 @@ export async function runWorkflow({
   leaseTtlMs = CLAIM_LEASE_TTL_MS,
   isOwnerAlive = null,
   stallTimeoutS = 0,
+  heartbeatMs = 0,
+  touchWorkflowNodeFn = touchWorkflowNode,
 } = {}) {
   const dbCtx = ctx || getDb(env)
   let workflow = null
@@ -1178,6 +1216,9 @@ export async function runWorkflow({
   // diagnostic instead of waiting (or spinning) forever. Default budget is
   // 5x the claim lease.
   const stallBudgetMs = (stallTimeoutS > 0 ? stallTimeoutS : Math.max(30, (leaseTtlMs / 1000) * 5)) * 1000
+  // Refresh the claim lease well before it expires, so the node never looks
+  // dead to a peer while it is genuinely working.
+  const heartbeatIntervalMs = heartbeatMs > 0 ? heartbeatMs : Math.max(1000, Math.floor(leaseTtlMs / 3))
   let lastSignature = null
   let lastProgressAt = Date.now()
 
@@ -1202,7 +1243,8 @@ export async function runWorkflow({
     const signature = workflow.nodes
       .map((n) => `${n.id}:${nodeStates.get(n.id)?.status ?? ''}:${nodeStates.get(n.id)?.attempt ?? ''}`)
       .join('|')
-    if (signature !== lastSignature) {
+    const leaseAlive = hasFreshLease(dbCtx, { workflow, leaseTtlMs })
+    if (signature !== lastSignature || leaseAlive) {
       lastSignature = signature
       lastProgressAt = Date.now()
     } else if (Date.now() - lastProgressAt > stallBudgetMs) {
@@ -1286,22 +1328,32 @@ export async function runWorkflow({
           claimed_by: claimedBy,
         })
 
-        await executeNode({
-          workflow,
-          node,
-          ctx: dbCtx,
-          env,
-          dispatchFn,
-          runCommandFn,
-          nodeStates,
-          claimedBy,
-          backoffMs,
-          waitExecutionFn,
-          readResultFn,
-          onWaiting,
-          waitingTimeoutS,
-          pollIntervalMs,
+        const stopHeartbeat = startNodeHeartbeat(dbCtx, {
+          workflowId: workflow.id,
+          stepId: node.id,
+          intervalMs: heartbeatIntervalMs,
+          touchFn: touchWorkflowNodeFn,
         })
+        try {
+          await executeNode({
+            workflow,
+            node,
+            ctx: dbCtx,
+            env,
+            dispatchFn,
+            runCommandFn,
+            nodeStates,
+            claimedBy,
+            backoffMs,
+            waitExecutionFn,
+            readResultFn,
+            onWaiting,
+            waitingTimeoutS,
+            pollIntervalMs,
+          })
+        } finally {
+          stopHeartbeat()
+        }
       })
     )
 
