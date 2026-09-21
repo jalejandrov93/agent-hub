@@ -392,3 +392,23 @@ export function releaseWriteLock({ cwd, token, jobId, env = process.env }) {
   mirrorLeaseRelease({ jobId, token, env })
   return true
 }
+
+export function isWorktreeClean(cwd, { exec = execFileSync } = {}) {
+  try {
+    const output = exec('git', ['status', '--porcelain=v1'], { cwd, encoding: 'utf8' })
+    const lines = output.split('\n').filter((line) => line.trim().length > 0)
+
+    if (lines.length === 0) {
+      return { clean: true, dirtyPaths: [] }
+    }
+
+    const dirtyPaths = lines.map((line) => {
+      // porcelain v1 output is 3 characters of status (e.g., ' M ', '?? ') followed by the path
+      return line.slice(3).trim()
+    })
+
+    return { clean: false, dirtyPaths }
+  } catch {
+    return { clean: false, reason: 'not-a-git-worktree' }
+  }
+}
