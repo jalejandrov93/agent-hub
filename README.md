@@ -101,7 +101,7 @@ src/
     profiles.mjs     normalizeProfile, selectProfile, profileStateFor (selected, fallback, exhausted, unavailable)
     agys.mjs         agys CLI multi-account profile integration (list, quota, auto/explicit selection)
   quota/{codexbar,mapping}.mjs
-  tools/{agents,jobs,insights,jules,learnings}.mjs
+  tools/{agents,jobs,insights,jules,learnings,messaging,planner}.mjs
   workflow/
     schema.mjs       NodeSchema, WorkflowSchema, DAG cycle detection
     engine.mjs       parallel wave execution, claims, transitions, artifact/verify/judge/handoff lifecycle
@@ -110,6 +110,9 @@ src/
     resolver.mjs     resolves artifact:// and handoff context for node dispatch
     resume.mjs       resumeWorkflowNodeFromExecution (WAITING -> RUNNING)
     state.mjs        in-memory & SQLite workflow state management
+docs/
+  implementation-report-2026-09-21.md  report of merged PRs, architecture updates, C0-H milestones
+  security-isolation.md                security isolation matrix, sandbox profiles, container design
 bench/               benchmark runner (run.mjs) & corpus scenarios (corpus.mjs)
 dashboard/           React 19 + TS + Vite + Tailwind v4 + Base UI workspace, builds dist/
 scripts/             build-dashboard.mjs — prepare hook; install-local.mjs
@@ -124,12 +127,12 @@ Runtime state (never committed) lives in `AGENT_HUB_HOME`, default
 `~/.local/share/agent-hub/`: `events.jsonl`, `agent-hub.db` (SQLite WAL database
 with tables `workflows`, `workflow_nodes`, `jobs`, `leases`, `harness_origins`,
 `task_handoffs`, `task_context`), `preflight-cache.json`, `discovery.json`,
-`overrides.json`, `proposals.json`, `learnings.json`, `accounts.json` (mode
-`0600`), `schedules.json`, `sources-cache.json`, `quota-cache.json`,
-`runs/<jobId>/` (`prompt.txt`, `stdout.log`, `response.txt`, `result.json`),
-`runs/<workflowId>/<stepId>/artifacts/` (with `artifacts.manifest.json`,
-`verification.json`, `judge.json`, `handoff.json`, and declared artifacts),
-and `runs/.locks/`.
+`overrides.json`, `proposals.json`, `learnings.json`, `agys-mode.json`,
+`accounts.json` (mode `0600`), `schedules.json`, `sources-cache.json`,
+`quota-cache.json`, `runs/<jobId>/` (`prompt.txt`, `stdout.log`,
+`response.txt`, `result.json`), `runs/<workflowId>/<stepId>/artifacts/`
+(with `artifacts.manifest.json`, `verification.json`, `judge.json`,
+`handoff.json`, and declared artifacts), and `runs/.locks/`.
 
 ## Install
 
@@ -796,14 +799,9 @@ Go CLI (`src/providers/agys.mjs`):
   (eligible alternate), `exhausted` (quota exhausted, errorClass `quota`, or
   bucket >= 100%), and `unavailable` (auth/billing failure).
 - **Selection policies**: `priority`, `least_used`, and `round_robin`.
-- **agys integration**: `agys` (`~/.local/bin/agys`) isolates multi-account
-  profiles under `~/.agys/profiles/<name>/` by overriding `HOME`.
-  - When `AGENT_HUB_AGYS='auto'`, the hub inspects `agys list` and `agys quota --json`
-    to automatically route tasks to non-exhausted accounts by priority.
-  - `AGENT_HUB_AGYS_PROFILE` explicitly forces a specific profile name.
-  - Synchronous profile resolution (`resolveAgyProfileSync`) caches profile
-    state in memory with a 60-second TTL (`SYNC_PROFILE_CACHE_TTL_MS`), ensuring
-    synchronous `startJob` and `delegate` calls never block on external CLI runs.
+- **agys integration**: see the dedicated [agy multi-account (agys)](#agy-multi-account-agys)
+  section below for one-time setup, mode precedence, dashboard controls, and safe
+  degradation.
 
 ### Execution graph (`src/execution-graph.mjs`)
 
@@ -839,6 +837,41 @@ workflow DAGs without manual node authoring:
   - Accepts `{ intent, runPlanner, routeFn, maxSteps = 12 }`.
   - Executes a provided planner function (e.g. LLM-backed), validates the plan,
     enforces maximum step limits (`maxSteps`), and materializes the workflow.
+- **Tools (`src/tools/planner.mjs`)**:
+  - `plan_task`: validates and materializes a plan without executing anything.
+    Accepts an explicit `plan` object (caller plans) or an `intent` (when a planner
+    is configured). Returns `{ ok, plan, workflow }` or validation errors.
+  - `execute_plan`: validates, materializes, and executes via `runWorkflow`.
+    **Approval gate**: strictly requires `approve: true` confirming the plan was
+    reviewed; without it, fails closed with `approval required: pass approve:true after reviewing the plan`.
+    Never executes an unreviewed or invalid plan.
+
+### Inter-agent messaging (`src/tools/messaging.mjs`)
+
+For collaborative workflows and peer coordination, agent-hub provides an
+asynchronous, SQLite-backed inter-agent mailbox (`task_messages`) scoped to a
+`rootExecutionId` (or inferred from a recipient `jobId`):
+
+- **Tools**:
+  - `agent_send_message`: `{to, text, kind?, rootExecutionId?, from?, workflowId?}`
+    enqueues a message to a peer mailbox.
+  - `agent_inbox`: `{to?, rootExecutionId?, unreadOnly?}` retrieves messages
+    oldest-first and marks them delivered (`delivered_at`).
+  - `agent_ack`: `{messageId}` acknowledges receipt of a message (`ack_at`).
+  - `agent_peers`: `{rootExecutionId}` lists participating peers and their
+    messaging capabilities (`messagingTurnBoundary`, `messagingMidRun`).
+- **Honest ACK semantics**: an ACK means the message was deposited into the peer's
+  context envelope. It **NEVER** implies the peer read, understood, agreed with,
+  or acted on the message.
+- **Turn-boundary delivery**: pending mailbox messages are delivered across
+  conversation turn boundaries via `job_reply`.
+- **Bounded communication**:
+  - **No broadcast**: addressing wildcards (`*`, `all`, `broadcast`) are rejected;
+    all messages must be addressed point-to-point to a specific peer or `jobId`.
+  - **Message size limit**: text is capped at 4,000 characters (`MAX_TEXT_LEN = 4000`);
+    oversized messages are truncated with `...[truncated]` and flagged with `truncated: true`.
+  - **Mailbox queue cap**: max 10 unread messages per recipient; further sends fail
+    with `{ ok: false, error: 'mailbox_full' }` until the recipient drains them.
 
 ### Harness profiles and lifecycle bridge (`src/harness/`)
 
@@ -851,16 +884,19 @@ specific client: `generic` (`waitMode: none`), `claude-code` (`attention`), and
 - **Wait modes**: `none` returns immediately at create/start; `attention` returns
   on terminal status or interactive waiting (`AWAITING_*`/`PAUSED`); `terminal`
   waits for terminal status only.
-- **Lifecycle bridge (`src/harness/bridge.mjs`, `lifecycle.mjs`)**:
+- **Lifecycle bridge (`src/harness/bridge.mjs`, `lifecycle.mjs`, `opencode-bridge.mjs`)**:
   - Data-driven completion notification back to the originating caller session.
   - `recordDispatchOrigin()` captures incoming session metadata into the
     SQLite `harness_origins` table (`job_id`, `harness_session_id`, `harness`).
   - `deliverCompletion({ jobId, event, summary })` queries the resolved bridge
     for `supportsWake()`. When supported, it delivers completion payloads
     (bounded summary up to 300 chars) and emits `harness.wake` events.
-  - All registered bridges (`generic`, `claude-code`, `opencode`) currently
-    declare `supportsWake: false` (a wakeable OpenCode bridge is planned for a
-    future version). Delivery never throws.
+  - `generic` and `claude-code` bridges declare `supportsWake: false`. When
+    `AGENT_HUB_OPENCODE_BRIDGE=1` is enabled, the OpenCode lifecycle bridge
+    (`opencode-bridge.mjs`) declares `supportsWake: true` and resumes the caller
+    session with `POST /api/session/{id}/prompt` (`{ text, resume: true }`),
+    reading service URL and credentials from `~/.local/state/opencode/service.json`
+    (`AGENT_HUB_OPENCODE_SERVICE_FILE`). Delivery never throws.
 
 ### Write-mode gate
 
@@ -1006,10 +1042,108 @@ Asserts that all dispatches are deterministic and records zero duplicate dispatc
   and worker processes), verifying that on workflow resumption, expired claims
   are re-adopted and completed nodes are never re-dispatched.
 
+## agy multi-account (agys)
+
+`agys` is a separate Go CLI (`~/.local/bin/agys`) that isolates multi-account
+Antigravity (`agy`) profiles under `~/.agys/profiles/<name>/` by overriding `HOME`.
+It allows routing jobs across multiple Google accounts so a single account's
+quota exhaustion never blocks task execution.
+
+### One-time setup
+
+Create and manage profiles directly using the `agys` CLI:
+
+```bash
+agys add <name>                     # runs `agy login` under ~/.agys/profiles/<name>/
+agys list                           # lists profiles with active default, priority, email, path
+agys list -q                        # quiet: lists profile names only
+agys quota                          # human-readable quota usage across profiles
+agys quota --json                   # JSON quota snapshot used by agent-hub
+agys use <name>                     # sets the active default profile
+agys priority set <name> <priority> # sets integer priority (higher = preferred in auto mode)
+```
+
+### Modes and precedence
+
+Profile selection operates in one of three modes:
+- `auto`: dynamically inspects `agys list` and `agys quota --json` to select the highest-priority non-exhausted profile.
+- `profile`: pins execution to a specific named profile.
+- `off`: disables agys wrapping entirely; runs standard `agy`.
+
+Precedence is evaluated in strict order (highest to lowest):
+
+1. **Environment pin** (`AGENT_HUB_AGYS_PROFILE=<name>`): unconditionally forces the named profile (`mode: 'profile'`).
+2. **Environment mode** (`AGENT_HUB_AGYS='auto'` or `'off'`): forces `auto` or `off` at the process level.
+3. **Persisted dashboard setting** (`agys-mode.json` under `AGENT_HUB_HOME`): written by the dashboard Providers view toggle (`{ mode, profile }`).
+4. **Default**: `auto`.
+
+### How to change the mode
+
+- **Dashboard**: in the **Providers** view (`#/providers`), toggle between `off`, `profile`, and `auto`. When `mode: 'profile'`, select any configured profile from the dropdown. If an environment variable is set (`AGENT_HUB_AGYS` or `AGENT_HUB_AGYS_PROFILE`), the toggle is disabled with an explanatory note.
+- **Client environment configuration**:
+  - **Claude Code**: configure `mcpServers['agent-hub'].env` in `~/.claude.json`:
+    ```json
+    {
+      "mcpServers": {
+        "agent-hub": {
+          "env": {
+            "AGENT_HUB_AGYS": "auto",
+            "AGENT_HUB_AGYS_PROFILE": "work"
+          }
+        }
+      }
+    }
+    ```
+  - **OpenCode**: configure `mcp['agent-hub'].environment` in `~/.config/opencode/opencode.json`:
+    ```json
+    {
+      "mcp": {
+        "agent-hub": {
+          "environment": {
+            "AGENT_HUB_AGYS": "auto"
+          }
+        }
+      }
+    }
+    ```
+    Or via CLI: `opencode mcp add --env AGENT_HUB_AGYS=auto`
+
+### Safe degradation
+
+When `agys` is not installed on `PATH` or an `agys` invocation fails (non-zero exit, timeout, missing binary), the profile resolver returns `{ profile: null, status: 'unavailable' }` and `agy` runs **UNCHANGED** as a plain `agy` process. Because of this graceful fallback, `auto` is completely safe as the default setting: environments without `agys` run standard Antigravity without interruption.
+
+### How it works underneath
+
+- **Transparent wrapping**: when a profile is selected, agent-hub wraps the CLI command as:
+  `agys run <profile> -- <agy argv>`
+- **Effort-suffix splitting**: `agys run` injects `--effort high` when `--effort` is omitted. Because agent-hub model IDs encode the effort tier in the model name (for example, `gemini-3.8-flash-low`), `agy` rejects conflicting flags (`--model gemini-3.8-flash-low conflicts with --effort=high`). The hub's `agyArgvForAgys` automatically splits suffixed model IDs: `--model gemini-3.8-flash-low` becomes `--model gemini-3.8-flash` plus `--effort low`. An explicit `--effort` is left untouched.
+
+### Observing which account ran
+
+- **Job records**: `profile` and `profileStatus` (`selected`, `fallback`, `exhausted`, `unavailable`) are set synchronously at creation in `startJob()`, making them visible immediately while running via `job_status` and `job_result` (and stored in the SQLite `jobs` table).
+- **Job events**: `job.started`, `job.finished`, and `job.failed` events carry `profile` and `profileStatus`.
+- **Dashboard**: Running Jobs (`#/jobs`) and History (`#/history`) display the `JobProfileBadge` with the profile name and status pill. The Providers view (`#/providers`) shows the active mode, source, selected profile, and live quota bucket gauges.
+- **Process table**: `pgrep -af agys` shows the running wrapped command.
+
+### Two-profile example
+
+```bash
+agys add personal
+agys add work
+agys priority set personal 10
+agys priority set work 5
+```
+
+With mode `auto`, agent-hub routes jobs to `personal` (priority 10). If `personal` quota is exhausted (bucket >= 100% or errorClass `quota`), agent-hub automatically routes to `work` as a fallback. To force the work profile for a specific session, set `AGENT_HUB_AGYS_PROFILE=work`.
+
 ## MCP tools
 
 | Tool | Input | Notes |
 |---|---|---|
+| `agent_send_message` | `{to, text, kind?, rootExecutionId?, from?, workflowId?}` | Send an inter-agent message to a peer mailbox, scoped to a root execution. Honest ACK semantics (message deposited into envelope; never implies read/acted). Point-to-point only (no broadcast); 4KB text cap; 10 unread messages mailbox cap. |
+| `agent_inbox` | `{to?, rootExecutionId?, unreadOnly?}` | Read messages from the agent mailbox, oldest first, and mark returned messages delivered. |
+| `agent_ack` | `{messageId}` | Acknowledge receipt of an agent message into the context envelope. |
+| `agent_peers` | `{rootExecutionId}` | List active peers participating in a root execution, including their messaging capabilities (`messagingTurnBoundary`, `messagingMidRun`). |
 | `agents_quota` | `{refresh?: boolean}` | Each delegation pair's quota state, read from a local [CodexBar](#quota-arc-and-codexbar) server: every applicable window with used percent and reset time, `exhausted`, and a reason when CodexBar is unreachable or the pair is not metered. **Information only** — see [Quota state before delegating](#quota-state-before-delegating). |
 | `agents_status` | `{refresh?: boolean}` | L0-L2 for every pair in the delegation map. Never pings. Rows include `binPath`/`cliVersion` from `discovery.json`. |
 | `route` | `{taskType: enum, mode?: 'read'\|'write', includeCatalog?: boolean, requirements?: string[], preferences?: {quality?, cost?, latency?}, adaptive?: boolean}` | Skips unavailable/breaker-open/held pairs; filters by hard `requirements` capabilities; ranks candidates using preference weights; reorders primary/fallbacks when `adaptive: true`; returns `{primary, fallbacks, skipped, discovery, reason, appliedProposal, ranking}`. `appliedProposal` names the accepted proposal whose order was applied, or `null`. |
@@ -1019,9 +1153,11 @@ Asserts that all dispatches are deterministic and records zero duplicate dispatc
 | `job_status` | `{jobId}` | Current status, no waiting. |
 | `job_result` | `{jobId, maxLines?, tailLines?}` | Head of the response (default 20 lines) plus extra `tailLines` from the end (default 10, never repeating a head line) and `fullPath`, `truncated`, `tailTruncated`. |
 | `job_cancel` | `{jobId}` | Kills the whole process group; marks `canceled`. |
-| `job_reply` | `{jobId, message?, mode?, timeoutS?, title?, taskType?, action?}` | Starts a new turn in a **terminal** agy/opencode job's conversation, using its recorded `sessionId`. `mode` and `taskType` default to parent job's; switching to `write` goes through worktree gate + lock. Relays to active Jules sessions via `action` (`message`\|`approve_plan`). Copilot unsupported. |
+| `job_reply` | `{jobId, message?, mode?, timeoutS?, title?, taskType?, action?}` | Starts a new turn in a **terminal** agy/opencode job's conversation, using its recorded `sessionId`. `mode` and `taskType` default to parent job's; switching to `write` goes through worktree gate + lock. Relays to active Jules sessions via `action` (`message`\|`approve_plan`). Copilot unsupported. Delivers pending mailbox messages across turn boundaries. |
 | `agents_metrics` | `{groupBy?: ('agent'\|'model'\|'mode'\|'taskType')[]}` | Success rate, p50/p95 latency, error kinds, tokens, cost (`costUsdTotal`/`costUsdAvg`), verification rate, judge verdicts histogram, revision count, and quality score from job history. |
 | `execution_graph` | `{rootExecutionId?: string}` | Read-only execution lineage DAG: roots, nodes (`id`, `agent`, `model`, `status`, `workflow_id`, `step_id`, `attempt`, `parent`, `root`), and edges (`delegate`, `retry`, `resume`). Pass `rootExecutionId` to return a directed subtree. |
+| `plan_task` | `{plan?, intent?, maxSteps?}` | Validates a `WorkflowPlan` (`goal` + role-bound `steps`) and materializes it into a runnable workflow without executing anything. Pass explicit `plan` (caller plans) or `intent` (when a planner is configured). Returns `{ ok, plan, workflow }` or validation errors. |
+| `execute_plan` | `{plan, approve: true}` | Validates, materializes, and runs a plan via `runWorkflow`. **Approval gate**: strictly requires `approve: true` confirming the plan was reviewed; fails closed otherwise. |
 | `jules_delegate` | `{task, cwd?, source?, startingBranch?, title?, requirePlanApproval?, automationMode?, account?, timeoutS?, taskType?}` | Starts a Jules cloud session on Google's servers against a connected GitHub repo. Returns `{jobId, status:'queued'}`; the result is a GitHub pull request. |
 | `jules_sources` | `{account?}` | The GitHub repos connected to the Jules account. Connect new ones in the Jules web UI. |
 | `jules_accounts` | `{}` | Configured Jules accounts, read-only: masked keys, rolling 24-hour and concurrent usage, and sources cache status. |
@@ -1066,8 +1202,10 @@ routes, so a link can open the exact filtered view:
 |---|---|---|
 | Monitor | `#/overview` | What needs attention: unhealthy agents, open breakers, failures in the last 24h, unresolved CLIs, recent activity |
 | Monitor | `#/agents?filter=all\|unhealthy\|held\|breaker&q=` | Agents grouped by CLI; filter, free-text search, row menu, detail panel |
-| Monitor | `#/jobs` | Running and queued jobs with live elapsed time and Cancel |
-| Monitor | `#/history?status=&agent=&q=` | Terminal jobs; `status=failed\|succeeded\|canceled`, agent filter, free-text search, error detail, reply chains |
+| Monitor | `#/jobs` | Running and queued jobs with live elapsed time, job profile badge, and Cancel |
+| Monitor | `#/history?status=&agent=&q=` | Terminal jobs; `status=failed\|succeeded\|canceled`, agent filter, free-text search, error detail, job profile badge, reply chains |
+| Monitor | `#/providers` | agys multi-account profiles, quotas, active mode toggle (`off`\|`profile`\|`auto`), and profile selector |
+| Monitor | `#/graph` | Visual execution graph lineage DAG: roots, attempts, and delegate/retry/resume edges |
 | Monitor | `#/metrics?taskType=` | Success-rate chart and per-pair table; `taskType` filters the rows |
 | Activity | `#/subagents` | Claude Code subagent runs recorded by the hooks |
 | Activity | `#/timeline?source=&q=` | Last 200 events over SSE, filtered by source and free text |
@@ -1076,12 +1214,15 @@ routes, so a link can open the exact filtered view:
 | System | `#/config?section=delegation\|process\|breaker\|overrides\|paths` | Delegation map, process PATH and CLIs, breaker and TTL, overrides, paths |
 
 Sidebar badges show unhealthy agents, running jobs, failures in the last 24h,
-unseen timeline events and unresolved CLIs. Agent row actions are Revalidate,
-Ping (an L3 round-trip for that one agent+model), Hold / Release and Reset
-breaker; the Agents header adds Revalidate all and Rediscover CLIs. Ping,
-Reset breaker and Cancel job ask for confirmation first. The theme follows the
-system by default and can be set to light or dark. `preflight` events
-(`phase: discovery|agent|ping`) stream over the same SSE feed as job events.
+unseen timeline events and unresolved CLIs. Running Jobs (`#/jobs`) and History
+(`#/history`) display the `JobProfileBadge` showing which agys profile executed
+the job along with its status badge (`selected`, `fallback`, `exhausted`,
+`unavailable`). Agent row actions are Revalidate, Ping (an L3 round-trip for
+that one agent+model), Hold / Release and Reset breaker; the Agents header
+adds Revalidate all and Rediscover CLIs. Ping, Reset breaker and Cancel job
+ask for confirmation first. The theme follows the system by default and can
+be set to light or dark. `preflight` events (`phase: discovery|agent|ping`)
+stream over the same SSE feed as job events.
 
 The UI is a React 19 + TypeScript + Vite + Tailwind v4 app in the `dashboard/`
 workspace, using shadcn/ui components on Base UI, with TanStack Router (hash
@@ -1094,6 +1235,9 @@ read-only from there — see Install for the build step.
 | `/api/state` | GET | — | `{agents, jobs, subagents, events}` |
 | `/api/config` | GET | — | `{delegationMap, discovery, timeouts, breaker, ttlMs, agentHubHome, writeAllowlist, breakerState, overrides, process}` |
 | `/api/metrics` | GET | — | Same rows as `agents_metrics`; `?groupBy=agent,model,mode,taskType` |
+| `/api/providers` | GET | — | Snapshot of agys profiles, quota buckets, mode, source, and selected profile |
+| `/api/providers/mode` | POST | `{mode: 'off'\|'profile'\|'auto', profile?}` | Switch agys mode (persisted to `agys-mode.json`; invalidates sync profile cache) |
+| `/api/execution-graph` | GET | — | Lineage DAG of executions across workflows; `?rootExecutionId=` filters to subtree |
 | `/api/proposals` | GET | — | `{proposals}` |
 | `/api/proposals/refresh` | POST | — | Recompute proposals from current metrics and store new pending ones |
 | `/api/proposals/:id/accept` | POST | — | Accept a pending proposal (supersedes the previous accepted one for that task type) |
@@ -1172,11 +1316,12 @@ only, so a `localhost` request hangs until it times out rather than falling back
 | `AGENT_HUB_HOME` | Overrides the state directory (default `~/.local/share/agent-hub`). Tests always override this. |
 | `AGENT_HUB_STORE` | Job store read path: `json` (default; reads `result.json`), `sqlite` (reads SQLite first with JSON fallback), or `shadow` (reads JSON, verifies against SQLite, and logs divergences). |
 | `AGENT_HUB_READGUARD_IGNORED` | `1` includes gitignored files in read-mode change detection via `git status --ignored=matching`. Default `0`. |
-| `AGENT_HUB_SANDBOX_PROFILE` | Spawning sandbox profile: `compatibility` (default; redacts secret env vars, inherits host HOME), `isolated-home` (redacts secrets, redirects HOME to a temporary directory), or `isolated` (redacts secrets, isolates HOME, TMPDIR, and XDG_* directories). |
+| `AGENT_HUB_SANDBOX_PROFILE` | Spawning sandbox profile: `compatibility` (default; redacts secret env vars, inherits host HOME), `isolated-home` (redacts secrets, redirects HOME to a temporary directory), or `isolated` (redacts secrets, isolates HOME, TMPDIR, and XDG_* directories). See [docs/security-isolation.md](./docs/security-isolation.md). |
 | `AGENT_HUB_SANDBOX_INCLUDE` | Comma-separated paths to copy into the sandbox directory under `isolated` mode (relative paths maintain structure; absolute paths copy to root). |
-| `AGENT_HUB_AGYS` | Enables agys multi-account profile integration. Set to `auto` to query `agys list` and `agys quota --json` for automatic profile selection based on quota/priority. |
-| `AGENT_HUB_AGYS_PROFILE` | Explicitly forces a named agys profile, overriding automatic profile selection. |
+| `AGENT_HUB_AGYS` | agys multi-account profile mode: `auto` (default) queries `agys list` and `agys quota --json` for automatic profile selection based on quota/priority; `off` disables agys. |
+| `AGENT_HUB_AGYS_PROFILE` | Explicitly pins a named agys profile, overriding `AGENT_HUB_AGYS` and dashboard setting. |
 | `AGENT_HUB_OPENCODE_BRIDGE` | `1` enables the OpenCode lifecycle bridge: when a delegated job finishes, agent-hub resumes the originating OpenCode session with `POST /api/session/{id}/prompt` (`{ text, resume: true }`), reading the service URL/password from `~/.local/state/opencode/service.json` (override with `AGENT_HUB_OPENCODE_SERVICE_FILE`). Default off. |
+| `AGENT_HUB_OPENCODE_SERVICE_FILE` | Path override for the OpenCode service credentials file (default `~/.local/state/opencode/service.json`). |
 | `AGENT_HUB_HARNESS` | Default caller harness profile: `generic` (waitMode: `none`), `claude-code` (waitMode: `attention`), or `opencode` (waitMode: `attention`). |
 | `AGENT_HUB_LEASE_TTL_MS` | Lease TTL in milliseconds for write-mode worktree locks (default 120,000 ms / 2 min). |
 | `AGENT_HUB_DISABLE_STARTUP_DISCOVERY` | `1` skips the background discovery pass on MCP startup. Used by tests that boot the real stdio server and must not spawn a real CLI as a side effect. |
@@ -1197,6 +1342,7 @@ only, so a `localhost` request hangs until it times out rather than falling back
 | `overrides.json` | Manual per-pair `hold`/`breakerReset` entries |
 | `proposals.json` | Routing proposals (`pending`/`accepted`/`rejected`/`superseded`) with their evidence |
 | `learnings.json` | Curated agent/model/taskType learnings (`pending`/`approved`/`rejected`) |
+| `agys-mode.json` | Persisted agys mode configuration (`{ mode: 'off'\|'profile'\|'auto', profile? }`), written by the dashboard Providers view toggle |
 | `accounts.json` | Jules accounts and masked API keys (mode `0600`) |
 | `schedules.json` | Recurring Jules tasks evaluated by the dashboard service |
 | `sources-cache.json` | Cached GitHub repositories connected to Jules accounts |
@@ -1204,6 +1350,11 @@ only, so a `localhost` request hangs until it times out rather than falling back
 | `runs/<jobId>/` | `prompt.txt`, `stdout.log`, `response.txt`, `result.json` per job |
 | `runs/<workflowId>/<stepId>/artifacts/` | Step evidence directory: `artifacts.manifest.json`, `verification.json`, `judge.json`, `handoff.json`, and step-declared artifact files |
 | `runs/.locks/` | Per-cwd single-writer locks for write-mode jobs |
+
+## Documentation
+
+- [Implementation & Architecture Report (2026-09-21)](./docs/implementation-report-2026-09-21.md): Comprehensive technical report covering features, architecture updates, MCP tool additions, and reliability posture implemented across 48 merged pull requests (C0–H milestones).
+- [Security Isolation Matrix & Container Design](./docs/security-isolation.md): Detailed specification of execution isolation levels (`compatibility`, `isolated-home`, `isolated`), credential hygiene, ReadGuard gitignored change detection, and container sandbox architecture.
 
 ## Comparison with ai-dispatch
 
