@@ -31,17 +31,19 @@ const columns: DataTableColumn<McpToolT>[] = [
   },
 ]
 
-export function ToolsView() {
+export function ToolsView({ embedded = false }: { embedded?: boolean } = {}) {
   const toolsQuery = useToolsQuery()
   const tools = toolsQuery.data?.tools ?? []
   const sortedTools = [...tools].sort((a, b) => a.name.localeCompare(b.name))
 
   return (
     <div className="flex flex-col gap-6">
-      <PageHeader
-        title="Tools"
-        description="MCP tools registered by the agent-hub server. Every test run validates this list loads."
-      />
+      {!embedded ? (
+        <PageHeader
+          title="Tools"
+          description="MCP tools registered by the agent-hub server. Every test run validates this list loads."
+        />
+      ) : null}
 
       {toolsQuery.isPending ? (
         <div className="flex flex-col gap-4">

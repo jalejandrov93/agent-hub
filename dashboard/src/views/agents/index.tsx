@@ -4,6 +4,7 @@ import { Bot, Info, MoreHorizontal, RefreshCw, RotateCw } from "lucide-react"
 import { PageHeader } from "@/components/PageHeader"
 import { DataTable, type DataTableColumn } from "@/components/DataTable"
 import { StatusBadge } from "@/components/StatusBadge"
+import { ProviderMark } from "@/components/ProviderMark"
 import { ConfirmDialog } from "@/components/ConfirmDialog"
 import { RelativeTime } from "@/components/RelativeTime"
 import { EmptyState } from "@/components/EmptyState"
@@ -390,6 +391,7 @@ export function AgentsView() {
             return (
               <section key={group.agent} className="flex flex-col gap-2">
                 <div className="flex flex-wrap items-center gap-1.5">
+                  <ProviderMark agent={group.agent} size="md" />
                   <h2 className="text-sm font-semibold">{group.agent}</h2>
                   <span className="text-xs text-muted-foreground">{parts.join(" · ")}</span>
                   {unresolved ? (

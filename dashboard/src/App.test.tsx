@@ -1,6 +1,7 @@
 import { describe, expect, it, vi, beforeEach } from "vitest"
 import { render, screen, waitFor } from "@testing-library/react"
 import App from "./App"
+import { VIEW_META } from "./lib/nav"
 
 class NoopEventSource {
   static CONNECTING = 0
@@ -61,14 +62,27 @@ describe("App shell", () => {
 
     await waitFor(() => expect(screen.getByRole("link", { name: "Overview" })).toBeTruthy())
 
+    // Nav groups
+    expect(screen.getAllByText("Operations").length).toBeGreaterThanOrEqual(1)
+    expect(screen.getByText("Agents & Topology")).toBeTruthy()
+    expect(screen.getByText("System")).toBeTruthy()
+
+    // Nav item labels
     expect(screen.getByText("Agents")).toBeTruthy()
     expect(screen.getByText("Running jobs")).toBeTruthy()
     expect(screen.getByText("Job history")).toBeTruthy()
     expect(screen.getByText("Metrics")).toBeTruthy()
-    expect(screen.getByText("Claude subagents")).toBeTruthy()
+    expect(screen.getByText("Subagents")).toBeTruthy()
+    expect(screen.getByText("Execution Tree")).toBeTruthy()
+    expect(screen.getByText("Worktree Map")).toBeTruthy()
     expect(screen.getByText("Timeline")).toBeTruthy()
     expect(screen.getByText("Approvals")).toBeTruthy()
-    expect(screen.getByText("Config")).toBeTruthy()
+    expect(screen.getByText("Cloud")).toBeTruthy()
+    expect(screen.getByText("Settings")).toBeTruthy()
+
+    // Nav tips render (e.g. PageHeader subtitle on Overview and sidebar link titles)
+    expect(screen.getAllByText(VIEW_META.overview.tip).length).toBeGreaterThanOrEqual(1)
+    expect(screen.getByTitle(VIEW_META.agents.tip)).toBeTruthy()
 
     // The default route ('/' -> '/overview') rendered the Overview view.
     await waitFor(() => expect(screen.getAllByText("Coming soon").length).toBeGreaterThan(0))

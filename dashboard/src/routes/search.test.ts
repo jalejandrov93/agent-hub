@@ -63,4 +63,8 @@ describe("ConfigSearch", () => {
   it("falls back to delegation for an invalid section", () => {
     expect(ConfigSearch.parse({ section: "bogus" })).toEqual({ section: "delegation" })
   })
+
+  it("keeps a valid tools section", () => {
+    expect(ConfigSearch.parse({ section: "tools" })).toEqual({ section: "tools" })
+  })
 })

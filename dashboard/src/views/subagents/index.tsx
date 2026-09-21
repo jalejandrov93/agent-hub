@@ -6,9 +6,11 @@ import { EmptyState } from "@/components/EmptyState"
 import { DataTable, type DataTableColumn } from "@/components/DataTable"
 import { StatusBadge } from "@/components/StatusBadge"
 import { RelativeTime } from "@/components/RelativeTime"
+import { ProviderMark } from "@/components/ProviderMark"
 import { Card, CardHeader, CardTitle, CardDescription } from "@/components/ui/card"
 import { Tooltip, TooltipTrigger, TooltipContent, TooltipProvider } from "@/components/ui/tooltip"
 import { Sheet, SheetContent, SheetHeader, SheetTitle, SheetDescription } from "@/components/ui/sheet"
+import { ToggleGroup, ToggleGroupItem } from "@/components/ui/toggle-group"
 import { formatDuration, formatNumber, formatModel } from "@/lib/format"
 import { useStateQuery } from "@/lib/queries"
 
@@ -25,12 +27,30 @@ export type SubagentRun = {
   isRunning: boolean
   model: string | null
   summary: string | null
+  source?: string | null
 }
 
 export type SubagentSummary = {
   runningNow: number
   finished24h: number
   totalTokens24h: number
+}
+
+export type SubagentProviderFilter = "all" | "claude" | "opencode" | "other"
+
+const PROVIDER_FILTERS: { value: SubagentProviderFilter; label: string }[] = [
+  { value: "all", label: "All" },
+  { value: "claude", label: "Claude" },
+  { value: "opencode", label: "OpenCode" },
+  { value: "other", label: "Other" },
+]
+
+export function classifyProvider(run: SubagentRun): "claude" | "opencode" | "other" {
+  const agent = (run.agent || "").toLowerCase()
+  const source = (run.source || "").toLowerCase()
+  if (agent.includes("claude") || source.includes("claude")) return "claude"
+  if (agent.includes("opencode") || source.includes("opencode")) return "opencode"
+  return "other"
 }
 
 const TWENTY_FOUR_HOURS_MS = 24 * 60 * 60 * 1000
@@ -62,27 +82,33 @@ export function pairSubagentEvents(events: HubEventT[] = []): SubagentRun[] {
         isRunning: false,
         model: event.model ?? null,
         summary: event.summary ?? null,
+        source: event.source ?? null,
       }
       map.set(id, run)
     }
 
+    if (event.source && !run.source) {
+      run.source = event.source
+    }
+
     if (event.kind === "subagent.start") {
-      run.startedAt = event.ts
+      run.startedAt = event.ts || run.startedAt
       if (event.agent) run.agent = event.agent
       if (event.title) run.title = event.title
       if (event.cwd) run.cwd = event.cwd
       if ((event as { sessionId?: string | null }).sessionId) {
         run.sessionId = (event as { sessionId?: string | null }).sessionId ?? null
       }
+      if (event.model) run.model = event.model
     } else if (event.kind === "subagent.stop") {
-      run.stoppedAt = event.ts
+      run.stoppedAt = event.ts || run.stoppedAt
       if (event.agent && run.agent === "subagent") run.agent = event.agent
       if (event.title && run.title === "subagent") run.title = event.title
       if (event.cwd && !run.cwd) run.cwd = event.cwd
       if ((event as { sessionId?: string | null }).sessionId && !run.sessionId) {
         run.sessionId = (event as { sessionId?: string | null }).sessionId ?? null
       }
-      if (event.tokens != null) run.tokens = event.tokens
+      if (typeof event.tokens === "number") run.tokens = event.tokens
       if (event.model) run.model = event.model
       if (event.summary) run.summary = event.summary
     }
@@ -143,16 +169,54 @@ export function getSubagentSummary(runs: SubagentRun[], now: number = Date.now()
 export function SubagentsView() {
   const { data } = useStateQuery()
   const [selectedRun, setSelectedRun] = React.useState<SubagentRun | null>(null)
+  const [filter, setFilter] = React.useState<SubagentProviderFilter>("all")
 
-  const runs = React.useMemo(() => pairSubagentEvents(data?.subagents ?? []), [data?.subagents])
+  // Ingest subagent events from both data.events and data.subagents regardless of source
+  const allEvents = React.useMemo(() => {
+    const rawEvents: HubEventT[] = [
+      ...(data?.events ?? []),
+      ...(data?.subagents ?? []),
+    ]
+    const subagentEvents = rawEvents.filter(
+      (e) => e.kind === "subagent.start" || e.kind === "subagent.stop"
+    )
+    const seen = new Set<string>()
+    const deduped: HubEventT[] = []
+    for (const e of subagentEvents) {
+      const raw = e as HubEventT & { agentId?: string }
+      const key = `${e.ts}_${e.kind}_${raw.agentId ?? e.jobId ?? ""}`
+      if (!seen.has(key)) {
+        seen.add(key)
+        deduped.push(e)
+      }
+    }
+    return deduped
+  }, [data?.events, data?.subagents])
+
+  const runs = React.useMemo(() => pairSubagentEvents(allEvents), [allEvents])
   const summary = React.useMemo(() => getSubagentSummary(runs), [runs])
+
+  const filteredRuns = React.useMemo(() => {
+    if (filter === "all") return runs
+    return runs.filter((r) => classifyProvider(r) === filter)
+  }, [runs, filter])
+
+  const handleFilterChange = (val: string[]) => {
+    const next = val.find(Boolean) as SubagentProviderFilter | undefined
+    if (next) setFilter(next)
+  }
 
   const columns: DataTableColumn<SubagentRun>[] = React.useMemo(
     () => [
       {
         key: "agent",
         header: "Type",
-        cell: (run) => <span className="font-medium text-foreground">{run.agent}</span>,
+        cell: (run) => (
+          <div className="flex items-center gap-2">
+            <ProviderMark agent={run.agent} size="sm" />
+            <span className="font-medium text-foreground">{run.agent}</span>
+          </div>
+        ),
       },
       {
         key: "title",
@@ -208,15 +272,15 @@ export function SubagentsView() {
     <TooltipProvider>
       <div className="flex flex-col gap-6">
         <PageHeader
-          title="Claude subagents"
-          description="subagent.start / subagent.stop events from the Claude hook."
+          title="Subagents"
+          description="subagent.start / subagent.stop lifecycle events across providers."
         />
 
         {runs.length === 0 ? (
           <EmptyState
             icon={Users}
             title="No subagent activity recorded"
-            description="Claude Code subagent hooks stream lifecycle events here when active."
+            description="Subagent hooks (such as the Claude Code hook) stream lifecycle events here when active."
           />
         ) : (
           <>
@@ -243,12 +307,29 @@ export function SubagentsView() {
               </Card>
             </div>
 
+            <div className="flex flex-wrap items-center gap-3">
+              <span id="provider-filter-label" className="text-sm font-medium text-muted-foreground">
+                Provider:
+              </span>
+              <ToggleGroup
+                value={[filter]}
+                onValueChange={handleFilterChange}
+                aria-labelledby="provider-filter-label"
+              >
+                {PROVIDER_FILTERS.map((item) => (
+                  <ToggleGroupItem key={item.value} value={item.value}>
+                    {item.label}
+                  </ToggleGroupItem>
+                ))}
+              </ToggleGroup>
+            </div>
+
             <DataTable
               columns={columns}
-              rows={runs}
+              rows={filteredRuns}
               getRowId={(run) => run.agentId}
               onRowClick={(run) => setSelectedRun(run)}
-              emptyMessage="No subagent activity recorded."
+              emptyMessage="No matching subagent activity recorded."
             />
           </>
         )}

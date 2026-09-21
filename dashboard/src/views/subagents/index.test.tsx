@@ -224,4 +224,46 @@ describe("SubagentsView", () => {
       expect(screen.getAllByText("/app/older").length).toBeGreaterThanOrEqual(1)
     })
   })
+
+  it("filters runs by provider when clicking filter buttons", async () => {
+    vi.mocked(api.getState).mockResolvedValue({
+      agents: [],
+      jobs: [],
+      events: [],
+      subagents: [
+        {
+          ts: "2026-09-13T10:00:00.000Z",
+          source: "claude-hook",
+          kind: "subagent.start",
+          agent: "claude",
+          agentId: "claude-run",
+          title: "Claude task",
+        },
+        {
+          ts: "2026-09-13T10:05:00.000Z",
+          source: "opencode-hook",
+          kind: "subagent.start",
+          agent: "opencode",
+          agentId: "opencode-run",
+          title: "OpenCode task",
+        },
+      ],
+    })
+
+    renderWithClient(<SubagentsView />)
+
+    await waitFor(() => {
+      expect(screen.getByText("Claude task")).toBeTruthy()
+      expect(screen.getByText("OpenCode task")).toBeTruthy()
+    })
+
+    // Click OpenCode filter
+    screen.getByRole("button", { name: "OpenCode" }).click()
+
+    await waitFor(() => {
+      expect(screen.queryByText("Claude task")).toBeNull()
+      expect(screen.getByText("OpenCode task")).toBeTruthy()
+    })
+  })
 })
+
