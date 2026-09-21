@@ -284,7 +284,7 @@ export function startJob({
 
   // Snapshot right before spawning, AFTER the write gate/lock: a gate failure
   // must never be judged by a snapshot it never ran against.
-  const snapshot = mode === 'read' ? takeSnapshotFn(cwd, { env }) : null
+  const snapshot = mode === 'read' || mode === 'write' ? takeSnapshotFn(cwd, { env }) : null
 
   // The local CLIs are third-party processes outside our control. Secrets
   // are always redacted; HOME isolation depends on the sandbox profile.
@@ -445,10 +445,10 @@ async function finishJob({
     // no output captured — parse/classify will treat this as empty
   }
 
-  // A read-mode job is re-snapshotted at the terminal transition. A non-git
-  // cwd produced no baseline, so the diff stays null and nothing changes.
+  // A read-mode or write-mode job is re-snapshotted at the terminal transition.
+  // A non-git cwd produced no baseline, so the diff stays null and nothing changes.
   const diff = snapshot ? diffSnapshotsFn(snapshot, takeSnapshotFn(cwd, { env })) : null
-  const violation = diff?.changed ? formatViolationFn(diff) : null
+  const violation = mode === 'read' && diff?.changed ? formatViolationFn(diff) : null
 
   const error = adapter.classifyError(stdout, { timedOut, code: exitCode })
   if (error) {
@@ -532,6 +532,8 @@ async function finishJob({
     return
   }
 
+  const noChanges = mode === 'write' && Boolean(diff && !diff.unverifiable && !diff.changed)
+
   updateResult(
     jobId,
     {
@@ -540,9 +542,16 @@ async function finishJob({
       costUsd: result.costUsd ?? null,
       sessionId: result.sessionId ?? null,
       toolDenials: result.toolDenials ?? [],
+      ...(noChanges ? { noChanges: true } : {}),
     },
     env
   )
+  if (noChanges) {
+    appendEvent(
+      { kind: 'job.no_changes', agent, model, cwd, title, jobId, taskType, summary: 'write-mode job finished without modifying any file' },
+      { env }
+    )
+  }
   appendEvent(
     { kind: 'job.finished', agent, model, cwd, title, jobId, taskType, tokens: result.tokens ?? null, costUsd: result.costUsd ?? null, summary: summarize(result.text), harness: eventHarness, waitMode: eventWaitMode, profile: eventProfile, profileStatus: eventProfileStatus },
     { env }
