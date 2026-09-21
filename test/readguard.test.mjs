@@ -194,3 +194,66 @@ test('formatViolation appends a HEAD-moved note', () => {
   const diff = { changed: true, headChanged: true, paths: ['a.txt'] }
   assert.equal(formatViolation(diff), 'read-mode job modified 1 path(s): a.txt and moved HEAD')
 })
+
+test('flag OFF (default): editing a gitignored file is NOT reported', () => {
+  const dir = makeRepo()
+  fs.writeFileSync(path.join(dir, '.gitignore'), 'ignored.txt\n')
+  git(['add', '.gitignore'], dir)
+  git(['commit', '-q', '-m', 'add gitignore'], dir)
+  fs.writeFileSync(path.join(dir, 'ignored.txt'), 'initial')
+  const prev = process.env.AGENT_HUB_READGUARD_IGNORED
+  delete process.env.AGENT_HUB_READGUARD_IGNORED
+  try {
+    const before = takeSnapshot(dir)
+    fs.appendFileSync(path.join(dir, 'ignored.txt'), ' modified')
+    const after = takeSnapshot(dir)
+    const diff = diffSnapshots(before, after)
+    assert.deepEqual(diff, { changed: false, headChanged: false, paths: [] })
+  } finally {
+    if (prev === undefined) delete process.env.AGENT_HUB_READGUARD_IGNORED
+    else process.env.AGENT_HUB_READGUARD_IGNORED = prev
+  }
+})
+
+test('flag ON: editing a gitignored file IS reported as a violation with the path', () => {
+  const dir = makeRepo()
+  fs.writeFileSync(path.join(dir, '.gitignore'), 'ignored.txt\n')
+  git(['add', '.gitignore'], dir)
+  git(['commit', '-q', '-m', 'add gitignore'], dir)
+  fs.writeFileSync(path.join(dir, 'ignored.txt'), 'initial')
+  const prev = process.env.AGENT_HUB_READGUARD_IGNORED
+  process.env.AGENT_HUB_READGUARD_IGNORED = '1'
+  try {
+    const before = takeSnapshot(dir)
+    fs.appendFileSync(path.join(dir, 'ignored.txt'), ' modified')
+    const after = takeSnapshot(dir)
+    const diff = diffSnapshots(before, after)
+    assert.equal(diff.changed, true)
+    assert.equal(diff.headChanged, false)
+    assert.deepEqual(diff.paths, ['ignored.txt'])
+    assert.equal(formatViolation(diff), 'read-mode job modified 1 path(s): ignored.txt')
+  } finally {
+    if (prev === undefined) delete process.env.AGENT_HUB_READGUARD_IGNORED
+    else process.env.AGENT_HUB_READGUARD_IGNORED = prev
+  }
+})
+
+test('flag ON with a non-git cwd: still unverifiable, not a violation', () => {
+  const dir = fs.mkdtempSync(path.join(os.tmpdir(), 'agent-hub-readguard-notgit-'))
+  const prev = process.env.AGENT_HUB_READGUARD_IGNORED
+  process.env.AGENT_HUB_READGUARD_IGNORED = '1'
+  try {
+    const before = takeSnapshot(dir)
+    assert.equal(before, null)
+    fs.writeFileSync(path.join(dir, 'ignored.txt'), 'x')
+    const after = takeSnapshot(dir)
+    assert.equal(after, null)
+    const diff = diffSnapshots(before, after)
+    assert.deepEqual(diff, { changed: false, headChanged: false, paths: [], unverifiable: true })
+    assert.equal(diff.changed, false)
+  } finally {
+    if (prev === undefined) delete process.env.AGENT_HUB_READGUARD_IGNORED
+    else process.env.AGENT_HUB_READGUARD_IGNORED = prev
+  }
+})
+

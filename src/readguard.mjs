@@ -1,6 +1,7 @@
 import fs from 'node:fs'
 import path from 'node:path'
 import { execFileSync } from 'node:child_process'
+import { readguardIgnoredEnabled } from './config.mjs'
 
 const MAX_ENTRIES = 5000
 const MAX_LISTED_PATHS = 50
@@ -48,7 +49,7 @@ function fingerprint(root, relPath, statusCode) {
  * Returns null when cwd isn't inside a git work tree (or git fails outright)
  * so callers can treat "not git" as unverifiable rather than a violation.
  */
-export function takeSnapshot(cwd, { exec = execFileSync } = {}) {
+export function takeSnapshot(cwd, { exec = execFileSync, env = process.env } = {}) {
   let root
   try {
     root = exec('git', ['rev-parse', '--show-toplevel'], { cwd, encoding: 'utf8' }).trim()
@@ -63,11 +64,23 @@ export function takeSnapshot(cwd, { exec = execFileSync } = {}) {
     head = null
   }
 
+  // When AGENT_HUB_READGUARD_IGNORED === '1', opt-in to including ignored files via
+  // `--ignored=matching`. We keep the snapshot cheap: status-based listing without
+  // recursive deep directory walking or full-file hashing of ignored build output.
+  // Residual limits:
+  // - In-place modifications to existing files inside an already-ignored directory
+  //   (e.g. build/bundle.js modified without altering directory mtime/entry count)
+  //   may not be detected because git status reports only the directory entry `!! build/`
+  //   and we do not recurse or hash ignored directories.
+  // - Individual ignored files matching patterns (e.g. .env, /ignored.txt) and additions/
+  //   deletions that alter directory timestamps/entries are captured.
+  const ignoredFlag = readguardIgnoredEnabled(env) ? '--ignored=matching' : '--ignored=no'
+
   let statusOutput
   try {
     statusOutput = exec(
       'git',
-      ['status', '--porcelain=v1', '-z', '--untracked-files=all', '--ignored=no'],
+      ['status', '--porcelain=v1', '-z', '--untracked-files=all', ignoredFlag],
       { cwd, encoding: 'utf8' },
     )
   } catch {

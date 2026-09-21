@@ -9,6 +9,14 @@ export function stateHome(env = process.env) {
   return env.AGENT_HUB_HOME || path.join(os.homedir(), '.local', 'share', 'agent-hub')
 }
 
+/**
+ * Opt-in flag for read-purity guard: when '1', snapshot includes gitignored files.
+ * Default is OFF (0/unset).
+ */
+export function readguardIgnoredEnabled(env = process.env) {
+  return env?.AGENT_HUB_READGUARD_IGNORED === '1'
+}
+
 export function paths(env = process.env) {
   const home = stateHome(env)
   return {
