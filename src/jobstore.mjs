@@ -115,6 +115,7 @@ export function createJob({
   quality_score = null,
   verified = null,
   judge_verdict = null,
+  revision = null,
   // A1 dispatch params
   executionId = null,
   execution_id = null,
@@ -178,6 +179,7 @@ export function createJob({
     quality_score: quality_score ?? null,
     verified: verified ?? null,
     judge_verdict: judge_verdict ?? null,
+    revision: revision ?? null,
     // A1 dispatch provenance fields
     executionId: resolvedExecutionId,
     execution_id: resolvedExecutionId,

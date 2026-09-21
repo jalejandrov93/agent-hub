@@ -16,6 +16,14 @@ and this project adheres to [Semantic Versioning](https://semver.org/).
 
 ### Added
 
+- Quality/cost/latency intelligence in `computeMetrics` (`agents_metrics`,
+  `GET /api/metrics`): `costUsdTotal`/`costUsdAvg`, `verifiedCount`/
+  `verifiedSamples`/`verifiedRate`/`verificationFailures`, `judgeVerdicts`,
+  `revisionTotal`/`revisionAvg`, `retryCount` and `qualityScore`
+  (`10 * verifiedRate`, null without verification evidence). The engine mirrors
+  `judge_verdict`/`revision` onto the job record as soon as the judge decides,
+  so rejected/blocked verdicts are recorded too. The dashboard Metrics view
+  gains Verified, Quality, Avg cost and Avg revisions columns.
 - Workflow judge and revision loop (`src/judge.mjs`): a delegate node can set
   `maxRevisionAttempts` and the engine turns the verifier verdict into
   `accepted | needs_revision | rejected | blocked` — `needs_revision`

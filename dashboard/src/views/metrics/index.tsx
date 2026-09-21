@@ -138,13 +138,46 @@ export function MetricsView() {
       header: "Avg tokens",
       cell: (row) => formatNumber(row.tokensAvg),
     },
+    {
+      key: "verified",
+      header: "Verified",
+      cell: (row) => {
+        const hasSamples = typeof row.verifiedSamples === "number" && row.verifiedSamples > 0
+        const rate = !hasSamples || row.verifiedRate == null ? "—" : `${(row.verifiedRate * 100).toFixed(1)}%`
+        return <span>{rate}</span>
+      },
+    },
+    {
+      key: "quality",
+      header: "Quality",
+      cell: (row) => {
+        const score = row.qualityScore == null ? "—" : row.qualityScore.toFixed(1)
+        const isUnverified = row.verifiedSamples === 0 || row.verifiedSamples == null
+        return (
+          <div className="flex items-center gap-2">
+            <span>{score}</span>
+            {isUnverified ? <Badge variant="outline">unverified</Badge> : null}
+          </div>
+        )
+      },
+    },
+    {
+      key: "cost",
+      header: "Avg cost",
+      cell: (row) => (row.costUsdAvg == null ? "—" : `$${row.costUsdAvg.toFixed(4)}`),
+    },
+    {
+      key: "revisions",
+      header: "Avg revisions",
+      cell: (row) => (row.revisionAvg == null ? "—" : row.revisionAvg.toFixed(2)),
+    },
   ]
 
   return (
     <div className="flex flex-col gap-6">
       <PageHeader
         title="Metrics"
-        description="Success rate, latency, and token usage by task type."
+        description="Success rate, latency, tokens, verified rate, and quality by task type."
         actions={
           <div className="flex items-center gap-2">
             <label htmlFor="metrics-task-type" className="text-sm text-muted-foreground">

@@ -43,7 +43,7 @@ src/
   startup.mjs          non-blocking startup discovery scheduler
   router.mjs           delegation map + availability filtering, applies accepted proposals
   worktree.mjs         write-mode gate (secondary git worktree) + single-writer lock
-  metrics.mjs          job-history aggregation (success rate, p50/p95, tokens) per agent/model/mode/taskType
+  metrics.mjs          job-history aggregation (success, p50/p95, tokens, cost, verified, quality, revisions)
   timeouts.mjs         effective timeout: explicit > adaptive (p95 x 1.5) > static default
   proposals.mjs        Wilson-bound chain-reorder proposals, human-accepted before they apply
   cloud/
@@ -659,6 +659,27 @@ and the operational `errorKind`s (`locked`, `worktree_denied`, `orphaned`,
 success rate, p50/p95 latency over **succeeded** runs, an `errorKind`
 histogram and token totals. It backs the `agents_metrics` tool and
 `GET /api/metrics`.
+
+Each row also carries the quality/cost/latency intelligence:
+
+- `costUsdTotal` / `costUsdAvg` — summed and averaged over the jobs that carry
+  a finite `costUsd` (null when none do).
+- `verifiedCount` / `verifiedSamples` / `verifiedRate` / `verificationFailures`
+  — from the C3/C4 `verified` verdict on the job record. `verifiedSamples` is
+  the denominator: only jobs with an actual boolean verdict count, so an agent
+  that was never verified has `verifiedRate: null`, not 0.
+- `judgeVerdicts` — histogram of the C4 `judge_verdict`
+  (`accepted`/`needs_revision`/`rejected`/`blocked`), mirrored onto the job as
+  soon as the judge decides.
+- `revisionTotal` / `revisionAvg` and `retryCount` — how much rework a pair
+  needed (integer `revision` values; jobs with `attempt > 1`).
+- `qualityScore` — `10 * verifiedRate` rounded to one decimal, and `null` when
+  there is no verification evidence. Quality is only claimed when it was
+  measured; an unverified agent is shown as unknown (`unverified` in the
+  dashboard), never as perfect.
+
+Non-finite values are skipped exactly like tokens, so a malformed record can
+never turn a row into `NaN`.
 
 `resolveEffectiveTimeoutS()` picks the timeout for a job: an explicit
 `timeoutS` always wins (`source: 'explicit'`). Otherwise the static default

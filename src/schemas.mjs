@@ -141,6 +141,7 @@ export const JobRecord = z
     quality_score: z.number().nullable().optional(),
     verified: z.boolean().nullable().optional(),
     judge_verdict: z.string().nullable().optional(),
+    revision: z.number().int().nonnegative().nullable().optional(),
     // A1 dispatch provenance fields
     execution_id: z.string().nullable().optional(),
     executionId: z.string().nullable().optional(),
@@ -331,6 +332,17 @@ export const MetricsRow = z
     errorKinds: z.record(z.number()),
     tokensTotal: z.number(),
     tokensAvg: z.number().nullable(),
+    costUsdTotal: z.number().nullable().optional(),
+    costUsdAvg: z.number().nullable().optional(),
+    verifiedCount: z.number().int().nonnegative().optional(),
+    verifiedSamples: z.number().int().nonnegative().optional(),
+    verifiedRate: z.number().min(0).max(1).nullable().optional(),
+    verificationFailures: z.number().int().nonnegative().optional(),
+    judgeVerdicts: z.record(z.number()).optional(),
+    revisionTotal: z.number().optional(),
+    revisionAvg: z.number().nullable().optional(),
+    retryCount: z.number().int().nonnegative().optional(),
+    qualityScore: z.number().nullable().optional(),
   })
   .passthrough()
 
