@@ -1176,6 +1176,7 @@ only, so a `localhost` request hangs until it times out rather than falling back
 | `AGENT_HUB_SANDBOX_INCLUDE` | Comma-separated paths to copy into the sandbox directory under `isolated` mode (relative paths maintain structure; absolute paths copy to root). |
 | `AGENT_HUB_AGYS` | Enables agys multi-account profile integration. Set to `auto` to query `agys list` and `agys quota --json` for automatic profile selection based on quota/priority. |
 | `AGENT_HUB_AGYS_PROFILE` | Explicitly forces a named agys profile, overriding automatic profile selection. |
+| `AGENT_HUB_OPENCODE_BRIDGE` | `1` enables the OpenCode lifecycle bridge: when a delegated job finishes, agent-hub resumes the originating OpenCode session with `POST /api/session/{id}/prompt` (`{ text, resume: true }`), reading the service URL/password from `~/.local/state/opencode/service.json` (override with `AGENT_HUB_OPENCODE_SERVICE_FILE`). Default off. |
 | `AGENT_HUB_HARNESS` | Default caller harness profile: `generic` (waitMode: `none`), `claude-code` (waitMode: `attention`), or `opencode` (waitMode: `attention`). |
 | `AGENT_HUB_LEASE_TTL_MS` | Lease TTL in milliseconds for write-mode worktree locks (default 120,000 ms / 2 min). |
 | `AGENT_HUB_DISABLE_STARTUP_DISCOVERY` | `1` skips the background discovery pass on MCP startup. Used by tests that boot the real stdio server and must not spawn a real CLI as a side effect. |
