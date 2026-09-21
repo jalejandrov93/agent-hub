@@ -211,8 +211,9 @@ agent-hub
 Claude Code ── the job record and its result
 ```
 
-Useful tools to know: `route` (who can do this), `delegate` (run it now),
-`dispatch` (run it with policy and idempotency), `job_wait`, `job_result`, and
+Useful tools to know: `route` (who can do this), `dispatch` (run it with policy
+and idempotency — the default choice), `delegate` (raw escape hatch: one exact
+agent+model, no policy), `job_wait`, `job_result`, and
 `plan_task`/`execute_plan` for multi-step work. The complete surface is in
 **[MCP tools](docs/reference/tools.md)**.
 

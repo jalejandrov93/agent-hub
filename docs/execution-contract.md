@@ -128,14 +128,20 @@ target state for later slices); file:line refs ground what already exists.
 
 ## 9. Dispatch vs Delegate
 
-- `delegate()`: exact execution without policy. Returns `{jobId, status:'queued'}`
-  immediately and never waits. Does not evaluate circuit breakers or backoffs.
+- `delegate()`: **raw escape hatch**, for callers that must pin one exact
+  agent+model and handle failure themselves. Exact execution without policy: it
+  skips routing, policy recovery, circuit breakers, `dispatchKey` idempotency
+  and execution lineage. Returns `{jobId, status:'queued'}` immediately and
+  never waits (it is synchronous by contract).
 - `dispatch()`: execution WITH policy, idempotency, and lineage. Dedupes by
   `dispatchKey` (concurrent dispatches with the same key share one job),
   applies `waitMode` (`none`|`attention`|`terminal`), and handles preflight
   gates and circuit breakers.
-- Routing `delegate()` calls through `dispatch()` mechanics (or unifying them)
-  remains an open item.
+- **Prefer `dispatch()`.** They are deliberately NOT unified: wrapping
+  `delegate()` in `dispatch()` changes its type (delegate returns the job
+  record synchronously) and its semantics, and an audit of this repo confirmed
+  the split is intentional. The open item is narrower than "unify them": keep
+  `delegate()` raw and make orchestrators reach for `dispatch()` by default.
 
 ## 10. Harness profiles & waitMode
 
