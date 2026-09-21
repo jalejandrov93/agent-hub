@@ -6,6 +6,14 @@ and this project adheres to [Semantic Versioning](https://semver.org/).
 
 ## [Unreleased]
 
+### Fixed
+
+- `createJob` now rejects a record without `agent`/`model` instead of writing
+  one that violates `JobRecord`, and `/api/state` (`buildState`) drops job
+  records that do not satisfy `JobRecord` instead of returning a payload the
+  dashboard client cannot parse. One malformed record used to blank every
+  job-list view ("Could not load jobs").
+
 ### Added
 
 - Harness profiles (`src/harness/`: `generic`, `claude-code`, `opencode`)
