@@ -8,7 +8,7 @@ description: >
   "antigravity", "gemini flash", "opencode", "muse", "copilot", free model, which agent,
   agent dashboard, adversarial review, distribute this task, use all agents, revalidate agents,
   agent-hub dashboard.
-license: Apache-2.0
+license: MIT
 metadata:
   author: jalejandrov93
   version: "2.1"

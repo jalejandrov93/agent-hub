@@ -6,6 +6,11 @@ and this project adheres to [Semantic Versioning](https://semver.org/).
 
 ## [Unreleased]
 
+### Changed
+
+- Relicensed from Apache-2.0 to MIT. Releases up to and including v2.1.0 stay
+  available under Apache-2.0; this and later versions are MIT.
+
 ### Removed
 
 - Unused per-job `quality_score` field removed from `JobRecord` schema and `createJob`.
