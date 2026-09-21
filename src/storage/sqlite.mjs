@@ -758,6 +758,7 @@ export function initDb(stateHome) {
  * @param {object} row - Must include job_id; all other columns are nullable.
  */
 export function upsertJob(ctx, row) {
+  if (!ctx) return
   if (ctx.backend === 'sqlite') {
     sqliteUpsertJob(ctx.db, row)
   } else {
@@ -772,6 +773,7 @@ export function upsertJob(ctx, row) {
  * @returns {object | null}
  */
 export function getJob(ctx, jobId) {
+  if (!ctx) return null
   if (ctx.backend === 'sqlite') {
     return sqliteGetJob(ctx.db, jobId)
   }
@@ -785,6 +787,7 @@ export function getJob(ctx, jobId) {
  * @returns {string[]}
  */
 export function listJobIds(ctx) {
+  if (!ctx) return []
   if (ctx.backend === 'sqlite') {
     return sqliteListJobIds(ctx.db)
   }
