@@ -1004,12 +1004,42 @@ export async function runWorkflow({
   )
 
   const finalStatus = allSucceeded ? 'succeeded' : 'failed'
+  const existingWorkflow = getWorkflow(dbCtx, workflow.id)
+  const previousStatus = existingWorkflow?.status
+
   upsertWorkflow(dbCtx, {
     id: workflow.id,
     name: workflow.name,
     status: finalStatus,
     updated_at: new Date().toISOString(),
   })
+
+  if (!isTerminalStatus(previousStatus)) {
+    const counts = {
+      total: 0,
+      succeeded: 0,
+      failed: 0,
+      skipped: 0,
+      canceled: 0,
+    }
+    for (const state of nodeStates.values()) {
+      counts.total++
+      if (state?.status === NODE_STATUS.SUCCEEDED) counts.succeeded++
+      else if (state?.status === NODE_STATUS.FAILED) counts.failed++
+      else if (state?.status === NODE_STATUS.SKIPPED) counts.skipped++
+      else if (state?.status === NODE_STATUS.CANCELED) counts.canceled++
+    }
+
+    appendEvent(
+      {
+        kind: 'workflow.completed',
+        workflow_id: workflow.id,
+        status: finalStatus,
+        counts,
+      },
+      { env }
+    )
+  }
 
   return {
     workflowId: workflow.id,
