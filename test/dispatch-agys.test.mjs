@@ -58,6 +58,80 @@ test('agy + injected resolveProfileFn returning { profile: "work", status: "sele
   }
 })
 
+test('resolveProfileFn receives the candidate model (quota is per model group, T3)', async () => {
+  const { env, cleanup } = makeTempHome()
+  try {
+    const mockStartJob = async (args) => ({
+      job: { jobId: 'j-model', status: 'queued' },
+      done: Promise.resolve(),
+    })
+
+    const seenModels = []
+    const fakeResolveProfile = async ({ model }) => {
+      seenModels.push(model)
+      return { profile: 'work', status: 'selected' }
+    }
+
+    await dispatch({
+      task: 'test-agy-model',
+      taskType: 'recon',
+      cwd: '/tmp/test-agy-model',
+      env,
+      startJobFn: mockStartJob,
+      resolveProfileFn: fakeResolveProfile,
+      ...fakeRoute({ agent: 'agy', model: 'claude-sonnet-4-6' }),
+    })
+
+    assert.deepEqual(seenModels, ['claude-sonnet-4-6'])
+  } finally {
+    cleanup()
+  }
+})
+
+test('the memo is scoped per model GROUP: an agy fallback in a DIFFERENT quota group (gemini -> claude) re-resolves instead of reusing the gemini profile', async () => {
+  const { env, cleanup } = makeTempHome()
+  try {
+    const resolveCallsByModel = []
+    const fakeResolveProfile = async ({ model }) => {
+      resolveCallsByModel.push(model)
+      // A model-aware fake: pretend Gemini picks 'work' and Claude/GPT picks 'backup'.
+      return model?.startsWith('gemini') ? { profile: 'work', status: 'selected' } : { profile: 'backup', status: 'selected' }
+    }
+
+    const capturedList = []
+    const mockStartJob = async (args) => {
+      capturedList.push(args)
+      if (capturedList.length === 1) {
+        return {
+          job: { jobId: 'j-group-1', agent: args.agent, model: args.model, status: 'failed', errorKind: 'quota', error: 'quota reached' },
+          done: Promise.resolve(),
+        }
+      }
+      return { job: { jobId: 'j-group-2', agent: args.agent, model: args.model, status: 'queued' }, done: Promise.resolve() }
+    }
+
+    await dispatch({
+      task: 'test-memo-cross-group',
+      taskType: 'recon',
+      cwd: '/tmp/test-memo-cross-group',
+      category: 'quality',
+      env,
+      startJobFn: mockStartJob,
+      resolveProfileFn: fakeResolveProfile,
+      ...fakeRoute(
+        { agent: 'agy', model: 'gemini-3.8-flash' },
+        [{ agent: 'agy', model: 'claude-sonnet-4-6' }]
+      ),
+    })
+
+    assert.deepEqual(resolveCallsByModel, ['gemini-3.8-flash', 'claude-sonnet-4-6'], 'a different quota group must re-resolve, not reuse the memo')
+    assert.equal(capturedList[0].profile, 'work')
+    assert.equal(capturedList[1].profile, 'backup')
+  } finally {
+    cleanup()
+  }
+})
+
 test('non-agy candidate (e.g. opencode) -> resolveProfileFn is NEVER called and captured profile is null', async () => {
   const { env, cleanup } = makeTempHome()
   try {

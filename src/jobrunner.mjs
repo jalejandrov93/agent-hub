@@ -10,7 +10,8 @@ import { resolveEffectiveTimeoutS as defaultResolveEffectiveTimeoutS } from './t
 import { selectLearnings as defaultSelectLearnings, augmentTask as defaultAugmentTask } from './learnings.mjs'
 import { takeSnapshot as defaultTakeSnapshot, diffSnapshots as defaultDiffSnapshots, formatViolation as defaultFormatViolation } from './readguard.mjs'
 import { startRemoteJob as defaultStartRemoteJob } from './cloud/runner.mjs'
-import { resolveAgyCommand, profileFromEnv, resolveAgyProfileSync as defaultResolveAgyProfileSync } from './providers/agys.mjs'
+import { resolveAgyCommand, profileFromEnv, resolveAgyProfileSync as defaultResolveAgyProfileSync, recordQuotaExhaustion as defaultRecordQuotaExhaustion } from './providers/agys.mjs'
+import { modelGroupFor } from './providers/profiles.mjs'
 
 // jobId -> { pgid, leaseToken, heartbeatTimer, leaseTtlMs } for jobs still
 // running in THIS process. Used by cancelJob for an immediate kill; the
@@ -102,6 +103,7 @@ export function startJob({
   profile = null,
   profileStatus = null,
   resolveAgyProfileSyncFn = defaultResolveAgyProfileSync,
+  recordQuotaExhaustionFn = defaultRecordQuotaExhaustion,
   sessionId,
   parentJobId,
   resolveEffectiveTimeoutSFn = defaultResolveEffectiveTimeoutS,
@@ -207,7 +209,7 @@ export function startJob({
       effectiveProfile = profile
       effectiveProfileStatus = profileStatus ?? 'selected'
     } else {
-      const resolved = resolveAgyProfileSyncFn({ env })
+      const resolved = resolveAgyProfileSyncFn({ env, model })
       effectiveProfile = resolved?.profile ?? null
       effectiveProfileStatus = effectiveProfile ? (resolved?.status ?? 'selected') : null
     }
@@ -337,7 +339,7 @@ export function startJob({
 
   const done = exitPromise
     .then(({ code, timedOut }) =>
-      finishJob({ jobId: job.jobId, agent, model, cwd, title, adapter, mode, env, timedOut, exitCode: code, taskType, snapshot, takeSnapshotFn, diffSnapshotsFn, formatViolationFn, harness, waitMode, runCommandFn, profile: effectiveProfile, profileStatus: effectiveProfileStatus })
+      finishJob({ jobId: job.jobId, agent, model, cwd, title, adapter, mode, env, timedOut, exitCode: code, taskType, snapshot, takeSnapshotFn, diffSnapshotsFn, formatViolationFn, harness, waitMode, runCommandFn, profile: effectiveProfile, profileStatus: effectiveProfileStatus, recordQuotaExhaustionFn })
     )
     .finally(() => {
       stopHeartbeat(job.jobId)
@@ -430,6 +432,7 @@ async function finishJob({
   runCommandFn = defaultRunCommand,
   profile = null,
   profileStatus = null,
+  recordQuotaExhaustionFn = defaultRecordQuotaExhaustion,
 }) {
   const current = readResult(jobId, env)
   if (current.status === 'canceled') return // cancelJob already finalized this job
@@ -479,6 +482,17 @@ async function finishJob({
       { kind: 'job.failed', agent, model, cwd, title, jobId, errorKind: error.kind, taskType, summary: summarize(error.message), harness: eventHarness, waitMode: eventWaitMode, profile: eventProfile, profileStatus: eventProfileStatus },
       { env }
     )
+    // T4 failover: a 429 on the profile that just ran means the NEXT
+    // resolution (dispatch or startJob) for the same model group should
+    // avoid it, even before `agys quota --json` catches up — see
+    // recordQuotaExhaustion in providers/agys.mjs.
+    if (error.kind === 'quota' && agent === 'agy' && eventProfile) {
+      try {
+        recordQuotaExhaustionFn({ profile: eventProfile, modelGroup: modelGroupFor(model) ?? 'unknown', message: error.message, env })
+      } catch {
+        // Best-effort: a broken exhaustion record must never fail job finalization.
+      }
+    }
     if (error.kind === 'timeout') {
       // Best-effort cleanup only (E19): a timeout means our own SIGINT was
       // at best best-effort (opencode's handler swallows a rejected

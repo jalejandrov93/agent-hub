@@ -13,6 +13,7 @@ export {
   listWorkflowNodes,
   claimWorkflowNode,
   touchWorkflowNode,
+  reclaimOrphanedWorkflowNode,
   publishWorkflowNodeReady,
   resumeWorkflowNode,
   upsertHarnessOrigin,

@@ -1,0 +1,4 @@
+{"event":"init","conversation_id":"b1e2a3c4-1111-2222-3333-444455556666","init":{"model":"claude-sonnet-4-6","cwd":"/home/user/example-app","tools":["ask_permission","run_command"],"permission_mode":"always-proceed","expanded_commands":[{"name":"plan","type":"system"}]}}
+{"event":"result","result":{"conversation_id":"b1e2a3c4-1111-2222-3333-444455556666","status":"ERROR","response":"","error":"401 Unauthorized: not logged in. Please run `agy login`.","duration_seconds":0.5,"num_turns":0,"usage":{"input_tokens":0,"output_tokens":0,"thinking_tokens":0,"cache_read_tokens":0,"total_tokens":0}}}
+error: 401 Unauthorized: not logged in. Please run `agy login`.
+Error: exit status 3

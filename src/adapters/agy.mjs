@@ -94,6 +94,21 @@ export function classifyError(stdout, exitInfo = {}) {
       // returns an empty response with exit code 0 — this is that failure.
       return { kind: 'canceled', retriable: true, message: 'agy CANCELED (silent permission denial)', partialText, sessionId }
     }
+    if (resultEnvelope.status === 'ERROR') {
+      // A status:"ERROR" envelope carries the provider error in `error`
+      // (e.g. "Individual quota reached ... Resets in 4h26m13s." for a 429,
+      // or a 401/"not logged in" auth failure). Classify from that text
+      // before falling back to a generic crash so a 429 gets a breaker and
+      // failover instead of being treated as fatal.
+      const providerError = resultEnvelope.error || ''
+      if (/429|RESOURCE_EXHAUSTED|quota reached/i.test(providerError)) {
+        return { kind: 'quota', retriable: true, message: providerError || 'agy quota exhausted', partialText, sessionId }
+      }
+      if (/not logged in|unauthenticated|401/i.test(providerError)) {
+        return { kind: 'auth', retriable: false, message: providerError || 'agy not authenticated', partialText, sessionId }
+      }
+      return { kind: 'crash', retriable: false, message: providerError || `agy status=${resultEnvelope.status}`, partialText, sessionId }
+    }
     return { kind: 'crash', retriable: false, message: `agy status=${resultEnvelope.status}`, partialText, sessionId }
   }
 

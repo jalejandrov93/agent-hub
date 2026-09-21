@@ -9,6 +9,8 @@ import {
   normalizeProfiles,
   profileStateFor,
   selectProfile,
+  modelGroupFor,
+  remainingQuotaForModel,
 } from '../src/providers/profiles.mjs'
 import {
   parseAgysList,
@@ -26,6 +28,10 @@ import {
   getAgysMode,
   setAgysMode,
   agysProfilesSnapshot,
+  parseResetDurationMs,
+  recordQuotaExhaustion,
+  readQuotaExhaustion,
+  isProfileExhaustedFor,
 } from '../src/providers/agys.mjs'
 
 const FIXTURE_AGYS_LIST = `Active Profiles:
@@ -85,6 +91,125 @@ const FIXTURE_AGYS_QUOTA = [
     },
   },
 ]
+
+// Shape of the real `agys quota --json` output (see odd/tasks/agys-quota-aware-profiles.md):
+// one entry per profile, quota.groups[] split by model family, each group with
+// per-window buckets carrying remainingFraction (0 = exhausted), not usedPercent.
+const REAL_SHAPE_QUOTA = [
+  {
+    profileName: 'esp',
+    email: 'esp-account@example.com',
+    active: true,
+    quota: {
+      groups: [
+        {
+          displayName: 'Gemini Models',
+          description: 'Gemini Flash and Pro models',
+          buckets: [
+            { bucketId: 'gemini-weekly', window: 'weekly', resetTime: '2026-09-28T00:00:00Z', remainingFraction: 0.8 },
+            { bucketId: 'gemini-5h', window: '5h', resetTime: '2026-09-21T23:00:00Z', remainingFraction: 0.9 },
+          ],
+        },
+        {
+          displayName: 'Claude and GPT models',
+          description: 'Claude and GPT models',
+          buckets: [
+            { bucketId: '3p-weekly', window: 'weekly', resetTime: '2026-09-28T00:00:00Z', remainingFraction: 0.1 },
+            { bucketId: '3p-5h', window: '5h', resetTime: '2026-09-21T23:12:13Z', remainingFraction: 0 },
+          ],
+        },
+      ],
+    },
+  },
+  {
+    profileName: 'ita',
+    email: 'ita-account@example.com',
+    active: false,
+    quota: {
+      groups: [
+        {
+          displayName: 'Gemini Models',
+          description: 'Gemini Flash and Pro models',
+          buckets: [
+            { bucketId: 'gemini-weekly', window: 'weekly', resetTime: '2026-09-28T00:00:00Z', remainingFraction: 0.5 },
+            { bucketId: 'gemini-5h', window: '5h', resetTime: '2026-09-21T23:00:00Z', remainingFraction: 0.6 },
+          ],
+        },
+        {
+          displayName: 'Claude and GPT models',
+          description: 'Claude and GPT models',
+          buckets: [
+            { bucketId: '3p-weekly', window: 'weekly', resetTime: '2026-09-28T00:00:00Z', remainingFraction: 1 },
+            { bucketId: '3p-5h', window: '5h', resetTime: '2026-09-21T23:12:13Z', remainingFraction: 1 },
+          ],
+        },
+      ],
+    },
+  },
+]
+
+test('modelGroupFor maps gemini/claude/gpt model ids to the two agys quota groups, unknown to null', () => {
+  assert.equal(modelGroupFor('gemini-3.8-flash-low'), 'gemini')
+  assert.equal(modelGroupFor('gemini-3.1-pro-high'), 'gemini')
+  assert.equal(modelGroupFor('claude-sonnet-4-6'), 'claude-gpt')
+  assert.equal(modelGroupFor('claude-opus-4-6-thinking'), 'claude-gpt')
+  assert.equal(modelGroupFor('gpt-oss'), 'claude-gpt')
+  assert.equal(modelGroupFor('some-unknown-model'), null)
+  assert.equal(modelGroupFor(null), null)
+  assert.equal(modelGroupFor(undefined), null)
+})
+
+test('profileStateFor reads remainingFraction buckets (agys quota --json real shape), not just usedPercent', () => {
+  const exhaustedBucket = { bucketId: 'x', remainingFraction: 0 }
+  const healthyBucket = { bucketId: 'y', remainingFraction: 0.5 }
+  assert.equal(
+    profileStateFor({ profile: { name: 'p', active: true }, quotaEntry: { quota: { groups: [{ buckets: [exhaustedBucket] }] } } }),
+    'exhausted',
+    'a single remainingFraction:0 bucket must be recognized as exhausted (flat/no-model backward-compat path)'
+  )
+  assert.equal(
+    profileStateFor({ profile: { name: 'p', active: true }, quotaEntry: { quota: { groups: [{ buckets: [healthyBucket] }] } } }),
+    'selected'
+  )
+})
+
+test('profileStateFor is per-model-group: exhausted Claude/GPT quota does not exhaust the Gemini group, and vice versa', () => {
+  const espEntry = REAL_SHAPE_QUOTA[0] // Claude/GPT 5h bucket is remainingFraction:0
+  const claudeState = profileStateFor({ profile: { name: 'esp', active: true }, quotaEntry: espEntry, model: 'claude-sonnet-4-6' })
+  assert.equal(claudeState, 'exhausted', 'esp Claude/GPT group has a 0-remaining window (ANY window exhausted rule)')
+
+  const geminiState = profileStateFor({ profile: { name: 'esp', active: true }, quotaEntry: espEntry, model: 'gemini-3.8-flash-low' })
+  assert.equal(geminiState, 'selected', 'esp Gemini group still has plenty left, unaffected by the exhausted Claude/GPT group')
+})
+
+test('profileStateFor treats an unrecognized model conservatively: exhausted if ANY group has an exhausted window', () => {
+  const espEntry = REAL_SHAPE_QUOTA[0]
+  const state = profileStateFor({ profile: { name: 'esp', active: true }, quotaEntry: espEntry, model: 'some-unknown-model' })
+  assert.equal(state, 'exhausted')
+
+  const itaEntry = REAL_SHAPE_QUOTA[1] // nothing exhausted in either group
+  const itaState = profileStateFor({ profile: { name: 'ita', active: false }, quotaEntry: itaEntry, model: 'some-unknown-model' })
+  assert.equal(itaState, 'fallback')
+})
+
+test('profileStateFor without a model keeps the pre-existing flat/all-buckets behavior (backward compat)', () => {
+  // esp has some exhausted and some healthy buckets across groups -> NOT every
+  // bucket is exhausted, so the legacy (no model) precedence says not exhausted.
+  const espEntry = REAL_SHAPE_QUOTA[0]
+  assert.equal(profileStateFor({ profile: { name: 'esp', active: true }, quotaEntry: espEntry }), 'selected')
+})
+
+test('remainingQuotaForModel returns the min remainingFraction across the job model group windows (headroom)', () => {
+  const espEntry = REAL_SHAPE_QUOTA[0]
+  assert.equal(remainingQuotaForModel(espEntry, 'gemini-3.8-flash-low'), 0.8, 'min(0.8, 0.9) for the Gemini group')
+  assert.equal(remainingQuotaForModel(espEntry, 'claude-sonnet-4-6'), 0, 'min(0.1, 0) for the Claude/GPT group')
+
+  const itaEntry = REAL_SHAPE_QUOTA[1]
+  assert.equal(remainingQuotaForModel(itaEntry, 'claude-sonnet-4-6'), 1)
+
+  assert.equal(remainingQuotaForModel(null, 'gemini-3.8-flash-low'), null)
+  assert.equal(remainingQuotaForModel({}, 'gemini-3.8-flash-low'), null)
+})
 
 test('PROFILE_STATES is frozen and contains the exact lifecycle states', () => {
   assert.ok(Object.isFrozen(PROFILE_STATES))
@@ -298,6 +423,41 @@ test('selectProfile never selects exhausted or unavailable profiles when viable 
     { name: 'p2', state: 'unavailable' },
   ]
   assert.equal(selectProfile({ profiles: allDead, policy: 'priority' }), null)
+})
+
+test('selectProfile with a model picks the viable profile with the most remaining quota in that model group', () => {
+  // esp: Claude/GPT group exhausted (remainingFraction 0 on 3p-5h) -> not viable for a claude job.
+  // ita: Claude/GPT group has 100% left -> wins over esp for a claude job, even though esp
+  //      has more Gemini quota and identical priority/name would otherwise tie-break differently.
+  const esp = { name: 'esp', priority: 0, active: true, quotaEntry: REAL_SHAPE_QUOTA[0] }
+  const ita = { name: 'ita', priority: 0, active: false, quotaEntry: REAL_SHAPE_QUOTA[1] }
+
+  const claudeChoice = selectProfile({ profiles: [esp, ita], model: 'claude-sonnet-4-6' })
+  assert.equal(claudeChoice?.name, 'ita', 'ita has full Claude/GPT quota; esp is exhausted there')
+
+  const geminiChoice = selectProfile({ profiles: [esp, ita], model: 'gemini-3.8-flash-low' })
+  assert.equal(geminiChoice?.name, 'esp', 'esp has more Gemini headroom (0.8) than ita (0.5)')
+})
+
+test('selectProfile with a model tie-breaks equal remaining quota by priority, then name', () => {
+  const quotaA = { quota: { groups: [{ displayName: 'Gemini Models', buckets: [{ bucketId: 'gemini-5h', remainingFraction: 0.5 }] }] } }
+  const quotaB = { quota: { groups: [{ displayName: 'Gemini Models', buckets: [{ bucketId: 'gemini-5h', remainingFraction: 0.5 }] }] } }
+
+  const zed = { name: 'zed', priority: 0, active: false, quotaEntry: quotaA }
+  const abc = { name: 'abc', priority: 0, active: false, quotaEntry: quotaB }
+  // Equal remaining quota, equal priority -> name breaks the tie.
+  assert.equal(selectProfile({ profiles: [zed, abc], model: 'gemini-3.8-flash-low' })?.name, 'abc')
+
+  const lowPrio = { name: 'zed', priority: 0, active: false, quotaEntry: quotaA }
+  const highPrio = { name: 'abc', priority: 5, active: false, quotaEntry: quotaB }
+  // Equal remaining quota, priority breaks the tie before name.
+  assert.equal(selectProfile({ profiles: [lowPrio, highPrio], model: 'gemini-3.8-flash-low' })?.name, 'abc')
+})
+
+test('selectProfile with a model treats missing quota data as lowest priority (known headroom wins over unknown)', () => {
+  const withQuota = { name: 'known', priority: 0, active: false, quotaEntry: REAL_SHAPE_QUOTA[1] }
+  const withoutQuota = { name: 'unknown', priority: 0, active: false }
+  assert.equal(selectProfile({ profiles: [withQuota, withoutQuota], model: 'claude-sonnet-4-6' })?.name, 'known')
 })
 
 test('parseAgysList parses fixture and handles spacing, (default), and (-)', () => {
@@ -745,6 +905,88 @@ test('resolveAgyProfileSync memoizes results so a counting execFn is called at m
   assert.equal(callCount, 4) // 2 more calls
 })
 
+const REAL_SHAPE_LIST = `Active Profiles:
+PROFILE          PRIO  EMAIL                       CONFIG  PATH
+esp (default)    0     esp-account@example.com     (-)     ~/.agys/profiles/esp
+ita              0     ita-account@example.com     (-)     ~/.agys/profiles/ita
+`
+
+test('resolveAgyProfileSync threads the job model through so selection is quota-aware per model group', () => {
+  const execFn = (cmd, args) => {
+    if (args[0] === 'list') return REAL_SHAPE_LIST
+    if (args[0] === 'quota') return JSON.stringify(REAL_SHAPE_QUOTA)
+    return ''
+  }
+
+  // esp is the default/active profile but its Claude/GPT group is exhausted
+  // (remainingFraction 0) -> a claude job must resolve to ita instead.
+  resetSyncProfileCache()
+  const claudeRes = resolveAgyProfileSync({ env: { AGENT_HUB_AGYS: 'auto' }, execFn, model: 'claude-sonnet-4-6' })
+  assert.equal(claudeRes.profile, 'ita')
+
+  // A gemini job still prefers esp (more Gemini headroom than ita).
+  resetSyncProfileCache()
+  const geminiRes = resolveAgyProfileSync({ env: { AGENT_HUB_AGYS: 'auto' }, execFn, model: 'gemini-3.8-flash-low' })
+  assert.equal(geminiRes.profile, 'esp')
+})
+
+test('resolveAgyProfileSync cache key includes the model group, so a cached Gemini pick never leaks into a Claude/GPT resolution', () => {
+  resetSyncProfileCache()
+  let callCount = 0
+  const execFn = (cmd, args) => {
+    callCount++
+    if (args[0] === 'list') return REAL_SHAPE_LIST
+    if (args[0] === 'quota') return JSON.stringify(REAL_SHAPE_QUOTA)
+    return ''
+  }
+  const env = { AGENT_HUB_AGYS: 'auto' }
+
+  const geminiRes = resolveAgyProfileSync({ env, execFn, model: 'gemini-3.8-flash-low' })
+  assert.equal(geminiRes.profile, 'esp')
+  assert.equal(callCount, 2)
+
+  // Different model GROUP -> must not reuse the Gemini-cached result; esp is
+  // exhausted for Claude/GPT, so a cache leak would wrongly keep returning esp.
+  const claudeRes = resolveAgyProfileSync({ env, execFn, model: 'claude-sonnet-4-6' })
+  assert.equal(claudeRes.profile, 'ita')
+  assert.equal(callCount, 4, 'a distinct model group must re-resolve, not reuse the other group cache entry')
+
+  // Same model group again within TTL -> memoized, no further execFn calls.
+  const claudeAgain = resolveAgyProfileSync({ env, execFn, model: 'claude-sonnet-4-6' })
+  assert.equal(claudeAgain.profile, 'ita')
+  assert.equal(callCount, 4)
+})
+
+test('resolveAgyProfile (async) threads the job model through selectFn for quota-aware auto selection', async () => {
+  const fakeRunner = async (cmd, args) => {
+    if (args[0] === '--version') return { code: 0, stdout: 'agys v0.2.33', stderr: '' }
+    return { code: 0, stdout: '', stderr: '' }
+  }
+  const fakeList = async () => [
+    { name: 'esp', active: true, priority: 0 },
+    { name: 'ita', active: false, priority: 0 },
+  ]
+  const fakeQuota = async () => ({ esp: REAL_SHAPE_QUOTA[0], ita: REAL_SHAPE_QUOTA[1] })
+
+  const claudeRes = await resolveAgyProfile({
+    env: { AGENT_HUB_AGYS: 'auto' },
+    runCommandFn: fakeRunner,
+    listFn: fakeList,
+    quotaFn: fakeQuota,
+    model: 'claude-sonnet-4-6',
+  })
+  assert.equal(claudeRes.profile, 'ita', 'esp is exhausted for Claude/GPT quota')
+
+  const geminiRes = await resolveAgyProfile({
+    env: { AGENT_HUB_AGYS: 'auto' },
+    runCommandFn: fakeRunner,
+    listFn: fakeList,
+    quotaFn: fakeQuota,
+    model: 'gemini-3.8-flash-low',
+  })
+  assert.equal(geminiRes.profile, 'esp', 'esp still has the most Gemini headroom')
+})
+
 test('getAgysMode respects precedence: env profile -> env auto -> env off -> setting -> default auto', () => {
   const tmpDir = fs.mkdtempSync(path.join(os.tmpdir(), 'agent-hub-agys-mode-test-'))
   const envHome = { AGENT_HUB_HOME: tmpDir }
@@ -924,5 +1166,148 @@ test('agysProfilesSnapshot reports mode, source and pinnedProfile from getAgysMo
   assert.equal(snap3.mode, 'profile')
   assert.equal(snap3.source, 'env')
   assert.equal(snap3.pinnedProfile, 'work')
+})
+
+// --- T4: failover after a quota (429) failure -------------------------------
+
+test('parseResetDurationMs parses the real "Resets in XhYmZs" provider message', () => {
+  assert.equal(
+    parseResetDurationMs('Individual quota reached. Please upgrade your subscription to increase your limits. Resets in 4h26m13s.'),
+    ((4 * 60 + 26) * 60 + 13) * 1000
+  )
+  assert.equal(parseResetDurationMs('Resets in 45m'), 45 * 60 * 1000)
+  assert.equal(parseResetDurationMs('Resets in 30s'), 30 * 1000)
+  assert.equal(parseResetDurationMs('Resets in 2h'), 2 * 60 * 60 * 1000)
+  assert.equal(parseResetDurationMs('no reset info here'), null)
+  assert.equal(parseResetDurationMs(null), null)
+  assert.equal(parseResetDurationMs(undefined), null)
+})
+
+test('recordQuotaExhaustion + isProfileExhaustedFor: a recorded profile+group is exhausted until its reset, then not', () => {
+  const tmpDir = fs.mkdtempSync(path.join(os.tmpdir(), 'agent-hub-agys-exhaustion-'))
+  const env = { AGENT_HUB_HOME: tmpDir }
+  let now = 1_000_000
+
+  recordQuotaExhaustion({
+    profile: 'esp',
+    modelGroup: 'claude-gpt',
+    message: 'Individual quota reached. Resets in 1h0m0s.',
+    env,
+    now: () => now,
+  })
+
+  assert.equal(isProfileExhaustedFor({ profile: 'esp', modelGroup: 'claude-gpt', env, now: () => now }), true)
+  // A different group on the SAME profile is unaffected.
+  assert.equal(isProfileExhaustedFor({ profile: 'esp', modelGroup: 'gemini', env, now: () => now }), false)
+  // A different profile is unaffected.
+  assert.equal(isProfileExhaustedFor({ profile: 'ita', modelGroup: 'claude-gpt', env, now: () => now }), false)
+
+  // Still exhausted just before reset...
+  now = 1_000_000 + 60 * 60 * 1000 - 1
+  assert.equal(isProfileExhaustedFor({ profile: 'esp', modelGroup: 'claude-gpt', env, now: () => now }), true)
+  // ...and clear at/after reset.
+  now = 1_000_000 + 60 * 60 * 1000
+  assert.equal(isProfileExhaustedFor({ profile: 'esp', modelGroup: 'claude-gpt', env, now: () => now }), false)
+})
+
+test('recordQuotaExhaustion uses a bounded default (1h) when the message has no parseable reset', () => {
+  const tmpDir = fs.mkdtempSync(path.join(os.tmpdir(), 'agent-hub-agys-exhaustion-default-'))
+  const env = { AGENT_HUB_HOME: tmpDir }
+  let now = 0
+  recordQuotaExhaustion({ profile: 'esp', modelGroup: 'gemini', message: 'quota reached, no timing info', env, now: () => now })
+
+  now = 60 * 60 * 1000 - 1
+  assert.equal(isProfileExhaustedFor({ profile: 'esp', modelGroup: 'gemini', env, now: () => now }), true)
+  now = 60 * 60 * 1000
+  assert.equal(isProfileExhaustedFor({ profile: 'esp', modelGroup: 'gemini', env, now: () => now }), false)
+})
+
+test('recordQuotaExhaustion persists to disk (readQuotaExhaustion) and survives a fresh read', () => {
+  const tmpDir = fs.mkdtempSync(path.join(os.tmpdir(), 'agent-hub-agys-exhaustion-persist-'))
+  const env = { AGENT_HUB_HOME: tmpDir }
+  recordQuotaExhaustion({ profile: 'esp', modelGroup: 'claude-gpt', message: 'Resets in 2h0m0s.', env, now: () => 0 })
+
+  const store = readQuotaExhaustion(env)
+  assert.ok(store.esp)
+  assert.equal(store.esp['claude-gpt'].resetAt, 2 * 60 * 60 * 1000)
+})
+
+test('resolveAgyProfileSync skips a profile recorded as exhausted for the job model group, even when agys quota --json has not caught up yet', () => {
+  const tmpDir = fs.mkdtempSync(path.join(os.tmpdir(), 'agent-hub-agys-exhaustion-sync-'))
+  const env = { AGENT_HUB_HOME: tmpDir, AGENT_HUB_AGYS: 'auto' }
+  const execFn = (cmd, args) => {
+    if (args[0] === 'list') return REAL_SHAPE_LIST
+    // Report BOTH profiles as fully healthy: agys quota --json has not
+    // propagated the 429 esp just hit yet — the exhaustion record must still
+    // steer selection away from esp for the claude group.
+    if (args[0] === 'quota') {
+      return JSON.stringify([
+        { profileName: 'esp', active: true, quota: { groups: [{ displayName: 'Claude and GPT models', buckets: [{ bucketId: '3p-5h', remainingFraction: 1 }] }] } },
+        { profileName: 'ita', active: false, quota: { groups: [{ displayName: 'Claude and GPT models', buckets: [{ bucketId: '3p-5h', remainingFraction: 1 }] }] } },
+      ])
+    }
+    return ''
+  }
+
+  recordQuotaExhaustion({ profile: 'esp', modelGroup: 'claude-gpt', message: 'Resets in 1h0m0s.', env, now: () => 0 })
+  resetSyncProfileCache()
+
+  const res = resolveAgyProfileSync({ env, execFn, model: 'claude-sonnet-4-6', now: () => 0 })
+  assert.equal(res.profile, 'ita', 'esp must be skipped even though its agys quota --json snapshot looks healthy')
+})
+
+test('resolveAgyProfile (async) skips a profile recorded as exhausted for the job model group', async () => {
+  const tmpDir = fs.mkdtempSync(path.join(os.tmpdir(), 'agent-hub-agys-exhaustion-async-'))
+  const env = { AGENT_HUB_HOME: tmpDir, AGENT_HUB_AGYS: 'auto' }
+  const fakeRunner = async (cmd, args) => (args[0] === '--version' ? { code: 0, stdout: 'agys v0.2.33', stderr: '' } : { code: 0, stdout: '', stderr: '' })
+  const fakeList = async () => [
+    { name: 'esp', active: true, priority: 0 },
+    { name: 'ita', active: false, priority: 0 },
+  ]
+  const fakeQuota = async () => ({
+    esp: { quota: { groups: [{ displayName: 'Claude and GPT models', buckets: [{ bucketId: '3p-5h', remainingFraction: 1 }] }] } },
+    ita: { quota: { groups: [{ displayName: 'Claude and GPT models', buckets: [{ bucketId: '3p-5h', remainingFraction: 1 }] }] } },
+  })
+
+  // Record with the REAL clock: resolveAgyProfile has no injectable `now`,
+  // so the exhaustion window must genuinely be in the future.
+  recordQuotaExhaustion({ profile: 'esp', modelGroup: 'claude-gpt', message: 'Resets in 1h0m0s.', env })
+
+  const res = await resolveAgyProfile({
+    env,
+    runCommandFn: fakeRunner,
+    listFn: fakeList,
+    quotaFn: fakeQuota,
+    model: 'claude-sonnet-4-6',
+  })
+  assert.equal(res.profile, 'ita')
+})
+
+test('recordQuotaExhaustion invalidates the sync profile cache so the next resolution re-reads the exhaustion store', () => {
+  const tmpDir = fs.mkdtempSync(path.join(os.tmpdir(), 'agent-hub-agys-exhaustion-invalidate-'))
+  const env = { AGENT_HUB_HOME: tmpDir, AGENT_HUB_AGYS: 'auto' }
+  let callCount = 0
+  const execFn = (cmd, args) => {
+    callCount++
+    if (args[0] === 'list') return REAL_SHAPE_LIST
+    if (args[0] === 'quota') return JSON.stringify(REAL_SHAPE_QUOTA)
+    return ''
+  }
+
+  resetSyncProfileCache()
+  const before = resolveAgyProfileSync({ env, execFn, model: 'claude-sonnet-4-6' })
+  assert.equal(before.profile, 'ita', 'esp is already exhausted per REAL_SHAPE_QUOTA fixture')
+  assert.equal(callCount, 2)
+
+  // Cached within TTL: a second call must not re-exec.
+  resolveAgyProfileSync({ env, execFn, model: 'claude-sonnet-4-6' })
+  assert.equal(callCount, 2)
+
+  // Recording a fresh exhaustion (e.g. ita also just 429'd) must invalidate
+  // the cache so the NEXT resolution re-reads the exhaustion store, instead
+  // of serving the stale cached 'ita' pick for up to SYNC_PROFILE_CACHE_TTL_MS.
+  recordQuotaExhaustion({ profile: 'ita', modelGroup: 'claude-gpt', message: 'Resets in 1h0m0s.', env, now: () => 0 })
+  resolveAgyProfileSync({ env, execFn, model: 'claude-sonnet-4-6' })
+  assert.equal(callCount, 4, 'the cache must have been invalidated, forcing a fresh list+quota exec')
 })
 

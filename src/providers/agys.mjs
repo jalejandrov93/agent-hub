@@ -1,8 +1,8 @@
 import child_process from 'node:child_process'
 import { runCommand as defaultRunCommand } from '../process.mjs'
-import { normalizeProfile, selectProfile, profileStateFor } from './profiles.mjs'
+import { normalizeProfile, selectProfile, profileStateFor, modelGroupFor } from './profiles.mjs'
 import { paths } from '../config.mjs'
-import { writeJsonAtomic, readJsonSafe } from '../fsutil.mjs'
+import { writeJsonAtomic, readJsonSafe, updateJsonLocked } from '../fsutil.mjs'
 
 /**
  * agys is an external Go CLI (~/.local/bin/agys) that isolates multi-account profiles
@@ -293,12 +293,96 @@ export function setAgysMode({ mode, profile = null } = {}, env = process.env) {
   return { mode, profile: effectiveProfile, source: 'setting' }
 }
 
+// Bounded default when a quota-exhausted provider error carries no parseable
+// "Resets in ..." duration: better to skip an account for an hour than to
+// keep hammering it (or to never recover it because we recorded no TTL).
+export const DEFAULT_EXHAUSTION_TTL_MS = 60 * 60 * 1000
+
+/**
+ * Parses a provider error message's "Resets in XhYmZs" (any subset of the
+ * three units) into milliseconds. Returns null when no such fragment is
+ * present, so the caller can fall back to DEFAULT_EXHAUSTION_TTL_MS.
+ */
+export function parseResetDurationMs(message) {
+  if (typeof message !== 'string') return null
+  const match = message.match(/Resets in\s+(?:(\d+)h)?\s*(?:(\d+)m)?\s*(?:(\d+)s)?/i)
+  if (!match) return null
+  const hours = Number(match[1] || 0)
+  const minutes = Number(match[2] || 0)
+  const seconds = Number(match[3] || 0)
+  if (!hours && !minutes && !seconds) return null
+  return ((hours * 60 + minutes) * 60 + seconds) * 1000
+}
+
+/**
+ * Records that `profile` is exhausted for `modelGroup` ('gemini' |
+ * 'claude-gpt') until the reset parsed from `message` (or
+ * DEFAULT_EXHAUSTION_TTL_MS when absent/unparseable). Persisted to
+ * AGENT_HUB_HOME/agys-exhaustion.json under a file lock, since several MCP
+ * processes may record/read this concurrently — see updateJsonLocked.
+ *
+ * Invalidates the sync profile cache (entirely, not just this group) so the
+ * very next resolveAgyProfileSync call sees the new exhaustion instead of
+ * serving a stale cached pick for up to SYNC_PROFILE_CACHE_TTL_MS.
+ */
+export function recordQuotaExhaustion({ profile, modelGroup, message, env = process.env, now = Date.now } = {}) {
+  if (typeof profile !== 'string' || !profile.trim() || typeof modelGroup !== 'string' || !modelGroup) {
+    return null
+  }
+  const resetAt = now() + (parseResetDurationMs(message) ?? DEFAULT_EXHAUSTION_TTL_MS)
+  const safeEnv = env || {}
+  const file = paths(safeEnv).agysExhaustionFile
+  updateJsonLocked(
+    file,
+    (current) => {
+      current[profile] = current[profile] || {}
+      current[profile][modelGroup] = { resetAt, message: typeof message === 'string' ? message : null }
+      return current
+    },
+    { defaultValue: {} }
+  )
+  resetSyncProfileCache()
+  return { profile, modelGroup, resetAt }
+}
+
+/** Raw { profile: { modelGroup: { resetAt, message } } } exhaustion store. */
+export function readQuotaExhaustion(env = process.env) {
+  return readJsonSafe(paths(env || {}).agysExhaustionFile, {})
+}
+
+/** True while `profile` is recorded as exhausted for `modelGroup` (resetAt in the future). */
+export function isProfileExhaustedFor({ profile, modelGroup, env = process.env, now = Date.now } = {}) {
+  if (!profile || !modelGroup) return false
+  const entry = readQuotaExhaustion(env)?.[profile]?.[modelGroup]
+  if (!entry || typeof entry.resetAt !== 'number') return false
+  return now() < entry.resetAt
+}
+
+/**
+ * True when `profile` should be skipped for `model` per the recorded quota
+ * exhaustion store — checked in addition to (not instead of) the
+ * `agys quota --json` derived state, since a just-recorded 429 may not have
+ * propagated to `agys quota --json` yet. An unrecognized model conservatively
+ * checks every group recorded for that profile.
+ */
+function isProfileExhaustedForModel(profileName, model, env, now) {
+  const modelGroup = modelGroupFor(model)
+  if (modelGroup) {
+    return isProfileExhaustedFor({ profile: profileName, modelGroup, env, now })
+  }
+  const entry = readQuotaExhaustion(env)?.[profileName]
+  if (!entry) return false
+  return Object.values(entry).some((g) => typeof g?.resetAt === 'number' && now() < g.resetAt)
+}
+
 export async function resolveAgyProfile({
   env = process.env,
   runCommandFn = defaultRunCommand,
   listFn,
   quotaFn,
   selectFn = selectProfile,
+  model = null,
+  now = Date.now,
 } = {}) {
   try {
     const safeEnv = env || {}
@@ -332,11 +416,14 @@ export async function resolveAgyProfile({
       const profiles = Array.isArray(rawProfiles) ? rawProfiles : []
       const candidates = profiles.map((p) => {
         const quotaEntry = quotaMap && typeof quotaMap === 'object' ? quotaMap[p.name] : null
-        const state = p?.state ?? profileStateFor({ profile: p, quotaEntry })
-        return { ...p, state }
+        let state = p?.state ?? profileStateFor({ profile: p, quotaEntry, model })
+        if (state !== 'exhausted' && state !== 'unavailable' && isProfileExhaustedForModel(p.name, model, safeEnv, now)) {
+          state = 'exhausted'
+        }
+        return { ...p, state, quotaEntry }
       })
 
-      const chosen = selectFn({ profiles: candidates })
+      const chosen = selectFn({ profiles: candidates, model })
       if (!chosen) {
         return { profile: null, status: null }
       }
@@ -364,6 +451,7 @@ export function resolveAgyProfileSync({
   execFn,
   cache = defaultSyncCache,
   now = Date.now,
+  model = null,
 } = {}) {
   try {
     const safeEnv = env || {}
@@ -378,7 +466,12 @@ export function resolveAgyProfileSync({
       return { profile, status: 'selected', profiles: [{ name: profile, status: 'selected' }] }
     }
 
-    const cacheKey = `agys:${modeInfo.mode}:${modeInfo.profile ?? ''}:${modeInfo.source}`
+    // The model GROUP (not the raw model id) is part of the cache key: two
+    // models in the same group (e.g. two gemini-* variants) may safely share
+    // a cached resolution, but a Gemini pick must never leak into a
+    // Claude/GPT resolution (or vice versa) — their exhaustion differs.
+    const modelGroup = modelGroupFor(model)
+    const cacheKey = `agys:${modeInfo.mode}:${modeInfo.profile ?? ''}:${modeInfo.source}:${modelGroup ?? 'unknown'}`
     if (cache && typeof cache.get === 'function') {
       const cached = cache.get(cacheKey)
       if (cached && typeof cached.expiresAt === 'number' && now() < cached.expiresAt) {
@@ -431,8 +524,11 @@ export function resolveAgyProfileSync({
 
     const candidates = profiles.map((p) => {
       const quotaEntry = quotaMap && typeof quotaMap === 'object' ? quotaMap[p.name] : null
-      const state = p?.state ?? profileStateFor({ profile: p, quotaEntry })
-      return { ...p, state }
+      let state = p?.state ?? profileStateFor({ profile: p, quotaEntry, model })
+      if (state !== 'exhausted' && state !== 'unavailable' && isProfileExhaustedForModel(p.name, model, safeEnv, now)) {
+        state = 'exhausted'
+      }
+      return { ...p, state, quotaEntry }
     })
 
     const annotatedProfiles = candidates.map((c) => ({
@@ -442,7 +538,7 @@ export function resolveAgyProfileSync({
 
     let chosen = null
     if (modeInfo.mode === 'auto') {
-      chosen = selectProfile({ profiles: candidates })
+      chosen = selectProfile({ profiles: candidates, model })
     }
 
     const result = {

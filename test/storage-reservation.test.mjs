@@ -72,6 +72,31 @@ for (const [label, makeCtx] of backends) {
     assert.equal(getDispatchReservation(ctx, 'dk-2').job_id, 'job-d')
   })
 
+  test(`releaseDispatchReservation (${label}): T2 conditional release with the wrong observed jobId keeps the row`, () => {
+    const ctx = makeCtx()
+
+    reserveDispatchKey(ctx, { dispatchKey: 'dk-cas', jobId: 'job-new-holder' })
+
+    // A dispatcher that observed a STALE holder (job-old-holder) must not
+    // delete the reservation once someone else has already taken it over.
+    const released = releaseDispatchReservation(ctx, 'dk-cas', 'job-old-holder')
+    assert.equal(released, false, "a conditional release with the wrong jobId must not delete the row")
+
+    const row = getDispatchReservation(ctx, 'dk-cas')
+    assert.ok(row, 'the new holder reservation must survive')
+    assert.equal(row.job_id, 'job-new-holder')
+  })
+
+  test(`releaseDispatchReservation (${label}): T2 conditional release with the matching observed jobId deletes the row`, () => {
+    const ctx = makeCtx()
+
+    reserveDispatchKey(ctx, { dispatchKey: 'dk-cas-2', jobId: 'job-stale-holder' })
+
+    const released = releaseDispatchReservation(ctx, 'dk-cas-2', 'job-stale-holder')
+    assert.equal(released, true, "a conditional release with the matching jobId must delete the row")
+    assert.equal(getDispatchReservation(ctx, 'dk-cas-2'), null)
+  })
+
   test(`reserveDispatchKey (${label}): a key is reserved even without a jobId`, () => {
     const ctx = makeCtx()
 
