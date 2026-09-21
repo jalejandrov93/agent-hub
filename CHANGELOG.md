@@ -8,6 +8,13 @@ and this project adheres to [Semantic Versioning](https://semver.org/).
 
 ### Added
 
+- Workflow verifier (`src/verify.mjs`): a delegate node can declare `verify`
+  checks (`argv` commands, `artifact` evidence existence, `forbid` diff scope)
+  and the engine records a `{ verified, required, checks }` verdict next to the
+  result — persisted as `artifacts/verification.json`, carried on
+  `job.finished`/`job.failed`, and mirrored onto the job record's `verified`
+  column (`required: true` makes a failed verdict fatal and skips the retry
+  loop).
 - Workflow evidence artifacts (`src/artifacts.mjs`): a delegate node can
   declare `artifacts: ['plan.md', ...]`, the engine creates
   `runs/<workflowId>/<stepId>/artifacts/`, tells the agent to write exactly
