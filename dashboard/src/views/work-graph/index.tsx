@@ -95,7 +95,7 @@ export function WorkGraphView() {
   return (
     <div className="flex flex-1 flex-col min-h-0 min-w-0 gap-3">
       <PageHeader
-        title="Work graph"
+        title="Worktree Map"
         description="Where each agent is working: repo trunk, nested worktrees, and the jobs running in them."
       />
 

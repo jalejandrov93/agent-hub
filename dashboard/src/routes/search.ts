@@ -36,7 +36,7 @@ export const ApprovalsSearch = z.object({
 export type ApprovalsSearchT = z.infer<typeof ApprovalsSearch>
 
 export const ConfigSearch = z.object({
-  section: z.enum(["delegation", "process", "breaker", "overrides", "paths"]).catch("delegation"),
+  section: z.enum(["delegation", "process", "breaker", "overrides", "paths", "tools"]).catch("delegation"),
 })
 export type ConfigSearchT = z.infer<typeof ConfigSearch>
 

@@ -111,7 +111,7 @@ export function GraphView() {
   return (
     <div className='flex flex-col gap-6'>
       <PageHeader
-        title='Execution graph'
+        title='Execution Tree'
         description='Tree view of multi-agent and workflow executions.'
       />
 

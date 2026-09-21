@@ -18,7 +18,6 @@ import { ApprovalsView } from "@/views/approvals"
 
 import { ConfigView } from "@/views/config"
 import { CloudView } from "@/views/cloud"
-import { ToolsView } from "@/views/tools"
 import {
   AgentsSearch,
   HistorySearch,
@@ -121,7 +120,12 @@ const cloudRoute = createRoute({
 const toolsRoute = createRoute({
   getParentRoute: () => rootRoute,
   path: "/tools",
-  component: ToolsView,
+  beforeLoad: () => {
+    throw redirect({
+      to: "/config",
+      search: { section: "tools" },
+    })
+  },
 })
 
 const routeTree = rootRoute.addChildren([

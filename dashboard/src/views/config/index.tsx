@@ -9,6 +9,7 @@ import { ProcessTab } from "./process-tab"
 import { BreakerTab } from "./breaker-tab"
 import { OverridesTab } from "./overrides-tab"
 import { PathsTab } from "./paths-tab"
+import { ToolsView } from "@/views/tools"
 
 export function ConfigView() {
   const search = useSearch({ strict: false }) as Record<string, unknown>
@@ -27,8 +28,8 @@ export function ConfigView() {
   return (
     <div id="config-panel" className="flex flex-1 flex-col gap-4">
       <PageHeader
-        title="Config"
-        description="Delegation map, timeouts, breaker, overrides, and process paths."
+        title="Settings"
+        description="Delegation map, timeouts, breaker, overrides, process paths, and MCP tools."
       />
 
       <Tabs value={section} onValueChange={handleTabChange} className="flex-1">
@@ -38,13 +39,20 @@ export function ConfigView() {
           <TabsTrigger value="breaker">Breaker & TTL</TabsTrigger>
           <TabsTrigger value="overrides">Overrides</TabsTrigger>
           <TabsTrigger value="paths">Paths</TabsTrigger>
+          <TabsTrigger value="tools">MCP Tools</TabsTrigger>
         </TabsList>
 
+        <TabsContent value="tools">
+          <ToolsView embedded />
+        </TabsContent>
+
         {isLoading || !config ? (
-          <div className="flex flex-col gap-4 py-4">
-            <Skeleton className="h-32 w-full" />
-            <Skeleton className="h-48 w-full" />
-          </div>
+          section !== "tools" ? (
+            <div className="flex flex-col gap-4 py-4">
+              <Skeleton className="h-32 w-full" />
+              <Skeleton className="h-48 w-full" />
+            </div>
+          ) : null
         ) : (
           <>
             <TabsContent value="delegation">

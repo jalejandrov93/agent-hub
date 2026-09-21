@@ -37,8 +37,8 @@ export function AppSidebar() {
                     <SidebarMenuItem key={item.name}>
                       <SidebarMenuButton
                         isActive={location.pathname === item.path}
-                        tooltip={item.label}
-                        render={<Link to={item.path} data-route={item.name} />}
+                        tooltip={item.tip}
+                        render={<Link to={item.path} data-route={item.name} title={item.tip} />}
                       >
                         <Icon />
                         <span>{item.label}</span>
