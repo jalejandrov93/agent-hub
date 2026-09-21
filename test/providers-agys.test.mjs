@@ -608,9 +608,15 @@ test('resolveAgyProfile returns null profile and status when mode is off', async
   assert.deepEqual(res, { profile: null, status: null })
 })
 
-test('resolveAgyProfile returns null profile and status when env is absent or empty', async () => {
-  const res = await resolveAgyProfile({ env: {} })
-  assert.deepEqual(res, { profile: null, status: null })
+test('resolveAgyProfile with the default mode and no reachable agys is unavailable, never a throw', async () => {
+  // The default mode is 'auto', so an env with no agys settings still probes
+  // agys. Inject an unreachable runner so the result does not depend on the
+  // machine (the real agys may or may not be installed).
+  const unreachable = async () => {
+    throw new Error('agys not available')
+  }
+  assert.deepEqual(await resolveAgyProfile({ env: {}, runCommandFn: unreachable }), { profile: null, status: 'unavailable' })
+  assert.deepEqual(await resolveAgyProfile({ env: null, runCommandFn: unreachable }), { profile: null, status: 'unavailable' })
 })
 
 test('resolveAgyProfile never throws on junk or errors', async () => {
@@ -618,7 +624,9 @@ test('resolveAgyProfile never throws on junk or errors', async () => {
     throw new Error('catastrophic failure')
   }
 
-  assert.deepEqual(await resolveAgyProfile({ env: null }), { profile: null, status: null })
+  // Explicit 'off' short-circuits without probing anything.
+  assert.deepEqual(await resolveAgyProfile({ env: { AGENT_HUB_AGYS: 'off' } }), { profile: null, status: null })
+  assert.deepEqual(await resolveAgyProfile({ env: null, runCommandFn: throwingRunner }), { profile: null, status: 'unavailable' })
   assert.deepEqual(await resolveAgyProfile({
     env: { AGENT_HUB_AGYS: 'auto' },
     runCommandFn: async () => ({ code: 0, stdout: 'agys v0.2.33', stderr: '' }),
