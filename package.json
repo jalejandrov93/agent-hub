@@ -2,7 +2,7 @@
   "name": "agent-hub-mcp",
   "version": "2.1.0",
   "description": "Local MCP server that delegates bounded tasks to other agent CLIs (agy, opencode, copilot) with preflight checks, an event log and a local dashboard.",
-  "license": "Apache-2.0",
+  "license": "MIT",
   "author": "jalejandrov93",
   "repository": {
     "type": "git",

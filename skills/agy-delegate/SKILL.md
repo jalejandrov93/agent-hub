@@ -6,7 +6,7 @@ description: >
   review via Claude Sonnet/Opus hosted inside Antigravity.
   Trigger: "agy", "antigravity", "gemini flash", "delegate this", "save tokens",
   "use my antigravity quota", "don't burn Claude", "cheap model", "second opinion".
-license: Apache-2.0
+license: MIT
 metadata:
   author: jalejandrov93
   version: "2.1"

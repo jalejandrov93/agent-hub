@@ -3,7 +3,7 @@
 > Local MCP orchestration layer for delegating bounded coding tasks across
 > multiple AI coding agents.
 
-![License](https://img.shields.io/badge/license-Apache--2.0-blue.svg)
+![License](https://img.shields.io/badge/license-MIT-blue.svg)
 ![Node](https://img.shields.io/badge/node-%3E%3D20.19-brightgreen.svg)
 ![MCP](https://img.shields.io/badge/MCP-server-6f42c1.svg)
 ![Version](https://img.shields.io/badge/version-2.1.0-informational.svg)
@@ -364,4 +364,4 @@ See [CONTRIBUTING.md](CONTRIBUTING.md).
 
 ## License
 
-[Apache-2.0](LICENSE)
+[MIT](LICENSE)
