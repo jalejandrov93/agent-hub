@@ -12,6 +12,8 @@ import { classifyError } from './policy/taxonomy.mjs'
 import { adapterFor as defaultAdapterFor } from './adapters/index.mjs'
 import { cancelJob as defaultCancelJob } from './jobrunner.mjs'
 import { resolveHarness, normalizeWaitMode } from './harness/registry.mjs'
+import { resolveAgyProfile } from './providers/agys.mjs'
+
 
 /** Terminal job statuses: only these count as a real terminal outcome. */
 export const TERMINAL_JOB_STATUSES = Object.freeze(['succeeded', 'failed', 'canceled'])
@@ -43,6 +45,7 @@ export function createExecutionHandle({ job, sessionId = null, env = process.env
   const handle = {
     jobId,
     sessionId: resolvedSessionId,
+    profile: job?.profile ?? null,
     job,
     remote: isRemote,
     _aborted: false,
@@ -365,6 +368,7 @@ export async function dispatch({
   policyForFn = policyFor,
   executeWithPolicyFn = executeWithPolicy,
   startJobFn = startJob,
+  resolveProfileFn = resolveAgyProfile,
   createJobFn = createJob,
   listJobsFn = listJobs,
   readResultFn = readResult,
@@ -382,12 +386,13 @@ export async function dispatch({
   cancelJobFn = defaultCancelJob,
   ...restDeps
 } = {}) {
+  const profileMemo = new Map()
   const resolvedWorkflowId = workflowId ?? restDeps.workflowId ?? restDeps.workflow_id ?? null
   const key = dispatchKey ?? computeDispatchKey({ task, cwd, taskType, workflowStep, workflowId: resolvedWorkflowId })
   // Harness profile + effective wait contract, resolved once per dispatch.
   // An explicit waitMode always wins over every profile default.
-  const profile = resolveHarness({ explicit: harness, env, clientHint })
-  const effectiveWaitMode = normalizeWaitMode(waitMode ?? profile.delegation.defaultWaitMode) ?? 'none'
+  const harnessProfile = resolveHarness({ explicit: harness, env, clientHint })
+  const effectiveWaitMode = normalizeWaitMode(waitMode ?? harnessProfile.delegation.defaultWaitMode) ?? 'none'
   // Observes a dispatch result per the effective waitMode. Single funnel:
   // every return path below goes through here, so harness/waitMode travel
   // on the result and 'none' keeps the historical create/start-and-return
@@ -450,7 +455,7 @@ export async function dispatch({
       sessionId: handle.sessionId,
       abort: (...args) => handle.abort(...args),
       __handle: handle,
-      harness: profile.id,
+      harness: harnessProfile.id,
       waitMode: effectiveWaitMode,
     }
     return observeWithMode(base)
@@ -619,7 +624,7 @@ export async function dispatch({
           parent_execution_id: parentExecutionId,
           root_execution_id: rootExecId,
           env,
-          harness: profile.id,
+          harness: harnessProfile.id,
           waitMode: effectiveWaitMode,
         })
         recentDispatches.set(key, { job: adoptedJob, timestamp: nowFn() })
@@ -709,6 +714,31 @@ export async function dispatch({
           env,
         })
 
+        let profile = null
+        let profileStatus = null
+
+        if (candidate?.agent === 'agy') {
+          if (!profileMemo.has(candidate.agent)) {
+            try {
+              const res = await resolveProfileFn({ env })
+              if (res && typeof res === 'object') {
+                const p = typeof res.profile === 'string' && res.profile.trim() !== '' ? res.profile.trim() : null
+                const s = typeof (res.profileStatus ?? res.status) === 'string' && (res.profileStatus ?? res.status).trim() !== ''
+                  ? (res.profileStatus ?? res.status).trim()
+                  : null
+                profileMemo.set(candidate.agent, { profile: p, profileStatus: p ? s : null })
+              } else {
+                profileMemo.set(candidate.agent, { profile: null, profileStatus: null })
+              }
+            } catch {
+              profileMemo.set(candidate.agent, { profile: null, profileStatus: null })
+            }
+          }
+          const memoEntry = profileMemo.get(candidate.agent)
+          profile = memoEntry?.profile ?? null
+          profileStatus = memoEntry?.profileStatus ?? null
+        }
+
         const startResult = await startJobFn({
           agent: candidate.agent,
           model: candidate.model,
@@ -730,8 +760,10 @@ export async function dispatch({
           resumed: activeCtx.resumed,
           env,
           ...restDeps,
+          profile,
+          profileStatus,
           // Resolved contract always wins over caller extras.
-          harness: profile.id,
+          harness: harnessProfile.id,
           waitMode: effectiveWaitMode,
         })
 
