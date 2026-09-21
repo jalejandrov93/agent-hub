@@ -117,8 +117,10 @@ function lastUsedRank(profile, usage) {
   return Number.isFinite(parsed) ? parsed : -Infinity
 }
 
+// agys documents 'higher number = higher priority', so sort descending:
+// b.priority - a.priority ensures the highest priority number is preferred first.
 function byPriority(a, b) {
-  return (a.normalized.priority ?? 0) - (b.normalized.priority ?? 0)
+  return (b.normalized.priority ?? 0) - (a.normalized.priority ?? 0)
 }
 
 function byName(a, b) {

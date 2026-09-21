@@ -30,9 +30,9 @@ import {
 
 const FIXTURE_AGYS_LIST = `Active Profiles:
 PROFILE          PRIO  EMAIL                CONFIG  PATH
-work (default)   0     work@company.com     (-)     ~/.agys/profiles/work
+work (default)   2     work@company.com     (-)     ~/.agys/profiles/work
 personal         1     user@gmail.com       (-)     ~/.agys/profiles/personal
-backup           2     (-)                  (-)     ~/.agys/profiles/backup
+backup           0     (-)                  (-)     ~/.agys/profiles/backup
 `
 
 const FIXTURE_AGYS_QUOTA = [
@@ -227,10 +227,18 @@ test('selectProfile supports priority, least_used, and round_robin policies', ()
   const p2 = { name: 'p2', priority: 0, active: false }
   const p3 = { name: 'p3', priority: 2, active: false }
 
-  // priority: lowest priority number wins
+  // priority: highest priority number wins (agys documents 'higher number = higher priority')
   assert.equal(
     selectProfile({ profiles: [p1, p2, p3], policy: 'priority' })?.name,
-    'p2'
+    'p3'
+  )
+
+  // priority 5 vs 10: 10 wins
+  const pLow = { name: 'low', priority: 5, active: false }
+  const pHigh = { name: 'high', priority: 10, active: false }
+  assert.equal(
+    selectProfile({ profiles: [pLow, pHigh], policy: 'priority' })?.name,
+    'high'
   )
 
   // least_used: lowest usage wins
@@ -300,7 +308,7 @@ test('parseAgysList parses fixture and handles spacing, (default), and (-)', () 
     name: 'work',
     email: 'work@company.com',
     active: true,
-    priority: 0,
+    priority: 2,
     path: '~/.agys/profiles/work',
   })
 
@@ -316,7 +324,7 @@ test('parseAgysList parses fixture and handles spacing, (default), and (-)', () 
     name: 'backup',
     email: null,
     active: false,
-    priority: 2,
+    priority: 0,
     path: '~/.agys/profiles/backup',
   })
 
@@ -560,7 +568,7 @@ test('resolveAgyProfile in auto mode selects active or fallback profile using in
   }
 
   const fakeList = async () => [
-    { name: 'work', active: true, priority: 0 },
+    { name: 'work', active: true, priority: 2 },
     { name: 'backup', active: false, priority: 1 }
   ]
 
@@ -737,7 +745,7 @@ test('resolveAgyProfileSync memoizes results so a counting execFn is called at m
   assert.equal(callCount, 4) // 2 more calls
 })
 
-test('getAgysMode respects precedence: env profile -> env auto -> env off -> setting -> default off', () => {
+test('getAgysMode respects precedence: env profile -> env auto -> env off -> setting -> default auto', () => {
   const tmpDir = fs.mkdtempSync(path.join(os.tmpdir(), 'agent-hub-agys-mode-test-'))
   const envHome = { AGENT_HUB_HOME: tmpDir }
 
@@ -778,19 +786,47 @@ test('getAgysMode respects precedence: env profile -> env auto -> env off -> set
     source: 'setting',
   })
 
-  // 5. Missing / corrupt file -> default off
+  // 5. Missing / corrupt file -> default auto
   fs.writeFileSync(settingPath, 'corrupted not json {{{')
   assert.deepEqual(getAgysMode(envHome), {
-    mode: 'off',
+    mode: 'auto',
     profile: null,
     source: 'default',
   })
 
   fs.unlinkSync(settingPath)
   assert.deepEqual(getAgysMode(envHome), {
-    mode: 'off',
+    mode: 'auto',
     profile: null,
     source: 'default',
+  })
+})
+
+test('getAgysMode default is auto: no env and no settings -> auto; env off -> off; setting off -> off', () => {
+  const tmpDir = fs.mkdtempSync(path.join(os.tmpdir(), 'agent-hub-agys-default-test-'))
+  const envHome = { AGENT_HUB_HOME: tmpDir }
+
+  // no env and no settings file -> mode 'auto', source 'default'
+  assert.deepEqual(getAgysMode(envHome), {
+    mode: 'auto',
+    profile: null,
+    source: 'default',
+  })
+
+  // env AGENT_HUB_AGYS=off -> off
+  assert.deepEqual(getAgysMode({ ...envHome, AGENT_HUB_AGYS: 'off' }), {
+    mode: 'off',
+    profile: null,
+    source: 'env',
+  })
+
+  // a settings file with mode off -> off
+  const settingPath = path.join(tmpDir, 'agys-mode.json')
+  fs.writeFileSync(settingPath, JSON.stringify({ mode: 'off' }))
+  assert.deepEqual(getAgysMode(envHome), {
+    mode: 'off',
+    profile: null,
+    source: 'setting',
   })
 })
 
@@ -866,9 +902,9 @@ test('agysProfilesSnapshot reports mode, source and pinnedProfile from getAgysMo
     return { code: 0, stdout: '', stderr: '' }
   }
 
-  // Default mode off
+  // Default mode auto
   const snap1 = await agysProfilesSnapshot({ env, runCommandFn: fakeRunner })
-  assert.equal(snap1.mode, 'off')
+  assert.equal(snap1.mode, 'auto')
   assert.equal(snap1.source, 'default')
   assert.equal(snap1.pinnedProfile, null)
 

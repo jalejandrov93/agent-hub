@@ -107,8 +107,12 @@ export async function agentInboxTool({
   unreadOnly = true,
   env = process.env,
 } = {}) {
+  if (!rootExecutionId || typeof rootExecutionId !== 'string' || rootExecutionId.trim().length === 0) {
+    return { ok: false, error: 'rootExecutionId is required' }
+  }
+
   const ctx = getDb(env)
-  const rows = listAgentMessages(ctx, { to, rootExecutionId, unreadOnly })
+  const rows = listAgentMessages(ctx, { to, rootExecutionId: rootExecutionId.trim(), unreadOnly })
   const now = new Date().toISOString()
 
   for (const r of rows) {

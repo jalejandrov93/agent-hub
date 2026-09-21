@@ -261,7 +261,7 @@ test('startJob passes {model,prompt,cwd,mode,timeoutS} through the REAL adapterF
   ]
 
   for (const c of cases) {
-    const { done } = startJob({ agent: c.agent, model: c.model, task: 'hi', cwd: c.cwd, mode: c.mode, adapterFor, spawn })
+    const { done } = startJob({ agent: c.agent, model: c.model, task: 'hi', cwd: c.cwd, mode: c.mode, adapterFor, spawn, env: { ...process.env, AGENT_HUB_AGYS: 'off' } })
     await done
   }
 

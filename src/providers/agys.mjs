@@ -266,9 +266,9 @@ export function getAgysMode(env = process.env) {
       }
     }
 
-    return { mode: 'off', profile: null, source: 'default' }
+    return { mode: 'auto', profile: null, source: 'default' }
   } catch {
-    return { mode: 'off', profile: null, source: 'default' }
+    return { mode: 'auto', profile: null, source: 'default' }
   }
 }
 
