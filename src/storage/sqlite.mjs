@@ -383,6 +383,41 @@ function jsonTouchWorkflowNode(stateHome, { workflowId, stepId, at }) {
   return touched
 }
 
+/**
+ * T1: orphan reclaim as compare-and-set (JSON backend). Same semantics as
+ * RECLAIM_ORPHANED_WORKFLOW_NODE_SQL: release to READY only inside one
+ * critical section, and only if the row still matches the observed
+ * status/owner/updated_at. Uses updateJsonLocked directly (like
+ * touchWorkflowNode/reserveDispatchKey) — never nest with mutateJsonStore.
+ */
+function jsonReclaimOrphanedWorkflowNode(stateHome, { workflowId, stepId, expectedStatus, expectedClaimedBy, expectedUpdatedAt }) {
+  const key = `${workflowId}:${stepId}`
+  let released = false
+  updateJsonLocked(
+    jsonStoragePath(stateHome),
+    (store) => {
+      store.workflow_nodes = store.workflow_nodes || {}
+      const existing = store.workflow_nodes[key]
+      if (
+        !existing ||
+        existing.status !== expectedStatus ||
+        existing.claimed_by !== expectedClaimedBy ||
+        existing.updated_at !== expectedUpdatedAt
+      ) {
+        return store
+      }
+      existing.status = 'ready'
+      existing.claimed_by = null
+      existing.updated_at = new Date().toISOString()
+      existing.updatedAt = existing.updated_at
+      released = true
+      return store
+    },
+    { defaultValue: defaultJsonStore() }
+  )
+  return released
+}
+
 function jsonListContextEntries(stateHome, workflowId, stepId = null) {
   const store = readJsonStore(stateHome)
   const entries = store.task_context || []
@@ -691,6 +726,25 @@ WHERE workflow_id = @workflow_id
   AND (claimed_by IS NULL OR claimed_by = '' OR claimed_by = @claimed_by)
 `
 
+/**
+ * T1: orphan reclaim as compare-and-set. Releases a node back to READY only
+ * if the row still has the exact status/owner/updated_at that justified the
+ * reclaim decision. A peer that reclaimed AND re-claimed the node between our
+ * read and this write leaves a row that no longer matches, so this is a
+ * no-op (changes = 0) instead of clobbering the fresh claim.
+ */
+const RECLAIM_ORPHANED_WORKFLOW_NODE_SQL = `
+UPDATE workflow_nodes
+SET status = 'ready',
+    claimed_by = NULL,
+    updated_at = @updated_at
+WHERE workflow_id = @workflow_id
+  AND step_id = @step_id
+  AND status = @expected_status
+  AND claimed_by = @expected_claimed_by
+  AND updated_at = @expected_updated_at
+`
+
 const PUBLISH_READY_SQL = `
 UPDATE workflow_nodes
 SET status = 'ready',
@@ -901,6 +955,18 @@ function sqliteTouchWorkflowNode(db, { workflowId, stepId, at }) {
     workflow_id: workflowId,
     step_id: stepId,
     updated_at: at ?? new Date().toISOString(),
+  })
+  return info.changes > 0
+}
+
+function sqliteReclaimOrphanedWorkflowNode(db, { workflowId, stepId, expectedStatus, expectedClaimedBy, expectedUpdatedAt }) {
+  const info = db.prepare(RECLAIM_ORPHANED_WORKFLOW_NODE_SQL).run({
+    workflow_id: workflowId,
+    step_id: stepId,
+    expected_status: expectedStatus,
+    expected_claimed_by: expectedClaimedBy,
+    expected_updated_at: expectedUpdatedAt,
+    updated_at: new Date().toISOString(),
   })
   return info.changes > 0
 }
@@ -1228,6 +1294,23 @@ export function touchWorkflowNode(ctx, { workflowId, stepId, at }) {
   }
   const home = normalizeHome(ctx?.stateHome)
   return jsonTouchWorkflowNode(home, { workflowId, stepId, at })
+}
+
+/**
+ * T1: orphan reclaim as compare-and-set. Releases a RUNNING/WAITING node
+ * back to READY (claimed_by = null) ONLY IF the row still has the exact
+ * status/owner/updated_at that justified the reclaim. Returns false and
+ * changes nothing when another process already reclaimed and re-claimed the
+ * node — the caller (reclaimOrphanedNode) must not treat that as success.
+ * @returns {boolean} true if this call released the node
+ */
+export function reclaimOrphanedWorkflowNode(ctx, { workflowId, stepId, expectedStatus, expectedClaimedBy, expectedUpdatedAt }) {
+  if (!ctx) return false
+  if (ctx.backend === 'sqlite') {
+    return sqliteReclaimOrphanedWorkflowNode(ctx.db, { workflowId, stepId, expectedStatus, expectedClaimedBy, expectedUpdatedAt })
+  }
+  const home = normalizeHome(ctx?.stateHome)
+  return jsonReclaimOrphanedWorkflowNode(home, { workflowId, stepId, expectedStatus, expectedClaimedBy, expectedUpdatedAt })
 }
 
 /**

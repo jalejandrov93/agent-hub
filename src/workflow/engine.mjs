@@ -20,6 +20,7 @@ import {
   claimWorkflowNode,
   publishWorkflowNodeReady,
   touchWorkflowNode,
+  reclaimOrphanedWorkflowNode,
 } from '../storage/index.mjs'
 import { appendEvent } from '../eventlog.mjs'
 import { resolveHarness } from '../harness/registry.mjs'
@@ -191,9 +192,18 @@ function finalizeCanceledNode(ctx, { workflow, node, nodeStates, attempt, revisi
  * a peer that dies mid-run is reclaimed as soon as its lease expires, which is
  * what bounds the scheduler wait.
  *
+ * The write itself is a compare-and-set (T1): it only releases the row when
+ * it STILL has the exact status/owner/updated_at that justified the reclaim.
+ * `transitionNode` would re-read the CURRENT row for its own validity check
+ * and then UPSERT unconditionally — so if a peer (P1) reclaimed AND
+ * re-claimed the node between our read and this write, that unconditional
+ * UPSERT would happily overwrite P1's fresh claim (RUNNING -> READY is a
+ * legal transition either way). The CAS below makes a lost race a no-op
+ * instead.
+ *
  * @returns {boolean} true when the node was released back to READY.
  */
-function reclaimOrphanedNode(ctx, { workflowId, stepId, row, claimedBy, ownerAlive, hasExplicitProbe, leaseTtlMs }) {
+export function reclaimOrphanedNode(ctx, { workflowId, stepId, row, claimedBy, ownerAlive, hasExplicitProbe, leaseTtlMs }) {
   if (!row || isTerminalStatus(row.status)) return false
   if (row.status !== NODE_STATUS.RUNNING && row.status !== NODE_STATUS.WAITING) return false
   const owner = row.claimed_by
@@ -206,8 +216,17 @@ function reclaimOrphanedNode(ctx, { workflowId, stepId, row, claimedBy, ownerAli
   // signal there is, so expiry is what marks the owner gone.
   const ownerConfirmedDead = hasExplicitProbe ? !ownerAlive(owner, claimedBy) : true
   if (!leaseExpired || !ownerConfirmedDead) return false
-  transitionNode(ctx, { workflowId, stepId, to: NODE_STATUS.READY, attempt: row.attempt, claimedBy: null })
-  return true
+  // Static validity check: we already know row.status is RUNNING or WAITING,
+  // both of which can legally transition to READY. This does not re-read the
+  // row — the CAS below is the only thing allowed to decide based on live state.
+  assertValidTransition(row.status, NODE_STATUS.READY, stepId)
+  return reclaimOrphanedWorkflowNode(ctx, {
+    workflowId,
+    stepId,
+    expectedStatus: row.status,
+    expectedClaimedBy: owner,
+    expectedUpdatedAt: row.updated_at,
+  })
 }
 
 /**
