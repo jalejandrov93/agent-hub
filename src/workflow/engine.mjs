@@ -125,7 +125,7 @@ export function claimNode(ctx, { workflowId, stepId, claimedBy, attempt }) {
 /**
  * C1.1: vía para el resto de transiciones. Always asserts validity first.
  */
-export function transitionNode(ctx, { workflowId, stepId, from, to, attempt, resultJson = null, claimedBy = null }) {
+export function transitionNode(ctx, { workflowId, stepId, from, to, attempt, resultJson = null, claimedBy }) {
   const row = getWorkflowNode(ctx, workflowId, stepId)
   const current = from ?? row?.status
   assertValidTransition(current, to, stepId)
@@ -136,7 +136,7 @@ export function transitionNode(ctx, { workflowId, stepId, from, to, attempt, res
     status: to,
     attempt: attempt ?? row?.attempt ?? 0,
     updated_at: now,
-    claimed_by: claimedBy ?? row?.claimed_by ?? null,
+    claimed_by: claimedBy === undefined ? (row?.claimed_by ?? null) : claimedBy,
     ...(resultJson !== null ? { result_json: resultJson } : {}),
   })
   return getWorkflowNode(ctx, workflowId, stepId)
@@ -1147,6 +1147,7 @@ export async function runWorkflow({
     }
 
     // 4. Parallel wave execution via Promise.all
+    let claimedAny = false
     await Promise.all(
       readyNodes.map(async (node) => {
         // Publish PENDING -> READY through a CONDITIONAL update (only from
@@ -1170,6 +1171,7 @@ export async function runWorkflow({
           // Another scheduler already claimed or executed this node
           return
         }
+        claimedAny = true
 
         nodeStates.set(node.id, {
           ...nodeStates.get(node.id),
@@ -1196,6 +1198,11 @@ export async function runWorkflow({
         })
       })
     )
+
+    // A whole ready wave that nobody could claim means another scheduler owns
+    // those nodes (or a stale claim blocks the CAS). Yield instead of spinning:
+    // without this the loop burns CPU at 100% until the claim frees up.
+    if (!claimedAny) await sleep(pollIntervalMs)
   }
 
   refreshNodeStates(dbCtx, workflow.id, nodeStates)
