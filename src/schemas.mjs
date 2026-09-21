@@ -138,7 +138,6 @@ export const JobRecord = z
     root_execution_id: z.string().nullable().optional(),
     attempt: z.number().int().nullable().optional(),
     remote_state: z.string().nullable().optional(),
-    quality_score: z.number().nullable().optional(),
     verified: z.boolean().nullable().optional(),
     judge_verdict: z.string().nullable().optional(),
     revision: z.number().int().nonnegative().nullable().optional(),
