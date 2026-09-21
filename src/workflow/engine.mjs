@@ -23,6 +23,7 @@ import { calculateDispatchTimeoutS, dispatch, waitExecution as defaultWaitExecut
 import { readResult as readJobResult, updateResult } from '../jobstore.mjs'
 import { runVerification, normalizeVerifyConfig } from '../verify.mjs'
 import { judgeVerdict } from '../judge.mjs'
+import { buildRevisionFeedback } from '../revision.mjs'
 import { createWorkflow } from './schema.mjs'
 import { NODE_STATUS, WAITING_REASONS, isTerminalStatus, assertValidTransition } from './state.mjs'
 import { resolveDependencies, evaluateCondition } from './resolver.mjs'
@@ -202,6 +203,7 @@ async function executeNode({
   let attempt = nodeStates.get(node.id)?.attempt || 1
   const maxRevisionAttempts = Number.isInteger(node.maxRevisionAttempts) && node.maxRevisionAttempts > 0 ? node.maxRevisionAttempts : 0
   let revision = 0
+  let revisionFeedback = ''
   let lastError = null
   const readRecord = readResultFn ?? ((jobId) => readJobResult(jobId, env))
   // Harness defaults from env for the started event (emitted before the
@@ -242,6 +244,9 @@ async function executeNode({
           throw new Error('unresolved artifact ref: ' + resolved.missing[0])
         }
         let dispatchedTask = resolved.text
+        if (revisionFeedback) {
+          dispatchedTask = revisionFeedback + '\n\n' + dispatchedTask
+        }
         if (declared.length > 0) {
           const dir = artifactsDir({ workflowId: workflow.id, stepId: node.id }, env)
           fs.mkdirSync(dir, { recursive: true })
@@ -529,6 +534,7 @@ async function executeNode({
     } catch (err) {
       lastError = err
       if (err.code === 'REVISION_REQUESTED' && revision < maxRevisionAttempts) {
+        revisionFeedback = buildRevisionFeedback({ judge: err.judge, verification: err.verification })
         revision++
         attempt = 1
         upsertWorkflowNode(ctx, {

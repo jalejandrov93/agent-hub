@@ -41,8 +41,10 @@ test('engine judge: revision then accept writes judge.json/verification.json and
   }
 
   let dispatchCalls = 0
-  const mockDispatch = async () => {
+  const dispatchedTasks = []
+  const mockDispatch = async (params) => {
     dispatchCalls++
+    dispatchedTasks.push(params?.task)
     return { success: true }
   }
 
@@ -56,6 +58,10 @@ test('engine judge: revision then accept writes judge.json/verification.json and
   assert.equal(result.status, 'succeeded')
   assert.equal(result.nodes.step1.status, 'succeeded')
   assert.equal(dispatchCalls, 3, 'dispatchFn must be called EXACTLY 3 times')
+  assert.equal(dispatchedTasks.length, 3)
+  assert.equal(dispatchedTasks[0].includes('<agent-hub-revision>'), false, 'first dispatch must not have feedback')
+  assert.equal(dispatchedTasks[1].includes('<agent-hub-revision>'), true, 'second dispatch must have feedback')
+  assert.equal(dispatchedTasks[1].includes('tests'), true, 'second dispatch must include failed check name')
   assert.equal(result.nodes.step1.judge.verdict, 'accepted')
 
   const judgeJsonPath = artifactPath({ workflowId: workflow.id, stepId: 'step1', name: 'judge.json' }, env)
