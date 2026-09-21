@@ -239,3 +239,12 @@ export function useCreateLearningMutation() {
     onSuccess: () => queryClient.invalidateQueries({ queryKey: qk.learnings }),
   })
 }
+
+export function useExecutionGraphQuery(root?: string | null) {
+  return useQuery({
+    queryKey: qk.executionGraph(root),
+    queryFn: () => api.getExecutionGraph(root),
+    refetchInterval: STATE_REFETCH_INTERVAL_MS,
+  })
+}
+

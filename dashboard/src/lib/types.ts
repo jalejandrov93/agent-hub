@@ -185,3 +185,31 @@ export type WorkGraphAnyNode =
   | WorkGraphJobNode
   | WorkGraphRemoteBranchNode
   | WorkGraphOutsideNode
+
+export type ExecutionGraphNodeT = {
+  id: string
+  jobId: string | null
+  agent: string | null
+  model: string | null
+  status: string | null
+  workflow_id: string | null
+  step_id: string | null
+  attempt: number | null
+  parent: string | null
+  root: string | null
+  relation: string
+}
+
+
+export type ExecutionGraphEdgeT = {
+  from: string
+  to: string
+  relation: string
+}
+
+export type ExecutionGraphResponseT = {
+  roots: string[]
+  nodes: Record<string, ExecutionGraphNodeT>
+  edges: ExecutionGraphEdgeT[]
+}
+
