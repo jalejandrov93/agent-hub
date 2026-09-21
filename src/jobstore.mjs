@@ -3,7 +3,7 @@ import path from 'node:path'
 import crypto from 'node:crypto'
 import { paths } from './config.mjs'
 import { updateJsonLocked } from './fsutil.mjs'
-import { getDb, upsertJob } from './storage/index.mjs'
+import { getDb, upsertJob, getJob } from './storage/index.mjs'
 
 function ensureDir(dir) {
   fs.mkdirSync(dir, { recursive: true })
@@ -199,13 +199,99 @@ export function createJob({
   return result
 }
 
-export function readResult(jobId, env = process.env) {
+const COMPARE_FIELDS = ['jobId', 'status', 'updatedAt', 'verified', 'judge_verdict', 'revision']
+
+export const _warnedDivergentJobIds = new Set()
+
+function readJsonResult(jobId, env = process.env) {
   try {
     return JSON.parse(fs.readFileSync(resultPath(jobId, env), 'utf8'))
   } catch (error) {
     if (error.code === 'ENOENT') throw new Error(`job not found: ${jobId}`)
     throw error
   }
+}
+
+export function compareJobReadPaths(jobId, env = process.env) {
+  let json = null
+  try {
+    json = JSON.parse(fs.readFileSync(resultPath(jobId, env), 'utf8'))
+  } catch {
+    json = null
+  }
+
+  let sqlite = null
+  try {
+    const ctx = getDb(env)
+    if (ctx) {
+      const row = getJob(ctx, jobId)
+      if (row?.result_json) {
+        sqlite = typeof row.result_json === 'string' ? JSON.parse(row.result_json) : row.result_json
+      }
+    }
+  } catch {
+    sqlite = null
+  }
+
+  const divergences = []
+  if (!json && !sqlite) {
+    return { json: null, sqlite: null, divergences: [] }
+  }
+
+  if (json && !sqlite) {
+    for (const field of COMPARE_FIELDS) {
+      divergences.push({ field, json: json[field] ?? null, sqlite: null })
+    }
+    return { json, sqlite: null, divergences }
+  }
+
+  if (!json && sqlite) {
+    for (const field of COMPARE_FIELDS) {
+      divergences.push({ field, json: null, sqlite: sqlite[field] ?? null })
+    }
+    return { json: null, sqlite, divergences }
+  }
+
+  for (const field of COMPARE_FIELDS) {
+    const jsonVal = json[field] ?? null
+    const sqliteVal = sqlite[field] ?? null
+    if (jsonVal !== sqliteVal) {
+      divergences.push({ field, json: json[field], sqlite: sqlite[field] })
+    }
+  }
+
+  return { json, sqlite, divergences }
+}
+
+export function readResult(jobId, env = process.env) {
+  const storeMode = env?.AGENT_HUB_STORE || 'json'
+
+  if (storeMode === 'sqlite') {
+    assertValidJobId(jobId)
+    const ctx = getDb(env)
+    if (ctx) {
+      try {
+        const row = getJob(ctx, jobId)
+        if (row?.result_json) {
+          return typeof row.result_json === 'string' ? JSON.parse(row.result_json) : row.result_json
+        }
+      } catch {
+        // fall back to JSON file below
+      }
+    }
+    return readJsonResult(jobId, env)
+  }
+
+  if (storeMode === 'shadow') {
+    const comparison = compareJobReadPaths(jobId, env)
+    if (comparison.divergences.length > 0 && !_warnedDivergentJobIds.has(jobId)) {
+      _warnedDivergentJobIds.add(jobId)
+      console.warn(`[agent-hub] job read divergence for ${jobId}:`, comparison.divergences)
+    }
+    return readJsonResult(jobId, env)
+  }
+
+  return readJsonResult(jobId, env)
 }
 
 /**
@@ -234,6 +320,8 @@ export function updateResult(jobId, patchOrUpdater, env = process.env) {
   })
 }
 
+// listJobs behaviour stays JSON (scanning runs/ directories and reading result.json).
+// SQLite is coordination state; job listing cutover is deferred (C0.1.1).
 export function listJobs(env = process.env) {
   const { runsDir } = paths(env)
   let entries
@@ -248,7 +336,7 @@ export function listJobs(env = process.env) {
   for (const entry of entries) {
     if (!entry.isDirectory() || entry.name === '.locks') continue
     try {
-      jobs.push(readResult(entry.name, env))
+      jobs.push(readJsonResult(entry.name, env))
     } catch {
       // skip a job directory without a readable result.json
     }
