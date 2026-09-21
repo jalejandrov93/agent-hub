@@ -2,6 +2,7 @@ export {
   initDb,
   upsertJob,
   getJob,
+  listJobIds,
   upsertLease,
   deleteLease,
   getLease,

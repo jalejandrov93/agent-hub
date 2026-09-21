@@ -139,6 +139,11 @@ function jsonGetJob(stateHome, jobId) {
   return store.jobs?.[jobId] ?? null
 }
 
+function jsonListJobIds(stateHome) {
+  const store = readJsonStore(stateHome)
+  return Object.keys(store.jobs || {})
+}
+
 function jsonUpsertLease(stateHome, row) {
   const store = readJsonStore(stateHome)
   store.leases = store.leases || {}
@@ -431,6 +436,7 @@ ON CONFLICT(job_id) DO UPDATE SET
 `
 
 const GET_JOB_SQL = `SELECT * FROM jobs WHERE job_id = ?`
+const LIST_JOB_IDS_SQL = `SELECT job_id FROM jobs`
 
 const UPSERT_LEASE_SQL = `
 INSERT INTO leases (job_id, owner, expires_at)
@@ -581,6 +587,11 @@ function sqliteUpsertJob(db, row) {
 
 function sqliteGetJob(db, jobId) {
   return db.prepare(GET_JOB_SQL).get(jobId) ?? null
+}
+
+function sqliteListJobIds(db) {
+  const rows = db.prepare(LIST_JOB_IDS_SQL).all()
+  return rows.map((r) => r.job_id)
 }
 
 function sqliteUpsertLease(db, row) {
@@ -766,6 +777,19 @@ export function getJob(ctx, jobId) {
   }
   const home = normalizeHome(ctx?.stateHome)
   return jsonGetJob(home, jobId)
+}
+
+/**
+ * List all job IDs.
+ * @param {{ db: import('better-sqlite3').Database | null, backend: 'sqlite' | 'json', stateHome?: string }} ctx
+ * @returns {string[]}
+ */
+export function listJobIds(ctx) {
+  if (ctx.backend === 'sqlite') {
+    return sqliteListJobIds(ctx.db)
+  }
+  const home = normalizeHome(ctx?.stateHome)
+  return jsonListJobIds(home)
 }
 
 /**
