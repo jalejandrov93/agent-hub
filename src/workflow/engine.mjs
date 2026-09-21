@@ -199,8 +199,12 @@ function reclaimOrphanedNode(ctx, { workflowId, stepId, row, claimedBy, ownerAli
   if (!owner || owner === claimedBy) return false
   const updatedAt = Date.parse(row.updated_at ?? '') || 0
   const leaseExpired = updatedAt > 0 && Date.now() - updatedAt > leaseTtlMs
-  const ownerDead = hasExplicitProbe ? !ownerAlive(owner, claimedBy) : false
-  if (!leaseExpired && !ownerDead) return false
+  // With an explicit probe the owner's liveness is authoritative: an expired
+  // lease alone never takes a node from an owner that still answers (see
+  // test/chaos/chaos.test.mjs "chaos 3"). Without a probe the lease is the only
+  // signal there is, so expiry is what marks the owner gone.
+  const ownerConfirmedDead = hasExplicitProbe ? !ownerAlive(owner, claimedBy) : true
+  if (!leaseExpired || !ownerConfirmedDead) return false
   transitionNode(ctx, { workflowId, stepId, to: NODE_STATUS.READY, attempt: row.attempt, claimedBy: null })
   return true
 }
