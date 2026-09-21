@@ -1,6 +1,7 @@
 import { readTail } from '../eventlog.mjs'
 import { watchEvents } from './watch.mjs'
 import { routeEvent, consoleAdapter, createFileAdapter, createWebhookAdapter } from './adapters.mjs'
+import { deliverCompletion } from '../harness/lifecycle.mjs'
 
 function usageError(message) {
   console.error(`agent-hub watch: ${message}`)
@@ -75,6 +76,20 @@ export async function runWatchCli(args, { env = process.env } = {}) {
   const dispatch = async (event) => {
     if (!routeEvent(event)) return
     routed++
+    const kind = event?.kind
+    const jobId = event?.jobId ?? event?.record?.jobId ?? null
+    if (kind === 'job.finished' || kind === 'job.failed' || (kind === 'workflow.completed' && jobId)) {
+      try {
+        await deliverCompletion({
+          jobId,
+          event,
+          summary: event?.summary ?? event?.record?.summary ?? null,
+          env,
+        })
+      } catch {
+        // Best effort: bridge failure must never affect sink delivery
+      }
+    }
     await Promise.all(handlers.map((h) => h(event)))
   }
 
