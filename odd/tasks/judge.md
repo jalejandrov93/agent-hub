@@ -112,3 +112,12 @@ Out of scope (explicit follow-ups):
 
 - 2026-09-20: feature doc created; worktree + branch `feat/c4-judge`
   (stacked on `feat/c3-verifier`, PR #11).
+- 2026-09-20: **T1 done** — `src/judge.mjs` + `test/judge.test.mjs` (12 tests).
+  Verified: 12 pass / 0 fail. Commit `28a0202`.
+- 2026-09-20: **T2 done** — `NodeSchema.maxRevisionAttempts`, engine revision
+  loop (needs_revision re-dispatches with attempt reset, no backoff;
+  rejected/blocked terminal only when required), `judge.json` artifact, verdict
+  on node result/events, `test/workflow-judge.test.mjs` (4 tests). C3's 4 tests
+  still green. Verified: 20/20 targeted; `npm test` 1049 pass / 0 fail /
+  8 pre-existing cancelled.
+- T3 pending: README + CHANGELOG.

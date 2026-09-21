@@ -22,6 +22,7 @@ import { resolveHarness } from '../harness/registry.mjs'
 import { calculateDispatchTimeoutS, dispatch, waitExecution as defaultWaitExecution } from '../dispatch.mjs'
 import { readResult as readJobResult, updateResult } from '../jobstore.mjs'
 import { runVerification, normalizeVerifyConfig } from '../verify.mjs'
+import { judgeVerdict } from '../judge.mjs'
 import { createWorkflow } from './schema.mjs'
 import { NODE_STATUS, WAITING_REASONS, isTerminalStatus, assertValidTransition } from './state.mjs'
 import { resolveDependencies, evaluateCondition } from './resolver.mjs'
@@ -199,6 +200,8 @@ async function executeNode({
 }) {
   const maxAttempts = node.maxAttempts ?? 1
   let attempt = nodeStates.get(node.id)?.attempt || 1
+  const maxRevisionAttempts = Number.isInteger(node.maxRevisionAttempts) && node.maxRevisionAttempts > 0 ? node.maxRevisionAttempts : 0
+  let revision = 0
   let lastError = null
   const readRecord = readResultFn ?? ((jobId) => readJobResult(jobId, env))
   // Harness defaults from env for the started event (emitted before the
@@ -416,6 +419,7 @@ async function executeNode({
       }
 
       let verification = null
+      let judge = null
       if (node.type === 'delegate' && normalizeVerifyConfig(node)) {
         verification = await runVerification({
           node,
@@ -437,14 +441,39 @@ async function executeNode({
               env
             )
           } catch {}
-          if (verification.required && !verification.verified) {
-            const failed = verification.checks.filter((c) => !c.passed).map((c) => c.name)
-            const err = new Error('verification failed: ' + failed.join(', '))
-            err.code = 'VERIFICATION_FAILED'
-            err.verification = verification
-            throw err
-          }
+          judge = judgeVerdict({
+            verification,
+            stepId: node.id,
+            revision,
+            maxRevisionAttempts,
+            required: verification.required,
+          })
+          try {
+            writeArtifact(
+              {
+                workflowId: workflow.id,
+                stepId: node.id,
+                name: 'judge.json',
+                content: JSON.stringify(judge, null, 2),
+              },
+              env
+            )
+          } catch {}
         }
+      }
+      if (judge && judge.verdict === 'needs_revision') {
+        const err = new Error(judge.reason)
+        err.code = 'REVISION_REQUESTED'
+        err.judge = judge
+        err.verification = verification
+        throw err
+      }
+      if (judge && (judge.verdict === 'rejected' || judge.verdict === 'blocked') && judge.required) {
+        const err = new Error(judge.reason)
+        err.code = 'JUDGE_REJECTED'
+        err.judge = judge
+        err.verification = verification
+        throw err
       }
 
       // Transition to SUCCEEDED (only reachable after a real terminal outcome)
@@ -464,6 +493,8 @@ async function executeNode({
         result,
         error: null,
         ...(verification ? { verification } : {}),
+        ...(judge ? { judge } : {}),
+        revision,
       })
 
       const jobId = result?.job?.jobId ?? result?.jobId ?? null
@@ -493,6 +524,8 @@ async function executeNode({
           waitMode: nodeWaitMode,
           ...(manifest ? { artifacts: manifest.artifacts } : {}),
           ...(verification ? { verification } : {}),
+          ...(judge ? { judge } : {}),
+          revision,
         },
         { env }
       )
@@ -500,7 +533,24 @@ async function executeNode({
       return
     } catch (err) {
       lastError = err
-      if (err.code === 'VERIFICATION_FAILED') {
+      if (err.code === 'REVISION_REQUESTED' && revision < maxRevisionAttempts) {
+        revision++
+        attempt = 1
+        upsertWorkflowNode(ctx, {
+          workflow_id: workflow.id,
+          step_id: node.id,
+          status: NODE_STATUS.RUNNING,
+          attempt,
+          updated_at: new Date().toISOString(),
+        })
+        nodeStates.set(node.id, {
+          ...nodeStates.get(node.id),
+          attempt,
+          revision,
+        })
+        continue
+      }
+      if (err.code === 'REVISION_REQUESTED' || err.code === 'JUDGE_REJECTED') {
         break
       }
       if (attempt < maxAttempts) {
@@ -531,6 +581,8 @@ async function executeNode({
     code: lastError?.code || null,
     attempts: attempt,
     ...(lastError?.verification ? { verification: lastError.verification } : {}),
+    ...(lastError?.judge ? { judge: lastError.judge } : {}),
+    revision,
   }
   upsertWorkflowNode(ctx, {
     workflow_id: workflow.id,
@@ -546,6 +598,8 @@ async function executeNode({
     attempt,
     error: lastError,
     result: errorPayload,
+    ...(lastError?.judge ? { judge: lastError.judge } : {}),
+    revision,
   })
 
   appendEvent(
@@ -562,6 +616,8 @@ async function executeNode({
       harness: nodeHarness,
       waitMode: nodeWaitMode,
       ...(lastError?.verification ? { verification: lastError.verification } : {}),
+      ...(lastError?.judge ? { judge: lastError.judge } : {}),
+      revision,
     },
     { env }
   )

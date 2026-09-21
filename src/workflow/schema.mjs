@@ -16,6 +16,7 @@ export const NodeSchema = z
     dependsOn: z.array(z.string()).default([]),
     condition: z.string().optional(),
     maxAttempts: z.number().int().min(1).default(1),
+    maxRevisionAttempts: z.number().int().min(0).optional(),
     timeoutS: z.number().positive().optional(),
     onSuccess: z.any().optional(),
     onFailure: z.any().optional(),
