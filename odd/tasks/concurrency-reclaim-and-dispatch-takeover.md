@@ -112,5 +112,11 @@ Branch `fix/concurrency-reclaim-and-dispatch-takeover` off `dev`.
 `npm test` (Node v22): **1364 pass / 0 fail** (baseline was 1354; +10 new
 tests across the two tasks — no baseline test broke).
 
+### Review (RDD)
+Assessed range `dev..c2240cc`: risk `medium`, `review_due` (`slice_budget_reached`).
+Candidate consent: **declined** by the user (`declined_this_candidate`); delivery
+follows ordinary repository policy. Parent spot check: `npm test` 1364/1364 and
+`test/dispatch-reservation.test.mjs` green 3/3 runs.
+
 Engram mirror (`odd/concurrency-reclaim-and-dispatch-takeover/tasks`): **PENDING** —
 Engram rejects saves in this session (multiple active runtime sessions match).
