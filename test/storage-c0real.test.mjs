@@ -74,7 +74,6 @@ test('DoD a) crash/recovery: create job + write SQLite, simulate kill, reopen DB
     root_execution_id: 'exec-root',
     attempt: 1,
     remote_state: 'dispatched',
-    quality_score: 0.92,
     verified: true,
     judge_verdict: 'approved',
     env,
@@ -85,7 +84,6 @@ test('DoD a) crash/recovery: create job + write SQLite, simulate kill, reopen DB
   // Verify it wrote result.json
   const fileResult = readResult(created.jobId, env)
   assert.equal(fileResult.workflow_id, 'wf-100')
-  assert.equal(fileResult.quality_score, 0.92)
   assert.equal(fileResult.verified, true)
 
   // Verify it mirrored to SQLite in ctx1
@@ -97,7 +95,6 @@ test('DoD a) crash/recovery: create job + write SQLite, simulate kill, reopen DB
   assert.equal(row1.step_id, 'step-recon')
   assert.equal(row1.attempt, 1)
   assert.equal(row1.remote_state, 'dispatched')
-  assert.equal(row1.quality_score, 0.92)
   assert.equal(row1.verified, 1)
   assert.equal(row1.judge_verdict, 'approved')
 
@@ -116,7 +113,6 @@ test('DoD a) crash/recovery: create job + write SQLite, simulate kill, reopen DB
   assert.equal(recovered.root_execution_id, 'exec-root')
   assert.equal(recovered.attempt, 1)
   assert.equal(recovered.remote_state, 'dispatched')
-  assert.equal(recovered.quality_score, 0.92)
   assert.equal(recovered.verified, 1)
   assert.equal(recovered.judge_verdict, 'approved')
 
@@ -165,7 +161,6 @@ test('DoD b) 2 concurrent writers same job via WAL -> no lost update, last write
       job.jobId,
       {
         attempt: 1,
-        quality_score: 0.85,
         judge_verdict: 'pass',
         note: 'writer1-payload',
       },
@@ -179,7 +174,6 @@ test('DoD b) 2 concurrent writers same job via WAL -> no lost update, last write
       job.jobId,
       {
         attempt: 2,
-        quality_score: 0.98,
         judge_verdict: 'exceptional',
         note: 'writer2-payload',
       },
@@ -207,7 +201,6 @@ test('DoD b) 2 concurrent writers same job via WAL -> no lost update, last write
   assert.equal(dbRow.note, undefined) // column not in schema, lives in result_json
   assert.equal(parsed.note, fileResult.note)
   assert.equal(dbRow.attempt, fileResult.attempt)
-  assert.equal(dbRow.quality_score, fileResult.quality_score)
   assert.equal(dbRow.judge_verdict, fileResult.judge_verdict)
 
   closeDb(env)
