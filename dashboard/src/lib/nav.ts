@@ -76,12 +76,12 @@ export const VIEW_META: Record<RouteName, ViewMeta> = {
     tip: "Lifecycle events and token consumption across providers.",
   },
   graph: {
-    label: "Execution Tree",
-    tip: "Tree view of multi-agent and workflow executions.",
+    label: "Execution DAG",
+    tip: "Directed acyclic graph of multi-agent and workflow executions.",
   },
   "work-graph": {
-    label: "Worktree Map",
-    tip: "Git repos, worktrees, branches, and live locks.",
+    label: "Filesystem Map",
+    tip: "Filesystem hierarchy, git repos, worktrees, branches, and live locks.",
   },
   metrics: {
     label: "Metrics",
