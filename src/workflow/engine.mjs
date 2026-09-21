@@ -461,6 +461,8 @@ async function executeNode({
           } catch {}
         }
       }
+      const jobId = result?.job?.jobId ?? result?.jobId ?? null
+      if (judge && jobId) { try { updateResult(jobId, { verified: verification.verified, judge_verdict: judge.verdict, revision }, env) } catch {} }
       if (judge && judge.verdict === 'needs_revision') {
         const err = new Error(judge.reason)
         err.code = 'REVISION_REQUESTED'
@@ -496,13 +498,6 @@ async function executeNode({
         ...(judge ? { judge } : {}),
         revision,
       })
-
-      const jobId = result?.job?.jobId ?? result?.jobId ?? null
-      if (verification && jobId) {
-        try {
-          updateResult(jobId, { verified: verification.verified }, env)
-        } catch {}
-      }
 
       let manifest = null
       if (node.type === 'delegate' && declared.length > 0) {

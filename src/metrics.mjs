@@ -99,6 +99,18 @@ function getOrUpdateIndex(runsDir) {
   return jobs
 }
 
+function round2(value) {
+  return Math.round(value * 100) / 100
+}
+
+function round4(value) {
+  return Math.round(value * 10000) / 10000
+}
+
+function round6(value) {
+  return Math.round(value * 1000000) / 1000000
+}
+
 /**
  * Computes the duration in milliseconds between createdAt and updatedAt.
  *
@@ -175,6 +187,15 @@ export function computeMetrics({ env = process.env, groupBy = DEFAULT_GROUP_BY }
     const errorKinds = {}
     let tokensTotal = 0
     let tokenJobsCount = 0
+    let costSum = 0
+    let costJobsCount = 0
+    let verifiedSamples = 0
+    let verifiedCount = 0
+    let verificationFailures = 0
+    const judgeVerdicts = {}
+    let revisionTotal = 0
+    let revisionJobsCount = 0
+    let retryCount = 0
 
     for (const job of groupJobs) {
       if (job.status === 'succeeded') {
@@ -196,6 +217,33 @@ export function computeMetrics({ env = process.env, groupBy = DEFAULT_GROUP_BY }
         tokensTotal += job.tokens
         tokenJobsCount++
       }
+
+      if (typeof job.costUsd === 'number' && Number.isFinite(job.costUsd)) {
+        costSum += job.costUsd
+        costJobsCount++
+      }
+
+      if (typeof job.verified === 'boolean') {
+        verifiedSamples++
+        if (job.verified === true) {
+          verifiedCount++
+        } else {
+          verificationFailures++
+        }
+      }
+
+      if (typeof job.judge_verdict === 'string' && job.judge_verdict.length > 0) {
+        judgeVerdicts[job.judge_verdict] = (judgeVerdicts[job.judge_verdict] || 0) + 1
+      }
+
+      if (Number.isInteger(job.revision)) {
+        revisionTotal += job.revision
+        revisionJobsCount++
+      }
+
+      if (Number.isInteger(job.attempt) && job.attempt > 1) {
+        retryCount++
+      }
     }
 
     succeededDurations.sort((a, b) => a - b)
@@ -204,6 +252,11 @@ export function computeMetrics({ env = process.env, groupBy = DEFAULT_GROUP_BY }
     const p95Ms = succeeded > 0 ? nearestRankPercentile(succeededDurations, 95) : null
     const successRate = samples === 0 ? null : Math.round((succeeded / samples) * 10000) / 10000
     const tokensAvg = tokenJobsCount > 0 ? Math.round(tokensTotal / tokenJobsCount) : null
+    const costUsdTotal = costJobsCount > 0 ? round6(costSum) : 0
+    const costUsdAvg = costJobsCount > 0 ? round6(costSum / costJobsCount) : null
+    const verifiedRate = verifiedSamples > 0 ? round4(verifiedCount / verifiedSamples) : null
+    const revisionAvg = revisionJobsCount > 0 ? round2(revisionTotal / revisionJobsCount) : null
+    const qualityScore = verifiedSamples > 0 ? Math.round((10 * verifiedCount / verifiedSamples) * 10) / 10 : null
 
     // Ensure required schema attributes are populated
     const firstJob = groupJobs[0] || {}
@@ -222,6 +275,17 @@ export function computeMetrics({ env = process.env, groupBy = DEFAULT_GROUP_BY }
       errorKinds,
       tokensTotal,
       tokensAvg,
+      costUsdTotal,
+      costUsdAvg,
+      verifiedCount,
+      verifiedSamples,
+      verifiedRate,
+      verificationFailures,
+      judgeVerdicts,
+      revisionTotal,
+      revisionAvg,
+      retryCount,
+      qualityScore,
     }
 
     rows.push(row)
