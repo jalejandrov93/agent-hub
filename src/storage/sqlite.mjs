@@ -52,7 +52,7 @@ function readJsonStore(stateHome) {
   try {
     return JSON.parse(fs.readFileSync(p, 'utf8'))
   } catch {
-    return { workflows: {}, workflow_nodes: {}, jobs: {}, leases: {}, harness_origins: {}, task_handoffs: {}, task_context: [], agent_messages: [] }
+    return { workflows: {}, workflow_nodes: {}, jobs: {}, leases: {}, harness_origins: {}, task_handoffs: {}, task_context: [], agent_messages: [], dispatch_reservations: {} }
   }
 }
 
@@ -66,7 +66,7 @@ function jsonInitDb(stateHome) {
   ensureDir(stateHome)
   const p = jsonStoragePath(stateHome)
   if (!fs.existsSync(p)) {
-    writeJsonStore(stateHome, { workflows: {}, workflow_nodes: {}, jobs: {}, leases: {}, harness_origins: {}, task_handoffs: {}, task_context: [], agent_messages: [] })
+    writeJsonStore(stateHome, { workflows: {}, workflow_nodes: {}, jobs: {}, leases: {}, harness_origins: {}, task_handoffs: {}, task_context: [], agent_messages: [], dispatch_reservations: {} })
   }
 }
 
@@ -415,6 +415,44 @@ function jsonGetAgentMessage(stateHome, id) {
   return (store.agent_messages || []).find((m) => m.id === Number(id)) ?? null
 }
 
+function normalizeDispatchReservationRow(row) {
+  return {
+    dispatch_key: row.dispatch_key ?? row.dispatchKey,
+    job_id: row.job_id ?? row.jobId ?? null,
+    created_at: row.created_at ?? row.createdAt ?? new Date().toISOString(),
+  }
+}
+
+function jsonReserveDispatchKey(stateHome, { dispatchKey, jobId = null, createdAt = null } = {}) {
+  const store = readJsonStore(stateHome)
+  store.dispatch_reservations = store.dispatch_reservations || {}
+  const existing = store.dispatch_reservations[dispatchKey]
+  if (existing) {
+    return {
+      reserved: false,
+      existingJobId: existing.job_id ?? null,
+      existingCreatedAt: existing.created_at ?? null,
+    }
+  }
+  const row = normalizeDispatchReservationRow({ dispatchKey, jobId, createdAt })
+  store.dispatch_reservations[dispatchKey] = row
+  writeJsonStore(stateHome, store)
+  return { reserved: true, existingJobId: null, existingCreatedAt: null }
+}
+
+function jsonGetDispatchReservation(stateHome, dispatchKey) {
+  const store = readJsonStore(stateHome)
+  return store.dispatch_reservations?.[dispatchKey] ?? null
+}
+
+function jsonReleaseDispatchReservation(stateHome, dispatchKey) {
+  const store = readJsonStore(stateHome)
+  if (!store.dispatch_reservations || !store.dispatch_reservations[dispatchKey]) return false
+  delete store.dispatch_reservations[dispatchKey]
+  writeJsonStore(stateHome, store)
+  return true
+}
+
 /* ------------------------------------------------------------------ */
 /*  better-sqlite3                                                     */
 /* ------------------------------------------------------------------ */
@@ -498,6 +536,12 @@ CREATE TABLE IF NOT EXISTS agent_messages (
 );
 
 CREATE INDEX IF NOT EXISTS idx_agent_messages_delivery ON agent_messages (to_agent, root_execution_id, delivered_at);
+
+CREATE TABLE IF NOT EXISTS dispatch_reservations (
+  dispatch_key TEXT PRIMARY KEY,
+  job_id TEXT,
+  created_at TEXT NOT NULL
+);
 `
 
 const UPSERT_JOB_SQL = `
@@ -626,6 +670,16 @@ const INSERT_AGENT_MESSAGE_SQL = `
 INSERT INTO agent_messages (root_execution_id, workflow_id, from_agent, to_agent, kind, text, created_at, delivered_at, ack_at)
 VALUES (@root_execution_id, @workflow_id, @from_agent, @to_agent, @kind, @text, @created_at, @delivered_at, @ack_at)
 `
+
+const RESERVE_DISPATCH_KEY_SQL = `
+INSERT INTO dispatch_reservations (dispatch_key, job_id, created_at)
+VALUES (@dispatch_key, @job_id, @created_at)
+ON CONFLICT(dispatch_key) DO NOTHING
+`
+
+const GET_DISPATCH_RESERVATION_SQL = `SELECT * FROM dispatch_reservations WHERE dispatch_key = ?`
+
+const DELETE_DISPATCH_RESERVATION_SQL = `DELETE FROM dispatch_reservations WHERE dispatch_key = ?`
 
 function sqliteInitDb(stateHome) {
   const dbPath = paths({ AGENT_HUB_HOME: stateHome }).dbFile
@@ -870,6 +924,29 @@ function sqliteMarkAgentMessageAck(db, id, at) {
 
 function sqliteGetAgentMessage(db, id) {
   return db.prepare('SELECT * FROM agent_messages WHERE id = ?').get(id) ?? null
+}
+
+function sqliteReserveDispatchKey(db, { dispatchKey, jobId = null, createdAt = null } = {}) {
+  const norm = normalizeDispatchReservationRow({ dispatchKey, jobId, createdAt })
+  const info = db.prepare(RESERVE_DISPATCH_KEY_SQL).run(norm)
+  if (info.changes === 1) {
+    return { reserved: true, existingJobId: null, existingCreatedAt: null }
+  }
+  const existing = db.prepare(GET_DISPATCH_RESERVATION_SQL).get(dispatchKey) ?? null
+  return {
+    reserved: false,
+    existingJobId: existing?.job_id ?? null,
+    existingCreatedAt: existing?.created_at ?? null,
+  }
+}
+
+function sqliteGetDispatchReservation(db, dispatchKey) {
+  return db.prepare(GET_DISPATCH_RESERVATION_SQL).get(dispatchKey) ?? null
+}
+
+function sqliteReleaseDispatchReservation(db, dispatchKey) {
+  const info = db.prepare(DELETE_DISPATCH_RESERVATION_SQL).run(dispatchKey)
+  return info.changes > 0
 }
 
 /* ------------------------------------------------------------------ */
@@ -1185,6 +1262,46 @@ export function markAgentMessageAck(ctx, id, at) {
   }
   const home = normalizeHome(ctx?.stateHome)
   return jsonMarkAgentMessageAck(home, id, at)
+}
+
+/**
+ * Cross-process idempotency primitive for dispatches.
+ *
+ * reserveDispatchKey is atomic per dispatch_key: the first caller wins and
+ * every later caller gets { reserved: false } with the winning job, so a
+ * dispatch cannot be started twice for the same key. Behaviour is mirrored in
+ * the JSON fallback so it is identical without better-sqlite3.
+ *
+ * Known gap: there is no deleteLeaseByCwd helper. The leases table is keyed by
+ * (job_id, owner) and has no cwd column; the worktree cwd only exists as the
+ * lock file path. A cwd-keyed delete would need a schema change, so it is
+ * intentionally not invented here.
+ */
+export function reserveDispatchKey(ctx, options = {}) {
+  if (!ctx) return { reserved: false, existingJobId: null, existingCreatedAt: null }
+  if (ctx.backend === 'sqlite') {
+    return sqliteReserveDispatchKey(ctx.db, options)
+  }
+  const home = normalizeHome(ctx?.stateHome)
+  return jsonReserveDispatchKey(home, options)
+}
+
+export function getDispatchReservation(ctx, dispatchKey) {
+  if (!ctx) return null
+  if (ctx.backend === 'sqlite') {
+    return sqliteGetDispatchReservation(ctx.db, dispatchKey)
+  }
+  const home = normalizeHome(ctx?.stateHome)
+  return jsonGetDispatchReservation(home, dispatchKey)
+}
+
+export function releaseDispatchReservation(ctx, dispatchKey) {
+  if (!ctx) return false
+  if (ctx.backend === 'sqlite') {
+    return sqliteReleaseDispatchReservation(ctx.db, dispatchKey)
+  }
+  const home = normalizeHome(ctx?.stateHome)
+  return jsonReleaseDispatchReservation(home, dispatchKey)
 }
 
 export function getAgentMessage(ctx, id) {
