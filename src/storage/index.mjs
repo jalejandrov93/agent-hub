@@ -12,6 +12,7 @@ export {
   getWorkflowNode,
   listWorkflowNodes,
   claimWorkflowNode,
+  touchWorkflowNode,
   publishWorkflowNodeReady,
   resumeWorkflowNode,
   upsertHarnessOrigin,

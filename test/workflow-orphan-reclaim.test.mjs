@@ -64,27 +64,29 @@ test('T2: a node orphaned by a dead worker (expired lease) is reclaimed and exec
   closeDb(env)
 })
 
-test('T2: a fresh foreign claim is never stolen and the run fails with a stall diagnostic instead of hanging', async () => {
+test('T2: a stale foreign claim on a ready node fails the run bound instead of hanging', async () => {
   const home = tmpHome()
   const env = { AGENT_HUB_HOME: home }
   const workflow = {
     id: 'wf-orphan-live',
-    name: 'live peer',
+    name: 'ghost claim',
     nodes: [{ id: 'work', type: 'delegate', task: 'w', maxAttempts: 1 }],
   }
 
   await seedFailedWorkflow(env, workflow)
   closeDb(env)
 
-  // A live peer holds the node: the lease timestamp is fresh.
+  // A READY row carrying a foreign owner: no one can pass the owner-aware CAS,
+  // and reclaim only re-queues running/waiting nodes, so this is the residual
+  // state the stall bound exists for. It must fail bounded, never hang.
   const dbCtx = getDb(env)
   upsertWorkflowNode(dbCtx, {
     workflow_id: 'wf-orphan-live',
     step_id: 'work',
-    status: 'running',
+    status: 'ready',
     attempt: 0,
-    claimed_by: 'live_peer',
-    updated_at: new Date().toISOString(),
+    claimed_by: 'ghost_owner',
+    updated_at: new Date(Date.now() - 10 * 60_000).toISOString(),
   })
   closeDb(env)
 
@@ -99,11 +101,12 @@ test('T2: a fresh foreign claim is never stolen and the run fails with a stall d
           return { ok: true }
         },
         pollIntervalMs: 10,
+        leaseTtlMs: 200,
         stallTimeoutS: 0.5,
       }),
     /stalled/,
   )
 
-  assert.equal(dispatchCalls, 0, "a live peer's node must never be stolen")
+  assert.equal(dispatchCalls, 0, "a foreign claim must never be taken by force")
   closeDb(env)
 })

@@ -339,6 +339,37 @@ function jsonAddContextEntry(stateHome, row) {
   return entry
 }
 
+/** Statuses a heartbeat must never re-stamp (a terminal row is final). */
+const TERMINAL_NODE_STATUSES = Object.freeze(['succeeded', 'failed', 'skipped', 'canceled'])
+
+/**
+ * Refresh only the lease timestamp of a node that is still in flight.
+ *
+ * This is the claim heartbeat: `updated_at` is otherwise written once at claim
+ * time, so a job that legitimately runs longer than the lease looks like a dead
+ * owner to another scheduler. Only `updated_at` moves — never the status — and
+ * never a terminal row, so a heartbeat can never resurrect a node an external
+ * actor already finalized.
+ */
+function jsonTouchWorkflowNode(stateHome, { workflowId, stepId, at }) {
+  const key = `${workflowId}:${stepId}`
+  let touched = false
+  updateJsonLocked(
+    jsonStoragePath(stateHome),
+    (store) => {
+      store.workflow_nodes = store.workflow_nodes || {}
+      const existing = store.workflow_nodes[key]
+      if (!existing || TERMINAL_NODE_STATUSES.includes(existing.status)) return store
+      existing.updated_at = at ?? new Date().toISOString()
+      existing.updatedAt = existing.updated_at
+      touched = true
+      return store
+    },
+    { defaultValue: defaultJsonStore() }
+  )
+  return touched
+}
+
 function jsonListContextEntries(stateHome, workflowId, stepId = null) {
   const store = readJsonStore(stateHome)
   const entries = store.task_context || []
@@ -627,6 +658,14 @@ const GET_WORKFLOW_NODE_SQL = `SELECT * FROM workflow_nodes WHERE workflow_id = 
 
 const LIST_WORKFLOW_NODES_SQL = `SELECT * FROM workflow_nodes WHERE workflow_id = ?`
 
+const TOUCH_WORKFLOW_NODE_SQL = `
+UPDATE workflow_nodes
+SET updated_at = @updated_at
+WHERE workflow_id = @workflow_id
+  AND step_id = @step_id
+  AND status NOT IN ('succeeded', 'failed', 'skipped', 'canceled')
+`
+
 const CLAIM_WORKFLOW_NODE_SQL = `
 UPDATE workflow_nodes
 SET claimed_by = @claimed_by,
@@ -840,6 +879,15 @@ function sqliteClaimWorkflowNode(db, { workflowId, stepId, claimedBy, attempt })
     claimed_by: claimedBy,
     attempt: attempt ?? null,
     updated_at: now,
+  })
+  return info.changes > 0
+}
+
+function sqliteTouchWorkflowNode(db, { workflowId, stepId, at }) {
+  const info = db.prepare(TOUCH_WORKFLOW_NODE_SQL).run({
+    workflow_id: workflowId,
+    step_id: stepId,
+    updated_at: at ?? new Date().toISOString(),
   })
   return info.changes > 0
 }
@@ -1158,6 +1206,15 @@ export function claimWorkflowNode(ctx, { workflowId, stepId, claimedBy, attempt 
   }
   const home = normalizeHome(ctx?.stateHome)
   return jsonClaimWorkflowNode(home, { workflowId, stepId, claimedBy, attempt })
+}
+
+export function touchWorkflowNode(ctx, { workflowId, stepId, at }) {
+  if (!ctx) return false
+  if (ctx.backend === 'sqlite') {
+    return sqliteTouchWorkflowNode(ctx.db, { workflowId, stepId, at })
+  }
+  const home = normalizeHome(ctx?.stateHome)
+  return jsonTouchWorkflowNode(home, { workflowId, stepId, at })
 }
 
 /**
