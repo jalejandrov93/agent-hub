@@ -119,3 +119,58 @@ test('engine: drives workflow through failure', async () => {
 
   closeDb(env)
 })
+
+test('transitionNode: an explicit claimedBy:null releases the owner so a new scheduler can claim', async () => {
+  const home = tmpHome()
+  const env = { AGENT_HUB_HOME: home }
+  const dbCtx = getDb(env)
+
+  // A node left RUNNING by a worker that died.
+  upsertWorkflowNode(dbCtx, {
+    workflow_id: 'wf-claim',
+    step_id: 'step_x',
+    status: NODE_STATUS.RUNNING,
+    attempt: 1,
+    claimed_by: 'dead_worker',
+    updated_at: new Date().toISOString(),
+  })
+
+  // Resume recovery: running -> ready AND the dead owner must be released.
+  // If the owner survives, the owner-aware CAS refuses the next claim and the
+  // scheduler spins on the same wave forever.
+  transitionNode(dbCtx, {
+    workflowId: 'wf-claim',
+    stepId: 'step_x',
+    to: NODE_STATUS.READY,
+    attempt: 1,
+    claimedBy: null,
+  })
+  assert.equal(getWorkflowNode(dbCtx, 'wf-claim', 'step_x').claimed_by, null)
+
+  const claimed = claimNode(dbCtx, {
+    workflowId: 'wf-claim',
+    stepId: 'step_x',
+    claimedBy: 'new_scheduler',
+    attempt: 2,
+  })
+  assert.equal(claimed, true)
+
+  // Omitting claimedBy must keep the existing owner untouched.
+  upsertWorkflowNode(dbCtx, {
+    workflow_id: 'wf-keep',
+    step_id: 'step_y',
+    status: NODE_STATUS.RUNNING,
+    attempt: 1,
+    claimed_by: 'owner_a',
+    updated_at: new Date().toISOString(),
+  })
+  transitionNode(dbCtx, {
+    workflowId: 'wf-keep',
+    stepId: 'step_y',
+    to: NODE_STATUS.READY,
+    attempt: 1,
+  })
+  assert.equal(getWorkflowNode(dbCtx, 'wf-keep', 'step_y').claimed_by, 'owner_a')
+
+  closeDb(env)
+})
