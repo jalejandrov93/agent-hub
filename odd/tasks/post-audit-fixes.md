@@ -46,12 +46,12 @@ re-verified against the code by the referee pass before being accepted.
 - No behavior change outside the listed files.
 
 ## Progress
-- [ ] T1 engine retry/terminal
-- [ ] T2 orphan reclaim + stall bound
-- [ ] T3 JSON reservation atomicity
-- [ ] T4 worktree cwd guard
-- [ ] T5 docs drift
-- [ ] Full verification + PR to dev
+- [x] T1 engine retry/terminal — `539f721`; test/workflow-retry-terminal.test.mjs (RED: "cannot transition from waiting|canceled to ready")
+- [x] T2 orphan reclaim + stall bound — `7561f2c`, corrected to AND semantics in `17cbe7d` after test/chaos/chaos.test.mjs "chaos 3" (the specification) failed; test/workflow-orphan-reclaim.test.mjs (RED: hang under --test-timeout)
+- [x] T3 JSON reservation atomicity — `2cc1b86`; test/storage-reservation-race.test.mjs (RED: 8 of 8 child processes won)
+- [x] T4 worktree cwd guard — `654cce0`; test/worktree-clean.test.mjs (RED: 2 cases)
+- [x] T5 docs drift — `a5ed93a`; checker over the contract: 25 file+symbol pairs, 0 failures
+- [x] Full verification — `npm test` 1345/1345/0, chaos 4/4, dashboard 176/176 + typecheck clean, `node bench/run.mjs` ok
 
 Engram mirror (`odd/post-audit-fixes/tasks`): **PENDING** — Engram rejects saves (multiple
 active runtime sessions match this project+directory and this session's id is not registered).
