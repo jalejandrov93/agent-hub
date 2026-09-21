@@ -9,6 +9,8 @@ import {
   normalizeProfiles,
   profileStateFor,
   selectProfile,
+  modelGroupFor,
+  remainingQuotaForModel,
 } from '../src/providers/profiles.mjs'
 import {
   parseAgysList,
@@ -85,6 +87,125 @@ const FIXTURE_AGYS_QUOTA = [
     },
   },
 ]
+
+// Shape of the real `agys quota --json` output (see odd/tasks/agys-quota-aware-profiles.md):
+// one entry per profile, quota.groups[] split by model family, each group with
+// per-window buckets carrying remainingFraction (0 = exhausted), not usedPercent.
+const REAL_SHAPE_QUOTA = [
+  {
+    profileName: 'esp',
+    email: 'esp-account@example.com',
+    active: true,
+    quota: {
+      groups: [
+        {
+          displayName: 'Gemini Models',
+          description: 'Gemini Flash and Pro models',
+          buckets: [
+            { bucketId: 'gemini-weekly', window: 'weekly', resetTime: '2026-09-28T00:00:00Z', remainingFraction: 0.8 },
+            { bucketId: 'gemini-5h', window: '5h', resetTime: '2026-09-21T23:00:00Z', remainingFraction: 0.9 },
+          ],
+        },
+        {
+          displayName: 'Claude and GPT models',
+          description: 'Claude and GPT models',
+          buckets: [
+            { bucketId: '3p-weekly', window: 'weekly', resetTime: '2026-09-28T00:00:00Z', remainingFraction: 0.1 },
+            { bucketId: '3p-5h', window: '5h', resetTime: '2026-09-21T23:12:13Z', remainingFraction: 0 },
+          ],
+        },
+      ],
+    },
+  },
+  {
+    profileName: 'ita',
+    email: 'ita-account@example.com',
+    active: false,
+    quota: {
+      groups: [
+        {
+          displayName: 'Gemini Models',
+          description: 'Gemini Flash and Pro models',
+          buckets: [
+            { bucketId: 'gemini-weekly', window: 'weekly', resetTime: '2026-09-28T00:00:00Z', remainingFraction: 0.5 },
+            { bucketId: 'gemini-5h', window: '5h', resetTime: '2026-09-21T23:00:00Z', remainingFraction: 0.6 },
+          ],
+        },
+        {
+          displayName: 'Claude and GPT models',
+          description: 'Claude and GPT models',
+          buckets: [
+            { bucketId: '3p-weekly', window: 'weekly', resetTime: '2026-09-28T00:00:00Z', remainingFraction: 1 },
+            { bucketId: '3p-5h', window: '5h', resetTime: '2026-09-21T23:12:13Z', remainingFraction: 1 },
+          ],
+        },
+      ],
+    },
+  },
+]
+
+test('modelGroupFor maps gemini/claude/gpt model ids to the two agys quota groups, unknown to null', () => {
+  assert.equal(modelGroupFor('gemini-3.8-flash-low'), 'gemini')
+  assert.equal(modelGroupFor('gemini-3.1-pro-high'), 'gemini')
+  assert.equal(modelGroupFor('claude-sonnet-4-6'), 'claude-gpt')
+  assert.equal(modelGroupFor('claude-opus-4-6-thinking'), 'claude-gpt')
+  assert.equal(modelGroupFor('gpt-oss'), 'claude-gpt')
+  assert.equal(modelGroupFor('some-unknown-model'), null)
+  assert.equal(modelGroupFor(null), null)
+  assert.equal(modelGroupFor(undefined), null)
+})
+
+test('profileStateFor reads remainingFraction buckets (agys quota --json real shape), not just usedPercent', () => {
+  const exhaustedBucket = { bucketId: 'x', remainingFraction: 0 }
+  const healthyBucket = { bucketId: 'y', remainingFraction: 0.5 }
+  assert.equal(
+    profileStateFor({ profile: { name: 'p', active: true }, quotaEntry: { quota: { groups: [{ buckets: [exhaustedBucket] }] } } }),
+    'exhausted',
+    'a single remainingFraction:0 bucket must be recognized as exhausted (flat/no-model backward-compat path)'
+  )
+  assert.equal(
+    profileStateFor({ profile: { name: 'p', active: true }, quotaEntry: { quota: { groups: [{ buckets: [healthyBucket] }] } } }),
+    'selected'
+  )
+})
+
+test('profileStateFor is per-model-group: exhausted Claude/GPT quota does not exhaust the Gemini group, and vice versa', () => {
+  const espEntry = REAL_SHAPE_QUOTA[0] // Claude/GPT 5h bucket is remainingFraction:0
+  const claudeState = profileStateFor({ profile: { name: 'esp', active: true }, quotaEntry: espEntry, model: 'claude-sonnet-4-6' })
+  assert.equal(claudeState, 'exhausted', 'esp Claude/GPT group has a 0-remaining window (ANY window exhausted rule)')
+
+  const geminiState = profileStateFor({ profile: { name: 'esp', active: true }, quotaEntry: espEntry, model: 'gemini-3.8-flash-low' })
+  assert.equal(geminiState, 'selected', 'esp Gemini group still has plenty left, unaffected by the exhausted Claude/GPT group')
+})
+
+test('profileStateFor treats an unrecognized model conservatively: exhausted if ANY group has an exhausted window', () => {
+  const espEntry = REAL_SHAPE_QUOTA[0]
+  const state = profileStateFor({ profile: { name: 'esp', active: true }, quotaEntry: espEntry, model: 'some-unknown-model' })
+  assert.equal(state, 'exhausted')
+
+  const itaEntry = REAL_SHAPE_QUOTA[1] // nothing exhausted in either group
+  const itaState = profileStateFor({ profile: { name: 'ita', active: false }, quotaEntry: itaEntry, model: 'some-unknown-model' })
+  assert.equal(itaState, 'fallback')
+})
+
+test('profileStateFor without a model keeps the pre-existing flat/all-buckets behavior (backward compat)', () => {
+  // esp has some exhausted and some healthy buckets across groups -> NOT every
+  // bucket is exhausted, so the legacy (no model) precedence says not exhausted.
+  const espEntry = REAL_SHAPE_QUOTA[0]
+  assert.equal(profileStateFor({ profile: { name: 'esp', active: true }, quotaEntry: espEntry }), 'selected')
+})
+
+test('remainingQuotaForModel returns the min remainingFraction across the job model group windows (headroom)', () => {
+  const espEntry = REAL_SHAPE_QUOTA[0]
+  assert.equal(remainingQuotaForModel(espEntry, 'gemini-3.8-flash-low'), 0.8, 'min(0.8, 0.9) for the Gemini group')
+  assert.equal(remainingQuotaForModel(espEntry, 'claude-sonnet-4-6'), 0, 'min(0.1, 0) for the Claude/GPT group')
+
+  const itaEntry = REAL_SHAPE_QUOTA[1]
+  assert.equal(remainingQuotaForModel(itaEntry, 'claude-sonnet-4-6'), 1)
+
+  assert.equal(remainingQuotaForModel(null, 'gemini-3.8-flash-low'), null)
+  assert.equal(remainingQuotaForModel({}, 'gemini-3.8-flash-low'), null)
+})
 
 test('PROFILE_STATES is frozen and contains the exact lifecycle states', () => {
   assert.ok(Object.isFrozen(PROFILE_STATES))
