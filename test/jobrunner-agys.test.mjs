@@ -4,7 +4,13 @@ import fs from 'node:fs'
 import path from 'node:path'
 import os from 'node:os'
 import { EventEmitter } from 'node:events'
+import { fileURLToPath } from 'node:url'
 import { adapterFor } from '../src/adapters/index.mjs'
+
+const AGY_QUOTA_FIXTURE = fs.readFileSync(
+  path.join(path.dirname(fileURLToPath(import.meta.url)), 'fixtures', 'agy', 'stream-quota-error.jsonl'),
+  'utf8'
+)
 
 function tmpHome() {
   return fs.mkdtempSync(path.join(os.tmpdir(), 'agent-hub-jobrunner-agys-'))
@@ -330,5 +336,117 @@ test('job.failed event carries resolved profile and profileStatus when job fails
   assert.ok(failed, 'job.failed event was emitted')
   assert.equal(failed.profile, 'backup')
   assert.equal(failed.profileStatus, 'fallback')
+})
+
+test('a quota failure on an agy job with a resolved profile records exhaustion for that profile+model group (T4 failover)', async () => {
+  const home = tmpHome()
+  const { startJob } = await freshModules(home)
+  const spawn = () => {
+    const child = fakeChild()
+    process.nextTick(() => {
+      child.stdout.emit('data', AGY_QUOTA_FIXTURE)
+    })
+    return child
+  }
+
+  const recorded = []
+  const fakeRecordQuotaExhaustion = (args) => {
+    recorded.push(args)
+    return null
+  }
+
+  const { job, done } = startJob({
+    agent: 'agy',
+    model: 'claude-sonnet-4-6',
+    task: 'quota failover test',
+    cwd: '/tmp',
+    mode: 'read',
+    adapterFor,
+    spawn,
+    profile: 'esp',
+    profileStatus: 'selected',
+    recordQuotaExhaustionFn: fakeRecordQuotaExhaustion,
+    env: { AGENT_HUB_HOME: home },
+  })
+  await done
+
+  assert.equal(recorded.length, 1, 'recordQuotaExhaustionFn must be called exactly once')
+  assert.equal(recorded[0].profile, 'esp')
+  assert.equal(recorded[0].modelGroup, 'claude-gpt')
+  assert.match(recorded[0].message, /Individual quota reached/)
+
+  // Sanity: the job itself is still correctly classified as a quota failure.
+  const { jobstore } = await freshModules(home)
+  const record = jobstore.readResult(job.jobId, { AGENT_HUB_HOME: home })
+  assert.equal(record.status, 'failed')
+  assert.equal(record.errorKind, 'quota')
+})
+
+test('a quota failure with NO resolved profile does not call recordQuotaExhaustionFn (nothing to record)', async () => {
+  const home = tmpHome()
+  const { startJob } = await freshModules(home)
+  const spawn = () => {
+    const child = fakeChild()
+    process.nextTick(() => {
+      child.stdout.emit('data', AGY_QUOTA_FIXTURE)
+    })
+    return child
+  }
+
+  let calls = 0
+  const fakeRecordQuotaExhaustion = () => {
+    calls++
+    return null
+  }
+
+  const { done } = startJob({
+    agent: 'agy',
+    model: 'claude-sonnet-4-6',
+    task: 'quota failover test, no profile',
+    cwd: '/tmp',
+    mode: 'read',
+    adapterFor,
+    spawn,
+    recordQuotaExhaustionFn: fakeRecordQuotaExhaustion,
+    env: { AGENT_HUB_HOME: home },
+  })
+  await done
+
+  assert.equal(calls, 0)
+})
+
+test('a non-quota failure on an agy job with a resolved profile does not call recordQuotaExhaustionFn', async () => {
+  const home = tmpHome()
+  const { startJob } = await freshModules(home)
+  const spawn = () => {
+    const child = fakeChild()
+    process.nextTick(() => {
+      child.stdout.emit('data', JSON.stringify({ status: 'CANCELED', response: '' }))
+    })
+    return child
+  }
+
+  let calls = 0
+  const fakeRecordQuotaExhaustion = () => {
+    calls++
+    return null
+  }
+
+  const { done } = startJob({
+    agent: 'agy',
+    model: 'claude-sonnet-4-6',
+    task: 'canceled, not quota',
+    cwd: '/tmp',
+    mode: 'read',
+    adapterFor,
+    spawn,
+    profile: 'esp',
+    profileStatus: 'selected',
+    recordQuotaExhaustionFn: fakeRecordQuotaExhaustion,
+    env: { AGENT_HUB_HOME: home },
+  })
+  await done
+
+  assert.equal(calls, 0)
 })
 

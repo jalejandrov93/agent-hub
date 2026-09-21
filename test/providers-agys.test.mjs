@@ -28,6 +28,10 @@ import {
   getAgysMode,
   setAgysMode,
   agysProfilesSnapshot,
+  parseResetDurationMs,
+  recordQuotaExhaustion,
+  readQuotaExhaustion,
+  isProfileExhaustedFor,
 } from '../src/providers/agys.mjs'
 
 const FIXTURE_AGYS_LIST = `Active Profiles:
@@ -1162,5 +1166,148 @@ test('agysProfilesSnapshot reports mode, source and pinnedProfile from getAgysMo
   assert.equal(snap3.mode, 'profile')
   assert.equal(snap3.source, 'env')
   assert.equal(snap3.pinnedProfile, 'work')
+})
+
+// --- T4: failover after a quota (429) failure -------------------------------
+
+test('parseResetDurationMs parses the real "Resets in XhYmZs" provider message', () => {
+  assert.equal(
+    parseResetDurationMs('Individual quota reached. Please upgrade your subscription to increase your limits. Resets in 4h26m13s.'),
+    ((4 * 60 + 26) * 60 + 13) * 1000
+  )
+  assert.equal(parseResetDurationMs('Resets in 45m'), 45 * 60 * 1000)
+  assert.equal(parseResetDurationMs('Resets in 30s'), 30 * 1000)
+  assert.equal(parseResetDurationMs('Resets in 2h'), 2 * 60 * 60 * 1000)
+  assert.equal(parseResetDurationMs('no reset info here'), null)
+  assert.equal(parseResetDurationMs(null), null)
+  assert.equal(parseResetDurationMs(undefined), null)
+})
+
+test('recordQuotaExhaustion + isProfileExhaustedFor: a recorded profile+group is exhausted until its reset, then not', () => {
+  const tmpDir = fs.mkdtempSync(path.join(os.tmpdir(), 'agent-hub-agys-exhaustion-'))
+  const env = { AGENT_HUB_HOME: tmpDir }
+  let now = 1_000_000
+
+  recordQuotaExhaustion({
+    profile: 'esp',
+    modelGroup: 'claude-gpt',
+    message: 'Individual quota reached. Resets in 1h0m0s.',
+    env,
+    now: () => now,
+  })
+
+  assert.equal(isProfileExhaustedFor({ profile: 'esp', modelGroup: 'claude-gpt', env, now: () => now }), true)
+  // A different group on the SAME profile is unaffected.
+  assert.equal(isProfileExhaustedFor({ profile: 'esp', modelGroup: 'gemini', env, now: () => now }), false)
+  // A different profile is unaffected.
+  assert.equal(isProfileExhaustedFor({ profile: 'ita', modelGroup: 'claude-gpt', env, now: () => now }), false)
+
+  // Still exhausted just before reset...
+  now = 1_000_000 + 60 * 60 * 1000 - 1
+  assert.equal(isProfileExhaustedFor({ profile: 'esp', modelGroup: 'claude-gpt', env, now: () => now }), true)
+  // ...and clear at/after reset.
+  now = 1_000_000 + 60 * 60 * 1000
+  assert.equal(isProfileExhaustedFor({ profile: 'esp', modelGroup: 'claude-gpt', env, now: () => now }), false)
+})
+
+test('recordQuotaExhaustion uses a bounded default (1h) when the message has no parseable reset', () => {
+  const tmpDir = fs.mkdtempSync(path.join(os.tmpdir(), 'agent-hub-agys-exhaustion-default-'))
+  const env = { AGENT_HUB_HOME: tmpDir }
+  let now = 0
+  recordQuotaExhaustion({ profile: 'esp', modelGroup: 'gemini', message: 'quota reached, no timing info', env, now: () => now })
+
+  now = 60 * 60 * 1000 - 1
+  assert.equal(isProfileExhaustedFor({ profile: 'esp', modelGroup: 'gemini', env, now: () => now }), true)
+  now = 60 * 60 * 1000
+  assert.equal(isProfileExhaustedFor({ profile: 'esp', modelGroup: 'gemini', env, now: () => now }), false)
+})
+
+test('recordQuotaExhaustion persists to disk (readQuotaExhaustion) and survives a fresh read', () => {
+  const tmpDir = fs.mkdtempSync(path.join(os.tmpdir(), 'agent-hub-agys-exhaustion-persist-'))
+  const env = { AGENT_HUB_HOME: tmpDir }
+  recordQuotaExhaustion({ profile: 'esp', modelGroup: 'claude-gpt', message: 'Resets in 2h0m0s.', env, now: () => 0 })
+
+  const store = readQuotaExhaustion(env)
+  assert.ok(store.esp)
+  assert.equal(store.esp['claude-gpt'].resetAt, 2 * 60 * 60 * 1000)
+})
+
+test('resolveAgyProfileSync skips a profile recorded as exhausted for the job model group, even when agys quota --json has not caught up yet', () => {
+  const tmpDir = fs.mkdtempSync(path.join(os.tmpdir(), 'agent-hub-agys-exhaustion-sync-'))
+  const env = { AGENT_HUB_HOME: tmpDir, AGENT_HUB_AGYS: 'auto' }
+  const execFn = (cmd, args) => {
+    if (args[0] === 'list') return REAL_SHAPE_LIST
+    // Report BOTH profiles as fully healthy: agys quota --json has not
+    // propagated the 429 esp just hit yet — the exhaustion record must still
+    // steer selection away from esp for the claude group.
+    if (args[0] === 'quota') {
+      return JSON.stringify([
+        { profileName: 'esp', active: true, quota: { groups: [{ displayName: 'Claude and GPT models', buckets: [{ bucketId: '3p-5h', remainingFraction: 1 }] }] } },
+        { profileName: 'ita', active: false, quota: { groups: [{ displayName: 'Claude and GPT models', buckets: [{ bucketId: '3p-5h', remainingFraction: 1 }] }] } },
+      ])
+    }
+    return ''
+  }
+
+  recordQuotaExhaustion({ profile: 'esp', modelGroup: 'claude-gpt', message: 'Resets in 1h0m0s.', env, now: () => 0 })
+  resetSyncProfileCache()
+
+  const res = resolveAgyProfileSync({ env, execFn, model: 'claude-sonnet-4-6', now: () => 0 })
+  assert.equal(res.profile, 'ita', 'esp must be skipped even though its agys quota --json snapshot looks healthy')
+})
+
+test('resolveAgyProfile (async) skips a profile recorded as exhausted for the job model group', async () => {
+  const tmpDir = fs.mkdtempSync(path.join(os.tmpdir(), 'agent-hub-agys-exhaustion-async-'))
+  const env = { AGENT_HUB_HOME: tmpDir, AGENT_HUB_AGYS: 'auto' }
+  const fakeRunner = async (cmd, args) => (args[0] === '--version' ? { code: 0, stdout: 'agys v0.2.33', stderr: '' } : { code: 0, stdout: '', stderr: '' })
+  const fakeList = async () => [
+    { name: 'esp', active: true, priority: 0 },
+    { name: 'ita', active: false, priority: 0 },
+  ]
+  const fakeQuota = async () => ({
+    esp: { quota: { groups: [{ displayName: 'Claude and GPT models', buckets: [{ bucketId: '3p-5h', remainingFraction: 1 }] }] } },
+    ita: { quota: { groups: [{ displayName: 'Claude and GPT models', buckets: [{ bucketId: '3p-5h', remainingFraction: 1 }] }] } },
+  })
+
+  // Record with the REAL clock: resolveAgyProfile has no injectable `now`,
+  // so the exhaustion window must genuinely be in the future.
+  recordQuotaExhaustion({ profile: 'esp', modelGroup: 'claude-gpt', message: 'Resets in 1h0m0s.', env })
+
+  const res = await resolveAgyProfile({
+    env,
+    runCommandFn: fakeRunner,
+    listFn: fakeList,
+    quotaFn: fakeQuota,
+    model: 'claude-sonnet-4-6',
+  })
+  assert.equal(res.profile, 'ita')
+})
+
+test('recordQuotaExhaustion invalidates the sync profile cache so the next resolution re-reads the exhaustion store', () => {
+  const tmpDir = fs.mkdtempSync(path.join(os.tmpdir(), 'agent-hub-agys-exhaustion-invalidate-'))
+  const env = { AGENT_HUB_HOME: tmpDir, AGENT_HUB_AGYS: 'auto' }
+  let callCount = 0
+  const execFn = (cmd, args) => {
+    callCount++
+    if (args[0] === 'list') return REAL_SHAPE_LIST
+    if (args[0] === 'quota') return JSON.stringify(REAL_SHAPE_QUOTA)
+    return ''
+  }
+
+  resetSyncProfileCache()
+  const before = resolveAgyProfileSync({ env, execFn, model: 'claude-sonnet-4-6' })
+  assert.equal(before.profile, 'ita', 'esp is already exhausted per REAL_SHAPE_QUOTA fixture')
+  assert.equal(callCount, 2)
+
+  // Cached within TTL: a second call must not re-exec.
+  resolveAgyProfileSync({ env, execFn, model: 'claude-sonnet-4-6' })
+  assert.equal(callCount, 2)
+
+  // Recording a fresh exhaustion (e.g. ita also just 429'd) must invalidate
+  // the cache so the NEXT resolution re-reads the exhaustion store, instead
+  // of serving the stale cached 'ita' pick for up to SYNC_PROFILE_CACHE_TTL_MS.
+  recordQuotaExhaustion({ profile: 'ita', modelGroup: 'claude-gpt', message: 'Resets in 1h0m0s.', env, now: () => 0 })
+  resolveAgyProfileSync({ env, execFn, model: 'claude-sonnet-4-6' })
+  assert.equal(callCount, 4, 'the cache must have been invalidated, forcing a fresh list+quota exec')
 })
 

@@ -39,6 +39,12 @@ export function paths(env = process.env) {
     runsDir: path.join(home, 'runs'),
     locksDir: path.join(home, 'runs', '.locks'),
     agysModeFile: path.join(home, 'agys-mode.json'),
+    // Per (profile, model group) quota exhaustion recorded after a real 429,
+    // consulted by resolveAgyProfileSync/resolveAgyProfile so the NEXT
+    // resolution avoids that account even if `agys quota --json` has not
+    // propagated the exhaustion yet. Several MCP processes run at once, so
+    // this file is read/written through fsutil's locked/atomic helpers.
+    agysExhaustionFile: path.join(home, 'agys-exhaustion.json'),
   }
 }
 
