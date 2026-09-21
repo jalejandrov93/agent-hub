@@ -540,12 +540,17 @@ function jsonGetDispatchReservation(stateHome, dispatchKey) {
   return store.dispatch_reservations?.[dispatchKey] ?? null
 }
 
-function jsonReleaseDispatchReservation(stateHome, dispatchKey) {
+function jsonReleaseDispatchReservation(stateHome, dispatchKey, expectedJobId) {
   let removed = false
   updateJsonLocked(
     jsonStoragePath(stateHome),
     (store) => {
-      if (!store.dispatch_reservations || !store.dispatch_reservations[dispatchKey]) return store
+      const existing = store.dispatch_reservations?.[dispatchKey]
+      if (!existing) return store
+      // T2: conditional takeover — only delete a reservation that still
+      // belongs to the exact holder we observed. `expectedJobId === undefined`
+      // preserves the old unconditional-release callers/tests.
+      if (expectedJobId !== undefined && (existing.job_id ?? null) !== (expectedJobId ?? null)) return store
       delete store.dispatch_reservations[dispatchKey]
       removed = true
       return store
@@ -809,6 +814,13 @@ ON CONFLICT(dispatch_key) DO NOTHING
 const GET_DISPATCH_RESERVATION_SQL = `SELECT * FROM dispatch_reservations WHERE dispatch_key = ?`
 
 const DELETE_DISPATCH_RESERVATION_SQL = `DELETE FROM dispatch_reservations WHERE dispatch_key = ?`
+
+/**
+ * T2: conditional takeover release. `IS` (not `=`) so a reservation held
+ * with a NULL job_id can still be matched by an explicit `expectedJobId` of
+ * null, the same way `=` would fail to.
+ */
+const DELETE_DISPATCH_RESERVATION_IF_OWNER_SQL = `DELETE FROM dispatch_reservations WHERE dispatch_key = ? AND job_id IS ?`
 
 function sqliteInitDb(stateHome) {
   const dbPath = paths({ AGENT_HUB_HOME: stateHome }).dbFile
@@ -1094,8 +1106,12 @@ function sqliteGetDispatchReservation(db, dispatchKey) {
   return db.prepare(GET_DISPATCH_RESERVATION_SQL).get(dispatchKey) ?? null
 }
 
-function sqliteReleaseDispatchReservation(db, dispatchKey) {
-  const info = db.prepare(DELETE_DISPATCH_RESERVATION_SQL).run(dispatchKey)
+function sqliteReleaseDispatchReservation(db, dispatchKey, expectedJobId) {
+  if (expectedJobId === undefined) {
+    const info = db.prepare(DELETE_DISPATCH_RESERVATION_SQL).run(dispatchKey)
+    return info.changes > 0
+  }
+  const info = db.prepare(DELETE_DISPATCH_RESERVATION_IF_OWNER_SQL).run(dispatchKey, expectedJobId)
   return info.changes > 0
 }
 
@@ -1471,13 +1487,22 @@ export function getDispatchReservation(ctx, dispatchKey) {
   return jsonGetDispatchReservation(home, dispatchKey)
 }
 
-export function releaseDispatchReservation(ctx, dispatchKey) {
+/**
+ * T2: release a dispatch-key reservation. With no `expectedJobId` this is
+ * the historical unconditional release. With `expectedJobId` (including
+ * `null`, meaning "the reservation had no jobId"), the delete is a
+ * compare-and-set: it only removes the row when it still belongs to the
+ * exact holder that was observed, so a stale-holder takeover can never
+ * delete a reservation someone else already took over.
+ * @returns {boolean} true if a row was deleted
+ */
+export function releaseDispatchReservation(ctx, dispatchKey, expectedJobId) {
   if (!ctx) return false
   if (ctx.backend === 'sqlite') {
-    return sqliteReleaseDispatchReservation(ctx.db, dispatchKey)
+    return sqliteReleaseDispatchReservation(ctx.db, dispatchKey, expectedJobId)
   }
   const home = normalizeHome(ctx?.stateHome)
-  return jsonReleaseDispatchReservation(home, dispatchKey)
+  return jsonReleaseDispatchReservation(home, dispatchKey, expectedJobId)
 }
 
 export function getAgentMessage(ctx, id) {

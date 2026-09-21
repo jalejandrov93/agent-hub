@@ -138,3 +138,42 @@ test('T6: a reservation whose job already failed does not block a fresh dispatch
   assert.ok(jobId, 'a fresh dispatch must produce a job')
   assert.notEqual(jobId, failed.jobId, 'it must not share the failed job')
 })
+
+test('T2: two waiters that both observe the same stale dispatch-key holder take over exactly once', async () => {
+  const home = tmpHome()
+  const cwd = fs.mkdtempSync(path.join(os.tmpdir(), 'agent-hub-dispatch-cwd-'))
+  const env = { ...process.env, AGENT_HUB_HOME: home }
+  const key = `stale-takeover-key-${Date.now()}`
+
+  // A dead holder outside the dedup window, so both children skip the
+  // waitForJobByExecutionId share-path and go straight for the takeover —
+  // the exact race T2 closes: both observe the SAME stale jobId ('dead_job')
+  // and must not both win the conditional release.
+  const { getDb, reserveDispatchKey } = await import('../src/storage/index.mjs')
+  const ctx = getDb(env)
+  reserveDispatchKey(ctx, {
+    dispatchKey: key,
+    jobId: 'dead_job',
+    createdAt: new Date(Date.now() - 11 * 60_000).toISOString(),
+  })
+
+  const deadline = Date.now() + 1000
+  const results = await Promise.all([
+    runChild(home, deadline, key, cwd),
+    runChild(home, deadline, key, cwd),
+  ])
+
+  const errored = results.filter((r) => r.code !== 0 || !r.parsed || r.parsed.error)
+  assert.deepEqual(
+    errored.map((r) => ({ code: r.code, parsed: r.parsed, stderr: r.stderr.slice(0, 300) })),
+    [],
+    'every child must complete without error'
+  )
+
+  const jobs = listJobs(env)
+  assert.equal(jobs.length, 1, `exactly one dispatcher may take over the stale key, got ${jobs.length}`)
+
+  const jobIds = new Set(results.map((r) => r.parsed.jobId))
+  assert.equal(jobIds.size, 1, `both waiters must end up sharing the same job, got ${JSON.stringify([...jobIds])}`)
+  assert.equal([...jobIds][0], jobs[0].jobId)
+})
