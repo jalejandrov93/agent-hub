@@ -18,6 +18,7 @@ import { computeMetrics } from './metrics.mjs'
 import { listProposals, refreshProposals, decideProposal } from './proposals.mjs'
 import { listLearnings, proposeLearning, decideLearning, deleteLearning } from './learnings.mjs'
 import { jobResultTool } from './tools/jobs.mjs'
+import { JobRecord } from './schemas.mjs'
 import { listMcpTools } from './index.mjs'
 import { startScheduler, runScheduleNow } from './scheduler.mjs'
 import { createAccount, updateAccount, deleteAccount, setPolicy, listAccounts } from './accounts.mjs'
@@ -241,6 +242,8 @@ export function isAllowedOrigin(origin) {
   }
 }
 
+let invalidJobsWarned = false
+
 /** State for GET /api/state: agents (from the preflight cache), jobs, and the last 200 events (subagents included). */
 export function buildState({ env = process.env } = {}) {
   const discovery = readDiscovery(env)
@@ -250,7 +253,19 @@ export function buildState({ env = process.env } = {}) {
     binPath: discovery[a.agent]?.binPath ?? null,
     cliVersion: discovery[a.agent]?.version ?? null,
   }))
-  const jobs = listJobs(env)
+  // `/api/state` is validated by the client as ONE payload (`StateResponse`,
+  // jobs: JobRecord[]). One record that does not satisfy JobRecord used to
+  // blank every job-list view, so drop exactly the invalid ones here instead.
+  const jobs = []
+  let dropped = 0
+  for (const job of listJobs(env)) {
+    if (JobRecord.safeParse(job).success) jobs.push(job)
+    else dropped++
+  }
+  if (dropped > 0 && !invalidJobsWarned) {
+    invalidJobsWarned = true
+    console.warn(`[agent-hub] /api/state dropped ${dropped} job record(s) that do not satisfy JobRecord; the dashboard shows the rest`)
+  }
   const events = readTail({ n: 200, env })
   const subagents = events.filter((e) => e.source === 'claude-hook')
   return { agents, jobs, subagents, events }

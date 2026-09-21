@@ -125,6 +125,17 @@ export function createJob({
   harness = null,
   waitMode = null,
 }) {
+  // A job record without an identity is not a job. `JobRecord` (src/schemas.mjs)
+  // requires agent/model, and the dashboard validates /api/state as ONE payload,
+  // so a record missing either blanks every job-list view. Reject at the source,
+  // before a run directory is allocated.
+  if (typeof agent !== 'string' || agent.trim() === '') {
+    throw new Error('createJob: agent is required')
+  }
+  if (typeof model !== 'string' || model.trim() === '') {
+    throw new Error('createJob: model is required')
+  }
+
   const jobId = newJobId()
   const dir = jobDir(jobId, env)
   ensureDir(dir)
