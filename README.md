@@ -73,20 +73,21 @@ Claude Code
 - **Capability-aware routing** — filters candidates by hard requirements and
   ranks them by quality, cost and latency preferences.
 - **Reliable execution** — retries, automatic fallback chains, per-class circuit
-  breakers and adaptive timeouts derived from observed p95.
-- **Workflow orchestration** — DAG execution with `dependsOn`, parallel waves,
-  fan-out/fan-in, retries and resume after a crash.
+  breakers, and timeouts that adapt to how long each agent and model actually takes.
+- **Workflow orchestration** — DAGs with `dependsOn` and parallel waves; a step
+  can run over a list and combine the results. Runs survive a crash and resume
+  where they stopped.
 - **Evidence & verification** — artifacts, deterministic verification commands
   and a judge/revision loop that can send work back for another pass.
 - **Safe write execution** — worktree isolation, single-writer coordination, and
   a read-mode guard that fails a job which touched the disk.
-- **Persistent execution state** — SQLite as coordination state with a JSON
-  fallback, cross-process dispatch idempotency and claim heartbeats.
+- **State you can trust** — runs persist across restarts, a dispatch is
+  idempotent across processes, and a slow agent is never mistaken for a dead one.
 - **Observability** — event log, metrics, subagent tracking and a local
   dashboard.
-- **Harness integration** — caller-harness profiles (Claude Code, OpenCode,
-  generic) that decide how long a delegation blocks, plus a lifecycle bridge
-  back into the originating session.
+- **Harness integration** — Claude Code, OpenCode and custom MCP clients get the
+  waiting behaviour they expect, and a finished delegation can resume the session
+  that asked for it.
 
 ## Architecture at a glance
 
@@ -144,33 +145,35 @@ Per-agent notes: **[agy](docs/providers/agy.md)** ·
 and authenticated.
 
 ```bash
-git clone https://github.com/jalejandrov93/agent-hub.git ~/.claude/mcp-servers/agent-hub
-cd ~/.claude/mcp-servers/agent-hub
+git clone https://github.com/jalejandrov93/agent-hub.git ~/agent-hub
+cd ~/agent-hub
 
 npm install
-npm test
 node bin/agent-hub selftest
 ```
 
-Prefer to develop in place and install only the runtime elsewhere? Clone
-anywhere, then:
+**Connect Claude Code.** Use an absolute `node` path: a version-manager shim only
+exists inside the shell that created it.
 
 ```bash
-npm install
+claude mcp add --scope user agent-hub -- \
+  /path/to/node /path/to/agent-hub/bin/agent-hub mcp
+```
+
+**Connect another MCP client** by pointing it at
+`/path/to/node /path/to/agent-hub/bin/agent-hub mcp` over stdio. The server is
+harness-agnostic: Claude Code, OpenCode and custom clients call the same 28
+tools, and each caller gets the waiting behaviour its harness profile declares.
+
+**Install only the runtime**, keeping the checkout wherever you develop:
+
+```bash
 npm run install:local -- --restart
 ```
 
 `install:local` builds the dashboard, copies the runtime into
 `~/.claude/mcp-servers/agent-hub`, installs production dependencies there and
 records the exact commit. Re-run it after every `git pull`.
-
-**Register the MCP server.** Use an absolute `node` path (a version-manager shim
-only exists inside the shell that created it):
-
-```bash
-claude mcp add --scope user agent-hub -- \
-  /path/to/node /path/to/agent-hub/bin/agent-hub mcp
-```
 
 → Full instructions, hooks, the dashboard service and skill install:
 **[Getting started](docs/getting-started.md)**
@@ -182,13 +185,35 @@ Ask your orchestrator for the outcome, not the mechanism:
 > "Use agent-hub to investigate why the authentication flow is failing and
 > return a concise diagnosis."
 
+Under the hood that is one `dispatch` call:
+
+```json
+{
+  "taskType": "call-chain-trace",
+  "task": "Trace how the authentication flow works and return a concise diagnosis.",
+  "cwd": "/path/to/repo",
+  "mode": "read",
+  "timeoutS": 180
+}
 ```
-Claude Code → agent-hub → route() → available agent → execution → result
+
+```
+User ── "Trace the authentication flow..."
+  ▼
+Claude Code / OpenCode / any MCP client ── dispatch(taskType="call-chain-trace")
+  ▼
+agent-hub
+  ├── route()    → primary: agy + gemini-high   fallback: OpenCode
+  ├── execute    → policy, retries, fallback chain
+  ├── verify     → artifacts, deterministic checks, judge
+  └── result     → stdout, artifacts, status, tokens
+  ▼
+Claude Code ── the job record and its result
 ```
 
 Useful tools to know: `route` (who can do this), `delegate` (run it now),
-`dispatch` (run it with policy and idempotency), `job_wait`, `job_result`,
-`recipes`/`workflow` for multi-step work. The complete surface is in
+`dispatch` (run it with policy and idempotency), `job_wait`, `job_result`, and
+`plan_task`/`execute_plan` for multi-step work. The complete surface is in
 **[MCP tools](docs/reference/tools.md)**.
 
 ## Common use cases
@@ -204,8 +229,8 @@ Useful tools to know: `route` (who can do this), `delegate` (run it now),
 ## Workflows
 
 Workflows are DAGs: steps declare `dependsOn`, independent steps run in parallel
-waves, `fanout` expands over items and `fanin` aggregates the children. A run is
-persisted, so it can resume after a crash and never re-executes a succeeded node.
+waves, and a step can run over a list and combine the results. Runs are persisted,
+so a crash resumes where it stopped and a succeeded step is never re-executed.
 
 ```
       Research
@@ -304,15 +329,14 @@ hygiene and the read-mode guard are documented separately.
 - [Storage](docs/storage.md)
 - [Quota (Quota-Arc / CodexBar)](docs/quota.md)
 - [Execution contract](docs/execution-contract.md)
-
-**Operations and history**
 - [Security and isolation](docs/security.md)
-- [Security isolation matrix](docs/security-isolation.md)
-- [Post-D1 roadmap](docs/roadmap-post-d1.md)
-- [Deep audit](docs/audit-post-d2.md)
-- [Implementation report](docs/implementation-report-2026-09-21.md)
-- [Comparison with ai-dispatch](docs/comparison.md)
-- [Changelog](CHANGELOG.md) · [Versioning](docs/versioning.md)
+
+**Development**
+- [Testing and reliability](docs/development/testing.md)
+- [Contributing](CONTRIBUTING.md)
+
+Project history — [changelog](CHANGELOG.md) ·
+[audits, roadmaps and reports](docs/history.md) · [versioning](docs/versioning.md)
 
 ## Development
 
