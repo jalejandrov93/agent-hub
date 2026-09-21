@@ -1,5 +1,5 @@
 import { describe, it, expect, vi, beforeEach } from "vitest"
-import { render, screen, fireEvent, waitFor } from "@testing-library/react"
+import { render, screen, fireEvent, waitFor, within } from "@testing-library/react"
 import { QueryClient, QueryClientProvider } from "@tanstack/react-query"
 import * as api from "@/lib/api"
 import type { Job } from "@/lib/types"
@@ -127,5 +127,19 @@ describe("JobsView", () => {
     expect(await screen.findByText(/reply of/i)).toBeTruthy()
     expect(await screen.findByText(/lines omitted/)).toBeTruthy()
     expect(screen.getByText("tail line")).toBeTruthy()
+  })
+
+  it("opens the job detail dialog on row click and closes it", async () => {
+    renderView()
+
+    fireEvent.click(await screen.findByText("running-task"))
+
+    const dialog = await screen.findByRole("dialog")
+    expect(dialog).toBeTruthy()
+    expect(dialog.getAttribute("data-slot")).toBe("dialog-content")
+    expect(within(dialog).getByText("running-task")).toBeTruthy()
+
+    fireEvent.click(within(dialog).getByRole("button", { name: /close/i }))
+    await waitFor(() => expect(screen.queryByRole("dialog")).toBeNull())
   })
 })
