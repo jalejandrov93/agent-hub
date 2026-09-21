@@ -24,6 +24,7 @@ export const NodeSchema = z
     items: z.union([z.array(z.any()), z.string()]).optional(),
     metadata: z.record(z.any()).optional(),
     artifacts: z.array(z.string()).optional(),
+    handoff: z.any().optional(),
   })
   .transform((data) => {
     const id = data.id || data.step_id

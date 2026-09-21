@@ -3,10 +3,13 @@ import crypto from 'node:crypto'
 import {
   artifactsDir,
   collectManifest,
+  readArtifact,
   resolveArtifactRefs,
   writeArtifact,
   writeManifest,
 } from '../artifacts.mjs'
+import { validateHandoff, resolveHandoffSchema } from '../handoff.mjs'
+import { writeHandoff, readHandoff } from '../context.mjs'
 import {
   getDb,
   upsertWorkflow,
@@ -52,6 +55,37 @@ const sleep = (ms) => new Promise((resolve) => setTimeout(resolve, ms))
 /** Default claim-lease TTL: a running node owned by someone else may only be
  * revived after this long without an update. */
 export const CLAIM_LEASE_TTL_MS = 30_000
+
+/**
+ * Normalizes a node's handoff configuration.
+ * undefined/null/false -> null
+ * true -> { required: false, schema: 'BaseHandoff' }
+ * object -> { required: value.required === true, schema: typeof value.schema === 'string' ? value.schema : 'BaseHandoff' }
+ * An unknown schema name throws via resolveHandoffSchema.
+ * @param {object} node
+ * @returns {{ required: boolean, schema: string } | null}
+ */
+export function normalizeHandoffConfig(node) {
+  const value = node?.handoff
+  if (value === undefined || value === null || value === false) {
+    return null
+  }
+  if (value === true) {
+    return { required: false, schema: 'BaseHandoff' }
+  }
+  if (typeof value === 'object' && !Array.isArray(value)) {
+    const schema = typeof value.schema === 'string' ? value.schema : 'BaseHandoff'
+    const schemaObj = resolveHandoffSchema(schema)
+    if (!schemaObj) {
+      throw new Error(`unknown handoff schema: ${schema}`)
+    }
+    return {
+      required: value.required === true,
+      schema,
+    }
+  }
+  return null
+}
 
 function refreshNodeStates(ctx, workflowId, nodeStates) {
   const rows = listWorkflowNodes(ctx, workflowId)
@@ -199,6 +233,7 @@ async function executeNode({
   waitingTimeoutS = 300,
   pollIntervalMs = 25,
 }) {
+  const handoffConfig = normalizeHandoffConfig(node)
   const maxAttempts = node.maxAttempts ?? 1
   let attempt = nodeStates.get(node.id)?.attempt || 1
   const maxRevisionAttempts = Number.isInteger(node.maxRevisionAttempts) && node.maxRevisionAttempts > 0 ? node.maxRevisionAttempts : 0
@@ -247,6 +282,27 @@ async function executeNode({
         if (revisionFeedback) {
           dispatchedTask = revisionFeedback + '\n\n' + dispatchedTask
         }
+
+        const deps = Array.isArray(node.dependsOn) ? node.dependsOn : []
+        const upstreamHandoffs = []
+        for (const depId of deps) {
+          const depHandoff = nodeStates.get(depId)?.handoff
+          if (depHandoff) {
+            let json = JSON.stringify(depHandoff, null, 0)
+            if (json.length > 4000) {
+              json = json.slice(0, 4000) + '...'
+            }
+            upstreamHandoffs.push(`${depId}: ${json}`)
+          }
+        }
+        if (upstreamHandoffs.length > 0) {
+          dispatchedTask =
+            dispatchedTask +
+            '\n\n' +
+            'Upstream context:\n' +
+            upstreamHandoffs.join('\n')
+        }
+
         if (declared.length > 0) {
           const dir = artifactsDir({ workflowId: workflow.id, stepId: node.id }, env)
           fs.mkdirSync(dir, { recursive: true })
@@ -258,6 +314,24 @@ async function executeNode({
             ' (absolute path), one file per name, exactly these filenames: ' +
             declared.join(', ') +
             '. Do not write any other file there.'
+        }
+
+        if (handoffConfig) {
+          const dir = artifactsDir({ workflowId: workflow.id, stepId: node.id }, env)
+          fs.mkdirSync(dir, { recursive: true })
+          const schemaObj = resolveHandoffSchema(handoffConfig.schema)
+          const requiresStr = schemaObj?.requires ? schemaObj.requires.join(', ') : 'summary'
+          dispatchedTask =
+            dispatchedTask +
+            '\n\n' +
+            'Structured handoff: also write handoff.json to ' +
+            dir +
+            ' (absolute path): a JSON object with summary (a non-empty string) and the arrays findings/decisions/constraints/changedFiles/openQuestions/artifacts (arrays of strings). ' +
+            'Required fields for schema ' +
+            handoffConfig.schema +
+            ': ' +
+            requiresStr +
+            '.'
         }
 
         // C1.6 timeout calculation
@@ -483,6 +557,36 @@ async function executeNode({
         throw err
       }
 
+      let producedHandoff = null
+      if (node.type === 'delegate' && handoffConfig) {
+        let handoffRaw = null
+        try {
+          const art = readArtifact({ workflowId: workflow.id, stepId: node.id, name: 'handoff.json' }, env)
+          if (art?.content) {
+            handoffRaw = JSON.parse(art.content)
+          }
+        } catch {}
+
+        const validation = validateHandoff(handoffRaw, { schema: handoffConfig.schema })
+        if (validation.ok) {
+          producedHandoff = writeHandoff(
+            {
+              workflowId: workflow.id,
+              stepId: node.id,
+              handoff: validation.value,
+              schema: handoffConfig.schema,
+            },
+            env
+          )
+        } else {
+          if (handoffConfig.required) {
+            const err = new Error('handoff required: ' + JSON.stringify(validation.errors))
+            err.code = 'HANDOFF_INVALID'
+            throw err
+          }
+        }
+      }
+
       // Transition to SUCCEEDED (only reachable after a real terminal outcome)
       const now = new Date().toISOString()
       upsertWorkflowNode(ctx, {
@@ -501,6 +605,7 @@ async function executeNode({
         error: null,
         ...(verification ? { verification } : {}),
         ...(judge ? { judge } : {}),
+        ...(producedHandoff ? { handoff: producedHandoff } : {}),
         revision,
       })
 
@@ -525,6 +630,7 @@ async function executeNode({
           ...(manifest ? { artifacts: manifest.artifacts } : {}),
           ...(verification ? { verification } : {}),
           ...(judge ? { judge } : {}),
+          ...(producedHandoff ? { handoff: producedHandoff } : {}),
           revision,
         },
         { env }
@@ -871,12 +977,18 @@ export async function runWorkflow({
         }
       }
 
+      let existingHandoff = null
+      try {
+        existingHandoff = readHandoff({ workflowId: workflow.id, stepId: node.id }, env)
+      } catch {}
+
       nodeStates.set(node.id, {
         status,
         attempt: row.attempt || 0,
         result,
         error: null,
         claimed_by: status === NODE_STATUS.READY ? null : (status === row.status ? claimed : claimed),
+        ...(existingHandoff ? { handoff: existingHandoff } : {}),
       })
     } else {
       const now = new Date().toISOString()
