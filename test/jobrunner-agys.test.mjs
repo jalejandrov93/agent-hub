@@ -58,7 +58,9 @@ test('startJob wraps agy in agys when AGENT_HUB_AGYS_PROFILE is set', async () =
   assert.equal(captured[0].args[1], 'work')
   assert.equal(captured[0].args[2], '--')
   assert.ok(captured[0].args.includes('--model'))
-  assert.ok(captured[0].args.includes('gemini-3.8-flash-low'))
+  // The -low suffix becomes an explicit --effort so agys does not inject its own.
+  assert.ok(captured[0].args.includes('gemini-3.8-flash'))
+  assert.deepEqual(captured[0].args.slice(captured[0].args.indexOf('--effort'), captured[0].args.indexOf('--effort') + 2), ['--effort', 'low'])
   assert.ok(captured[0].args.includes('say hello'))
 
   const record = jobstore.readResult(job.jobId)
@@ -186,7 +188,8 @@ test('startJob with AGENT_HUB_AGYS=auto and a faked sync resolver spawns agys ru
   assert.equal(captured[0].cmd, 'agys')
   assert.deepEqual(captured[0].args.slice(0, 3), ['run', 'auto-picked', '--'])
   assert.ok(captured[0].args.includes('--model'))
-  assert.ok(captured[0].args.includes('gemini-3.8-flash-low'))
+  assert.ok(captured[0].args.includes('gemini-3.8-flash'))
+  assert.ok(captured[0].args.includes('--effort'))
 
   const record = jobstore.readResult(job.jobId)
   assert.equal(record.profile, 'auto-picked')
