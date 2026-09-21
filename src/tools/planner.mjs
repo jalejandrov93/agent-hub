@@ -13,9 +13,9 @@ import { runWorkflow } from '../workflow/engine.mjs'
  *   With no planner configured this fails closed with a clear message.
  * It NEVER executes anything.
  */
-export async function planTaskTool({ intent, plan = null, plannerFn, maxSteps = 12, env = process.env, routeFn } = {}) {
+export async function planTaskTool({ intent, plan = null, plannerFn, maxSteps = 12, maxDepth = 10, maxFanout = 20, env = process.env, routeFn } = {}) {
   if (plan != null) {
-    const validation = validatePlan(plan)
+    const validation = validatePlan(plan, { maxSteps, maxDepth, maxFanout })
     if (!validation.ok) {
       return { ok: false, errors: validation.errors }
     }
@@ -23,6 +23,9 @@ export async function planTaskTool({ intent, plan = null, plannerFn, maxSteps = 
       const workflow = await materializePlan({
         plan: validation.plan,
         env,
+        maxSteps,
+        maxDepth,
+        maxFanout,
         ...(routeFn ? { routeFn } : {})
       })
       return { ok: true, plan: validation.plan, workflow }
@@ -47,12 +50,14 @@ export async function planTaskTool({ intent, plan = null, plannerFn, maxSteps = 
     intent,
     runPlanner: plannerFn,
     maxSteps,
+    maxDepth,
+    maxFanout,
     env,
     ...(routeFn ? { routeFn } : {})
   })
 }
 
-export async function executePlanTool({ plan, approve, runWorkflowFn = runWorkflow, env = process.env, routeFn } = {}) {
+export async function executePlanTool({ plan, approve, runWorkflowFn = runWorkflow, maxSteps = 12, maxDepth = 10, maxFanout = 20, env = process.env, routeFn } = {}) {
   if (approve !== true) {
     return {
       ok: false,
@@ -60,7 +65,7 @@ export async function executePlanTool({ plan, approve, runWorkflowFn = runWorkfl
     }
   }
 
-  const validation = validatePlan(plan)
+  const validation = validatePlan(plan, { maxSteps, maxDepth, maxFanout })
   if (!validation.ok) {
     return {
       ok: false,
@@ -73,6 +78,9 @@ export async function executePlanTool({ plan, approve, runWorkflowFn = runWorkfl
     workflow = await materializePlan({
       plan: validation.plan,
       env,
+      maxSteps,
+      maxDepth,
+      maxFanout,
       ...(routeFn ? { routeFn } : {})
     })
   } catch (err) {
