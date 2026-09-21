@@ -1,6 +1,7 @@
 import fs from 'node:fs'
 import path from 'node:path'
 import { stateHome as resolveStateHome, paths } from '../config.mjs'
+import { updateJsonLocked } from '../fsutil.mjs'
 
 /**
  * Dual-mode storage: better-sqlite3 when available, JSON file fallback.
@@ -47,12 +48,16 @@ function jsonStoragePath(stateHome) {
   return path.join(stateHome, 'storage.json')
 }
 
+function defaultJsonStore() {
+  return { workflows: {}, workflow_nodes: {}, jobs: {}, leases: {}, harness_origins: {}, task_handoffs: {}, task_context: [], agent_messages: [], dispatch_reservations: {} }
+}
+
 function readJsonStore(stateHome) {
   const p = jsonStoragePath(stateHome)
   try {
     return JSON.parse(fs.readFileSync(p, 'utf8'))
   } catch {
-    return { workflows: {}, workflow_nodes: {}, jobs: {}, leases: {}, harness_origins: {}, task_handoffs: {}, task_context: [], agent_messages: [], dispatch_reservations: {} }
+    return defaultJsonStore()
   }
 }
 
@@ -66,7 +71,7 @@ function jsonInitDb(stateHome) {
   ensureDir(stateHome)
   const p = jsonStoragePath(stateHome)
   if (!fs.existsSync(p)) {
-    writeJsonStore(stateHome, { workflows: {}, workflow_nodes: {}, jobs: {}, leases: {}, harness_origins: {}, task_handoffs: {}, task_context: [], agent_messages: [], dispatch_reservations: {} })
+    writeJsonStore(stateHome, defaultJsonStore())
   }
 }
 
@@ -424,20 +429,31 @@ function normalizeDispatchReservationRow(row) {
 }
 
 function jsonReserveDispatchKey(stateHome, { dispatchKey, jobId = null, createdAt = null } = {}) {
-  const store = readJsonStore(stateHome)
-  store.dispatch_reservations = store.dispatch_reservations || {}
-  const existing = store.dispatch_reservations[dispatchKey]
-  if (existing) {
-    return {
-      reserved: false,
-      existingJobId: existing.job_id ?? null,
-      existingCreatedAt: existing.created_at ?? null,
-    }
-  }
-  const row = normalizeDispatchReservationRow({ dispatchKey, jobId, createdAt })
-  store.dispatch_reservations[dispatchKey] = row
-  writeJsonStore(stateHome, store)
-  return { reserved: true, existingJobId: null, existingCreatedAt: null }
+  // The lock is what makes this atomic ACROSS processes: a bare
+  // read-check-write let every concurrent process observe the key absent and
+  // all of them win. The JSON backend is the default, so this is the path that
+  // actually matters at runtime.
+  let outcome = null
+  updateJsonLocked(
+    jsonStoragePath(stateHome),
+    (store) => {
+      store.dispatch_reservations = store.dispatch_reservations || {}
+      const existing = store.dispatch_reservations[dispatchKey]
+      if (existing) {
+        outcome = {
+          reserved: false,
+          existingJobId: existing.job_id ?? null,
+          existingCreatedAt: existing.created_at ?? null,
+        }
+        return store
+      }
+      store.dispatch_reservations[dispatchKey] = normalizeDispatchReservationRow({ dispatchKey, jobId, createdAt })
+      outcome = { reserved: true, existingJobId: null, existingCreatedAt: null }
+      return store
+    },
+    { defaultValue: defaultJsonStore() }
+  )
+  return outcome
 }
 
 function jsonGetDispatchReservation(stateHome, dispatchKey) {
@@ -446,11 +462,18 @@ function jsonGetDispatchReservation(stateHome, dispatchKey) {
 }
 
 function jsonReleaseDispatchReservation(stateHome, dispatchKey) {
-  const store = readJsonStore(stateHome)
-  if (!store.dispatch_reservations || !store.dispatch_reservations[dispatchKey]) return false
-  delete store.dispatch_reservations[dispatchKey]
-  writeJsonStore(stateHome, store)
-  return true
+  let removed = false
+  updateJsonLocked(
+    jsonStoragePath(stateHome),
+    (store) => {
+      if (!store.dispatch_reservations || !store.dispatch_reservations[dispatchKey]) return store
+      delete store.dispatch_reservations[dispatchKey]
+      removed = true
+      return store
+    },
+    { defaultValue: defaultJsonStore() }
+  )
+  return removed
 }
 
 /* ------------------------------------------------------------------ */
