@@ -1,0 +1,6 @@
+{"event":"init","conversation_id":"ca100471-1389-4735-995c-3ba260cacb5e","init":{"model":"claude-sonnet-4-6","cwd":"/home/user/example-app","tools":["ask_permission","run_command"],"permission_mode":"always-proceed","expanded_commands":[{"name":"plan","type":"system"}]}}
+{"event":"step_update","step_update":{"conversation_id":"ca100471-1389-4735-995c-3ba260cacb5e","step_index":51,"state":"DONE","step_type":"error_message","duration_seconds":0}}
+{"event":"result","result":{"conversation_id":"ca100471-1389-4735-995c-3ba260cacb5e","status":"ERROR","response":"","error":"Individual quota reached. Please upgrade your subscription to increase your limits. Resets in 4h26m13s.","duration_seconds":453.444836234,"num_turns":2,"usage":{"input_tokens":52903,"output_tokens":4931,"thinking_tokens":0,"cache_read_tokens":236244,"total_tokens":57834}}}
+error: Individual quota reached. Please upgrade your subscription to increase your limits. Resets in 4h26m13s.
+AGY_ERROR: {"short_error":"RESOURCE_EXHAUSTED (code 429): Individual quota reached. Please upgrade your subscription to increase your limits. Resets in 4h26m13s.","status":"RESOURCE_EXHAUSTED","error_code":429,"code_kind":"http","retryable":true,"error_id":"d67fe15d-e445-4196-a63f-948a4bff5d5e-52"}
+Error: exit status 3
