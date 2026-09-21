@@ -164,6 +164,30 @@ export function updateJsonLocked(file, updater, { defaultValue = {}, retries = 2
 }
 
 /**
+ * Run `fn` while holding the same exclusive `${file}.lock` that updateJsonLocked
+ * uses, and return its result.
+ *
+ * This exists for read-modify-writes that are not expressible as a pure updater
+ * (they need to return a computed value, or short-circuit early): the lock is
+ * what makes the whole read-then-write one critical section instead of two
+ * operations another process can interleave with.
+ *
+ * Never nest it with updateJsonLocked on the same file: the lock is not
+ * reentrant.
+ */
+export function withJsonLock(file, fn, { retries = 200, retryDelayMs = 10, staleMs = 30_000 } = {}) {
+  const dir = path.dirname(file)
+  fs.mkdirSync(dir, { recursive: true })
+  const lockPath = `${file}.lock`
+  const token = acquireLock(file, lockPath, { retries, retryDelayMs, staleMs })
+  try {
+    return fn()
+  } finally {
+    releaseLock(lockPath, token)
+  }
+}
+
+/**
  * Release a lock only if it is still the instance this caller acquired. A
  * holder whose lock was reclaimed as stale must not delete the replacement
  * lock a newer holder owns; the ownership token makes that check exact.

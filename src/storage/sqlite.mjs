@@ -1,7 +1,7 @@
 import fs from 'node:fs'
 import path from 'node:path'
 import { stateHome as resolveStateHome, paths } from '../config.mjs'
-import { updateJsonLocked } from '../fsutil.mjs'
+import { updateJsonLocked, writeJsonAtomic, withJsonLock } from '../fsutil.mjs'
 
 /**
  * Dual-mode storage: better-sqlite3 when available, JSON file fallback.
@@ -62,9 +62,22 @@ function readJsonStore(stateHome) {
 }
 
 function writeJsonStore(stateHome, store) {
-  const p = jsonStoragePath(stateHome)
-  ensureDir(path.dirname(p))
-  fs.writeFileSync(p, JSON.stringify(store, null, 2), 'utf8')
+  // Atomic rename, never a plain write: a concurrent reader must not observe a
+  // half-written store. readJsonStore falls back to the EMPTY default on a parse
+  // error, so a torn read silently degrades to data loss on the next write.
+  writeJsonAtomic(jsonStoragePath(stateHome), store)
+}
+
+/**
+ * One critical section for a JSON mutation.
+ *
+ * Every json* mutator below reads, changes and writes the WHOLE store, so
+ * without this two concurrent writers (the MCP server and the dashboard, or two
+ * CLI processes) each clobber whatever the other just wrote. Never nest with
+ * updateJsonLocked on the same file.
+ */
+function mutateJsonStore(stateHome, fn) {
+  return withJsonLock(jsonStoragePath(stateHome), fn)
 }
 
 function jsonInitDb(stateHome) {
@@ -337,6 +350,37 @@ function jsonAddContextEntry(stateHome, row) {
   store.task_context.push(entry)
   writeJsonStore(stateHome, store)
   return entry
+}
+
+/** Statuses a heartbeat must never re-stamp (a terminal row is final). */
+const TERMINAL_NODE_STATUSES = Object.freeze(['succeeded', 'failed', 'skipped', 'canceled'])
+
+/**
+ * Refresh only the lease timestamp of a node that is still in flight.
+ *
+ * This is the claim heartbeat: `updated_at` is otherwise written once at claim
+ * time, so a job that legitimately runs longer than the lease looks like a dead
+ * owner to another scheduler. Only `updated_at` moves — never the status — and
+ * never a terminal row, so a heartbeat can never resurrect a node an external
+ * actor already finalized.
+ */
+function jsonTouchWorkflowNode(stateHome, { workflowId, stepId, at }) {
+  const key = `${workflowId}:${stepId}`
+  let touched = false
+  updateJsonLocked(
+    jsonStoragePath(stateHome),
+    (store) => {
+      store.workflow_nodes = store.workflow_nodes || {}
+      const existing = store.workflow_nodes[key]
+      if (!existing || TERMINAL_NODE_STATUSES.includes(existing.status)) return store
+      existing.updated_at = at ?? new Date().toISOString()
+      existing.updatedAt = existing.updated_at
+      touched = true
+      return store
+    },
+    { defaultValue: defaultJsonStore() }
+  )
+  return touched
 }
 
 function jsonListContextEntries(stateHome, workflowId, stepId = null) {
@@ -627,6 +671,14 @@ const GET_WORKFLOW_NODE_SQL = `SELECT * FROM workflow_nodes WHERE workflow_id = 
 
 const LIST_WORKFLOW_NODES_SQL = `SELECT * FROM workflow_nodes WHERE workflow_id = ?`
 
+const TOUCH_WORKFLOW_NODE_SQL = `
+UPDATE workflow_nodes
+SET updated_at = @updated_at
+WHERE workflow_id = @workflow_id
+  AND step_id = @step_id
+  AND status NOT IN ('succeeded', 'failed', 'skipped', 'canceled')
+`
+
 const CLAIM_WORKFLOW_NODE_SQL = `
 UPDATE workflow_nodes
 SET claimed_by = @claimed_by,
@@ -844,6 +896,15 @@ function sqliteClaimWorkflowNode(db, { workflowId, stepId, claimedBy, attempt })
   return info.changes > 0
 }
 
+function sqliteTouchWorkflowNode(db, { workflowId, stepId, at }) {
+  const info = db.prepare(TOUCH_WORKFLOW_NODE_SQL).run({
+    workflow_id: workflowId,
+    step_id: stepId,
+    updated_at: at ?? new Date().toISOString(),
+  })
+  return info.changes > 0
+}
+
 function sqliteResumeWorkflowNode(db, { workflowId, stepId }) {
   const now = new Date().toISOString()
   const info = db.prepare(RESUME_WORKFLOW_NODE_SQL).run({
@@ -986,7 +1047,7 @@ export function initDb(stateHome) {
     const db = sqliteInitDb(home)
     return { db, backend: 'sqlite', stateHome: home }
   }
-  jsonInitDb(home)
+  mutateJsonStore(home, () => jsonInitDb(home))
   return { db: null, backend: 'json', stateHome: home }
 }
 
@@ -1001,7 +1062,7 @@ export function upsertJob(ctx, row) {
     sqliteUpsertJob(ctx.db, row)
   } else {
     const home = normalizeHome(ctx?.stateHome)
-    jsonUpsertJob(home, row)
+    mutateJsonStore(home, () => jsonUpsertJob(home, row))
   }
 }
 
@@ -1043,7 +1104,7 @@ export function upsertLease(ctx, row) {
     sqliteUpsertLease(ctx.db, row)
   } else {
     const home = normalizeHome(ctx?.stateHome)
-    jsonUpsertLease(home, row)
+    mutateJsonStore(home, () => jsonUpsertLease(home, row))
   }
 }
 
@@ -1057,7 +1118,7 @@ export function deleteLease(ctx, jobId) {
     sqliteDeleteLease(ctx.db, jobId)
   } else {
     const home = normalizeHome(ctx?.stateHome)
-    jsonDeleteLease(home, jobId)
+    mutateJsonStore(home, () => jsonDeleteLease(home, jobId))
   }
 }
 
@@ -1085,7 +1146,7 @@ export function upsertWorkflow(ctx, row) {
     sqliteUpsertWorkflow(ctx.db, row)
   } else {
     const home = normalizeHome(ctx?.stateHome)
-    jsonUpsertWorkflow(home, row)
+    mutateJsonStore(home, () => jsonUpsertWorkflow(home, row))
   }
 }
 
@@ -1113,7 +1174,7 @@ export function upsertWorkflowNode(ctx, row) {
     sqliteUpsertWorkflowNode(ctx.db, row)
   } else {
     const home = normalizeHome(ctx?.stateHome)
-    jsonUpsertWorkflowNode(home, row)
+    mutateJsonStore(home, () => jsonUpsertWorkflowNode(home, row))
   }
 }
 
@@ -1157,7 +1218,16 @@ export function claimWorkflowNode(ctx, { workflowId, stepId, claimedBy, attempt 
     return sqliteClaimWorkflowNode(ctx.db, { workflowId, stepId, claimedBy, attempt })
   }
   const home = normalizeHome(ctx?.stateHome)
-  return jsonClaimWorkflowNode(home, { workflowId, stepId, claimedBy, attempt })
+  return mutateJsonStore(home, () => jsonClaimWorkflowNode(home, { workflowId, stepId, claimedBy, attempt }))
+}
+
+export function touchWorkflowNode(ctx, { workflowId, stepId, at }) {
+  if (!ctx) return false
+  if (ctx.backend === 'sqlite') {
+    return sqliteTouchWorkflowNode(ctx.db, { workflowId, stepId, at })
+  }
+  const home = normalizeHome(ctx?.stateHome)
+  return jsonTouchWorkflowNode(home, { workflowId, stepId, at })
 }
 
 /**
@@ -1171,7 +1241,7 @@ export function publishWorkflowNodeReady(ctx, { workflowId, stepId }) {
     return sqlitePublishWorkflowNodeReady(ctx.db, { workflowId, stepId })
   }
   const home = normalizeHome(ctx?.stateHome)
-  return jsonPublishWorkflowNodeReady(home, { workflowId, stepId })
+  return mutateJsonStore(home, () => jsonPublishWorkflowNodeReady(home, { workflowId, stepId }))
 }
 
 /**
@@ -1185,7 +1255,7 @@ export function resumeWorkflowNode(ctx, { workflowId, stepId }) {
     return sqliteResumeWorkflowNode(ctx.db, { workflowId, stepId })
   }
   const home = normalizeHome(ctx?.stateHome)
-  return jsonResumeWorkflowNode(home, { workflowId, stepId })
+  return mutateJsonStore(home, () => jsonResumeWorkflowNode(home, { workflowId, stepId }))
 }
 
 /**
@@ -1197,7 +1267,7 @@ export function upsertHarnessOrigin(ctx, row) {
     return sqliteUpsertHarnessOrigin(ctx.db, row)
   }
   const home = normalizeHome(ctx?.stateHome)
-  return jsonUpsertHarnessOrigin(home, row)
+  return mutateJsonStore(home, () => jsonUpsertHarnessOrigin(home, row))
 }
 
 /**
@@ -1216,7 +1286,7 @@ export function upsertHandoff(ctx, row) {
     return sqliteUpsertHandoff(ctx.db, row)
   }
   const home = normalizeHome(ctx?.stateHome)
-  return jsonUpsertHandoff(home, row)
+  return mutateJsonStore(home, () => jsonUpsertHandoff(home, row))
 }
 
 export function getHandoff(ctx, workflowId, stepId) {
@@ -1240,7 +1310,7 @@ export function addContextEntry(ctx, row) {
     return sqliteAddContextEntry(ctx.db, row)
   }
   const home = normalizeHome(ctx?.stateHome)
-  return jsonAddContextEntry(home, row)
+  return mutateJsonStore(home, () => jsonAddContextEntry(home, row))
 }
 
 export function listContextEntries(ctx, workflowId, stepId = null) {
@@ -1257,7 +1327,7 @@ export function insertAgentMessage(ctx, row) {
     return sqliteInsertAgentMessage(ctx.db, row)
   }
   const home = normalizeHome(ctx?.stateHome)
-  return jsonInsertAgentMessage(home, row)
+  return mutateJsonStore(home, () => jsonInsertAgentMessage(home, row))
 }
 
 export function listAgentMessages(ctx, options = {}) {
@@ -1275,7 +1345,7 @@ export function markAgentMessageDelivered(ctx, id, at) {
     return sqliteMarkAgentMessageDelivered(ctx.db, id, at)
   }
   const home = normalizeHome(ctx?.stateHome)
-  return jsonMarkAgentMessageDelivered(home, id, at)
+  return mutateJsonStore(home, () => jsonMarkAgentMessageDelivered(home, id, at))
 }
 
 export function markAgentMessageAck(ctx, id, at) {
@@ -1284,7 +1354,7 @@ export function markAgentMessageAck(ctx, id, at) {
     return sqliteMarkAgentMessageAck(ctx.db, id, at)
   }
   const home = normalizeHome(ctx?.stateHome)
-  return jsonMarkAgentMessageAck(home, id, at)
+  return mutateJsonStore(home, () => jsonMarkAgentMessageAck(home, id, at))
 }
 
 /**
