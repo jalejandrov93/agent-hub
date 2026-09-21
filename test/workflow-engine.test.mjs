@@ -233,14 +233,17 @@ test('engine: resume after restart does not re-execute succeeded nodes', async (
   const prepRow = getWorkflowNode(dbCtx, 'wf-resume', 'prep')
   assert.equal(prepRow.status, 'succeeded')
 
-  // Simulate work left in running or ready state after crash
+  // Simulate work left running after a crash. The lease is aged past the
+  // claim TTL: that is what marks the owner dead, and the scheduler must not
+  // steal a node whose lease is still fresh (a live peer), so a fresh
+  // timestamp would (correctly) be left alone.
   upsertWorkflowNode(dbCtx, {
     workflow_id: 'wf-resume',
     step_id: 'work',
     status: 'running',
     attempt: 0,
     claimed_by: 'old_dead_worker',
-    updated_at: new Date().toISOString(),
+    updated_at: new Date(Date.now() - 10 * 60_000).toISOString(),
   })
 
   // 2. Simulate process restart: close DB handles, reset singletons

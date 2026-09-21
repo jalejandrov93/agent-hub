@@ -46,7 +46,7 @@ src/
   context.mjs        workflow context & handoff persistence (task_context / task_handoffs)
   handoff.mjs        structured handoff schemas (Base, Research, Security, Implementation, Review)
   roles.mjs          role definitions (TRACE_ANALYST, SECURITY_REVIEWER, ARCHITECT, IMPLEMENTER, etc.)
-  process.mjs        spawn argv, SIGTERM->SIGKILL ladder, runCommand()
+  process.mjs        spawn argv, SIGINT->SIGTERM->SIGKILL ladder, runCommand()
   jobrunner.mjs      ties process+jobstore+worktree+timeouts+learnings+readguard+sandbox into startJob/cancelJob
   dispatch.mjs       atomic decide+execute: preflight revalidation, policy recovery, idempotency CAS
   execution-graph.mjs pure execution graph builder (roots, nodes, retry/resume/delegate edges)

@@ -68,4 +68,11 @@ test('isWorktreeClean', async (t) => {
     const result = isWorktreeClean(tmpDir)
     assert.deepEqual(result, { clean: false, reason: 'not-a-git-worktree' })
   })
+
+  await t.test('a missing cwd fails closed instead of inspecting the process cwd', () => {
+    // execFileSync({ cwd: undefined }) silently inherits process.cwd(), so the
+    // caller would get the cleanliness of whatever repo the hub runs from.
+    assert.deepEqual(isWorktreeClean(undefined), { clean: false, reason: 'missing-cwd' })
+    assert.deepEqual(isWorktreeClean(''), { clean: false, reason: 'missing-cwd' })
+  })
 })

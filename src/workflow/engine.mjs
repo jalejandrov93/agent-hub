@@ -142,6 +142,73 @@ export function transitionNode(ctx, { workflowId, stepId, from, to, attempt, res
   return getWorkflowNode(ctx, workflowId, stepId)
 }
 
+/**
+ * Adopt a status an external actor already wrote for this node instead of
+ * overwriting it. Terminal statuses have no outgoing transitions, so writing
+ * FAILED (or READY) over CANCELED/FAILED/SUCCEEDED throws and escapes
+ * runWorkflow; adopting keeps the workflow honest about what really happened.
+ * @returns {boolean} true when an external terminal state was adopted.
+ */
+function adoptExternalTerminal(ctx, { workflow, node, nodeStates, attempt, revision, error }) {
+  const row = getWorkflowNode(ctx, workflow.id, node.id)
+  if (!row || !isTerminalStatus(row.status)) return false
+  nodeStates.set(node.id, {
+    ...(nodeStates.get(node.id) || {}),
+    status: row.status,
+    attempt: row.attempt ?? attempt,
+    ...(error ? { error } : {}),
+    revision,
+  })
+  return true
+}
+
+/**
+ * A canceled job is terminal: mark the node canceled (valid from running or
+ * waiting) and stop. Never retry it, never overwrite it with FAILED.
+ */
+function finalizeCanceledNode(ctx, { workflow, node, nodeStates, attempt, revision, error }) {
+  const row = getWorkflowNode(ctx, workflow.id, node.id)
+  if (!isTerminalStatus(row?.status)) {
+    transitionNode(ctx, { workflowId: workflow.id, stepId: node.id, to: NODE_STATUS.CANCELED, attempt })
+  }
+  nodeStates.set(node.id, {
+    ...(nodeStates.get(node.id) || {}),
+    status: NODE_STATUS.CANCELED,
+    attempt,
+    ...(error ? { error } : {}),
+    revision,
+  })
+}
+
+/**
+ * Can a non-terminal node owned by ANOTHER worker be re-queued?
+ *
+ * Only when its lease expired, or when an explicit liveness probe says the
+ * owner is gone. A fresh foreign claim is a live peer: stealing it would run
+ * the node twice, and the CAS claim is supposed to be the single winner gate
+ * (see the "double scheduler" test). Runtime passes call this on every wave so
+ * a peer that dies mid-run is reclaimed as soon as its lease expires, which is
+ * what bounds the scheduler wait.
+ *
+ * @returns {boolean} true when the node was released back to READY.
+ */
+function reclaimOrphanedNode(ctx, { workflowId, stepId, row, claimedBy, ownerAlive, hasExplicitProbe, leaseTtlMs }) {
+  if (!row || isTerminalStatus(row.status)) return false
+  if (row.status !== NODE_STATUS.RUNNING && row.status !== NODE_STATUS.WAITING) return false
+  const owner = row.claimed_by
+  if (!owner || owner === claimedBy) return false
+  const updatedAt = Date.parse(row.updated_at ?? '') || 0
+  const leaseExpired = updatedAt > 0 && Date.now() - updatedAt > leaseTtlMs
+  // With an explicit probe the owner's liveness is authoritative: an expired
+  // lease alone never takes a node from an owner that still answers (see
+  // test/chaos/chaos.test.mjs "chaos 3"). Without a probe the lease is the only
+  // signal there is, so expiry is what marks the owner gone.
+  const ownerConfirmedDead = hasExplicitProbe ? !ownerAlive(owner, claimedBy) : true
+  if (!leaseExpired || !ownerConfirmedDead) return false
+  transitionNode(ctx, { workflowId, stepId, to: NODE_STATUS.READY, attempt: row.attempt, claimedBy: null })
+  return true
+}
+
 function isHandleLike(value) {
   if (!value || typeof value !== 'object') return false
   if (typeof value.abort === 'function' && typeof value.jobId === 'string') return true
@@ -777,6 +844,15 @@ async function executeNode({
       return
     } catch (err) {
       lastError = err
+
+      // A canceled job is terminal, and a node an external actor already
+      // finalized must never be written over (see the helpers below).
+      if (err.code === 'ECANCELED') {
+        finalizeCanceledNode(ctx, { workflow, node, nodeStates, attempt, revision, error: err })
+        return
+      }
+      if (adoptExternalTerminal(ctx, { workflow, node, nodeStates, attempt, revision, error: err })) return
+
       if (err.code === 'REVISION_REQUESTED' && revision < maxRevisionAttempts) {
         revisionFeedback = buildRevisionFeedback({ judge: err.judge, verification: err.verification })
         revision++
@@ -809,7 +885,9 @@ async function executeNode({
     }
   }
 
-  // Attempts exhausted -> FAILED
+  // Attempts exhausted -> FAILED. If an external actor finalized the node
+  // meanwhile, adopt that instead of writing over a terminal state.
+  if (adoptExternalTerminal(ctx, { workflow, node, nodeStates, attempt, revision, error: lastError })) return
   const now = new Date().toISOString()
   const errorPayload = {
     error: lastError?.message || String(lastError),
@@ -1011,18 +1089,16 @@ export async function runWorkflow({
   waitingTimeoutS = 300,
   leaseTtlMs = CLAIM_LEASE_TTL_MS,
   isOwnerAlive = null,
+  stallTimeoutS = 0,
 } = {}) {
   const dbCtx = ctx || getDb(env)
   let workflow = null
   const isResume = Boolean(!inputWorkflow && inputWorkflowId)
-  // Liveness probe: by default any foreign owner is assumed dead (a resume
-  // means this process restarted and the old holder is gone). Pass an
-  // explicit isOwnerAlive(owner, me) for precise AND semantics with the
-  // lease check below.
+  // Liveness probe semantics: a foreign owner is presumed GONE only when its
+  // lease expired. Pass an explicit isOwnerAlive(owner, me) to reclaim earlier
+  // (probe says dead). Without a probe a fresh claim is respected: we never
+  // steal a live peer's node.
   const ownerAlive = typeof isOwnerAlive === 'function' ? isOwnerAlive : () => false
-  // Sin probe explícito, un dueño foráneo se asume muerto (resume tras
-  // reinicio: el holder anterior desapareció con el proceso). Con probe
-  // explícito rige el AND estricto: lease expirado Y dueño muerto.
   const hasExplicitProbe = typeof isOwnerAlive === 'function'
 
   if (inputWorkflow) {
@@ -1063,22 +1139,12 @@ export async function runWorkflow({
       let status = row.status
       let claimed = row.claimed_by
 
-      // On resume: orphaned running nodes revive to ready ONLY when the
-      // lease expired AND the owner is dead; otherwise re-adopt without
-      // re-executing. Waiting nodes are always re-adopted (never reset).
-      if (isResume && status === NODE_STATUS.RUNNING) {
-        const owner = row.claimed_by
-        if (owner && owner !== claimedBy && !ownerAlive(owner, claimedBy)) {
-          const updatedAt = Date.parse(row.updated_at ?? '') || 0
-          const leaseExpired = Date.now() - updatedAt > leaseTtlMs
-          if (leaseExpired || !hasExplicitProbe) {
-            status = NODE_STATUS.READY
-            transitionNode(dbCtx, { workflowId: workflow.id, stepId: node.id, to: NODE_STATUS.READY, attempt: row.attempt, claimedBy: null })
-            claimed = null
-          }
-        } else if (!owner || owner === claimedBy) {
-          // Same owner (or unclaimed): keep running, re-adopt silently.
-        }
+      // An orphaned node (owner gone) is re-queued only when its lease expired
+      // or an explicit probe says the owner is dead; a live peer's node is
+      // never stolen.
+      if (reclaimOrphanedNode(dbCtx, { workflowId: workflow.id, stepId: node.id, row, claimedBy, ownerAlive, hasExplicitProbe, leaseTtlMs })) {
+        status = NODE_STATUS.READY
+        claimed = null
       }
 
       let existingHandoff = null
@@ -1107,9 +1173,49 @@ export async function runWorkflow({
     }
   }
 
-  // Execution loop (wave scheduler)
+  // Execution loop (wave scheduler). Progress is tracked by the node-state
+  // signature: if nothing changes for the stall budget, the run fails with a
+  // diagnostic instead of waiting (or spinning) forever. Default budget is
+  // 5x the claim lease.
+  const stallBudgetMs = (stallTimeoutS > 0 ? stallTimeoutS : Math.max(30, (leaseTtlMs / 1000) * 5)) * 1000
+  let lastSignature = null
+  let lastProgressAt = Date.now()
+
   while (true) {
     refreshNodeStates(dbCtx, workflow.id, nodeStates)
+
+    // A peer can die mid-run, so the lease is re-checked on every pass: an
+    // orphan is reclaimed as soon as its lease expires, which is what bounds
+    // the wait below instead of hanging on a dead claim.
+    for (const candidate of workflow.nodes) {
+      const candidateRow = getWorkflowNode(dbCtx, workflow.id, candidate.id)
+      if (reclaimOrphanedNode(dbCtx, { workflowId: workflow.id, stepId: candidate.id, row: candidateRow, claimedBy, ownerAlive, hasExplicitProbe, leaseTtlMs })) {
+        nodeStates.set(candidate.id, {
+          ...(nodeStates.get(candidate.id) || {}),
+          status: NODE_STATUS.READY,
+          attempt: candidateRow.attempt,
+          claimed_by: null,
+        })
+      }
+    }
+
+    const signature = workflow.nodes
+      .map((n) => `${n.id}:${nodeStates.get(n.id)?.status ?? ''}:${nodeStates.get(n.id)?.attempt ?? ''}`)
+      .join('|')
+    if (signature !== lastSignature) {
+      lastSignature = signature
+      lastProgressAt = Date.now()
+    } else if (Date.now() - lastProgressAt > stallBudgetMs) {
+      const stuck = workflow.nodes
+        .filter((n) => !isTerminalStatus(nodeStates.get(n.id)?.status))
+        .map((n) => `${n.id}=${nodeStates.get(n.id)?.status ?? 'unknown'} owner=${nodeStates.get(n.id)?.claimed_by ?? 'none'}`)
+        .join(', ')
+      appendEvent(
+        { kind: 'workflow.stalled', workflow_id: workflow.id, reason: 'no node state change', stuck, stallTimeoutS: stallBudgetMs / 1000 },
+        { env }
+      )
+      throw new Error(`Workflow "${workflow.id}" stalled: no node state change for ${stallBudgetMs / 1000}s (${stuck})`)
+    }
 
     const isAllTerminal = workflow.nodes.every((n) => isTerminalStatus(nodeStates.get(n.id)?.status))
     if (isAllTerminal) break
