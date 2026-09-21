@@ -33,6 +33,7 @@ src/
   jobstore.mjs        runs/<jobId>/{prompt.txt,stdout.log,response.txt,result.json}
   artifacts.mjs       runs/<workflowId>/<stepId>/artifacts/ evidence store + artifact:// refs (C2)
   verify.mjs          declarative argv/artifact/diff checks -> { verified, checks } (C3)
+  judge.mjs           verification verdict -> accepted | needs_revision | rejected | blocked (C4)
   process.mjs         spawn argv, SIGTERM->SIGKILL ladder, runCommand()
   jobrunner.mjs        ties process+jobstore+worktree+timeouts+learnings+readguard into startJob/cancelJob
   preflight.mjs        L0-L3 ladder, TTL cache, circuit breaker
@@ -588,6 +589,43 @@ result:
 - C3 produces the verdict; it does not revise. Turning `needs_revision` into a
   re-dispatch is C4's job. There is no shell string anywhere: checks are argv
   arrays run through the same `runCommand` the rest of the hub uses.
+
+### C4 judge and revision loop (`src/judge.mjs`)
+
+A verification verdict is data; the judge turns it into a decision and, when
+the decision is `needs_revision`, the engine tries again:
+
+```
+implementation -> verification -> judge -> accepted
+                                    |-> needs_revision -> worker -> verification -> judge
+                                    |-> rejected
+                                    |-> blocked
+```
+
+```js
+{
+  id: 'implementation',
+  type: 'delegate',
+  maxRevisionAttempts: 2,
+  verify: { required: true, checks: [{ name: 'tests', argv: ['npm', 'test'] }] },
+}
+```
+
+- Decision rules are deterministic over the C3 verdict: no verification or
+  `verified: true` -> `accepted`; a failed `artifact` check whose ref points to
+  **another** step (upstream evidence the node cannot produce itself) ->
+  `blocked`; otherwise `revision < maxRevisionAttempts` -> `needs_revision`,
+  else `rejected`.
+- `needs_revision` resets the attempt counter and re-dispatches the worker
+  against the same node, with no backoff and up to `maxRevisionAttempts` times
+  (default `0`, so a node without it behaves exactly as in C3).
+- `rejected`/`blocked` fail the node only when `verify.required` is true;
+  otherwise the node still `succeeded` and the verdict is the truth. A
+  `blocked` verdict short-circuits: no revision is burned on an upstream
+  failure the node cannot fix.
+- The verdict is `{ verdict, reason, revision, maxRevisionAttempts, required,
+  failed }`, written to `artifacts/judge.json` next to `verification.json`, and
+  carried on the node result and on `job.finished`/`job.failed`.
 
 ### Harness profiles (`src/harness/`)
 

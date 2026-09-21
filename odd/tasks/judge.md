@@ -120,4 +120,5 @@ Out of scope (explicit follow-ups):
   on node result/events, `test/workflow-judge.test.mjs` (4 tests). C3's 4 tests
   still green. Verified: 20/20 targeted; `npm test` 1049 pass / 0 fail /
   8 pre-existing cancelled.
-- T3 pending: README + CHANGELOG.
+- 2026-09-20: **T3 done** — README layout + "C4 judge and revision loop"
+  section + CHANGELOG. Feature complete.
