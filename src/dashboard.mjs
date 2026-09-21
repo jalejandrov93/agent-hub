@@ -5,6 +5,7 @@ import { fileURLToPath } from 'node:url'
 import { readTail, appendEvent } from './eventlog.mjs'
 import { listJobs } from './jobstore.mjs'
 import { getWorkGraph } from './workGraph.mjs'
+import { buildExecutionGraph } from './execution-graph.mjs'
 import { readCache, agentsStatus, pingAgent, breakerStatus } from './preflight.mjs'
 import { cancelJob } from './jobrunner.mjs'
 import { paths, stateHome, DEFAULT_TIMEOUTS_S, CIRCUIT_BREAKER, PREFLIGHT_TTL_MS, WRITE_ALLOWLIST, MODEL_REGISTRY } from './config.mjs'
@@ -454,6 +455,17 @@ export function createServer({ env = process.env, commandRunner = runCommand, di
     if (url.pathname === '/api/work-graph' && req.method === 'GET') {
       try {
         sendJson(res, 200, getWorkGraph({ env }))
+      } catch (error) {
+        sendError(res, domainError(error))
+      }
+      return
+    }
+
+    if (url.pathname === '/api/execution-graph' && req.method === 'GET') {
+      try {
+        const rootExecutionId = url.searchParams.get('root') || null
+        const jobs = listJobs(env)
+        sendJson(res, 200, buildExecutionGraph({ jobs, rootExecutionId }))
       } catch (error) {
         sendError(res, domainError(error))
       }
