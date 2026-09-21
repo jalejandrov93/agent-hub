@@ -18,6 +18,7 @@ import { resumeRemoteJobs } from './cloud/runner.mjs'
 import { metricsTool, executionGraphTool } from './tools/insights.mjs'
 import { planTaskTool, executePlanTool } from './tools/planner.mjs'
 import { learningProposeTool } from './tools/learnings.mjs'
+import { agentSendMessageTool, agentInboxTool, agentAckTool, agentPeersTool } from './tools/messaging.mjs'
 import { scheduleStartupDiscovery, scheduleQuotaWarmup } from './startup.mjs'
 import { dispatch } from './dispatch.mjs'
 import { recordDispatchOrigin } from './harness/origin.mjs'
@@ -58,6 +59,53 @@ const log = (...args) => console.error('[agent-hub]', ...args)
 const AgentsStatusResponse = z.object({ agents: z.array(AgentStatusRow) }).passthrough()
 const AgentsQuotaResponseWrapper = z.object({ agents: z.array(AgentQuotaRow) }).passthrough()
 const LearningProposeResponse = z.object({ learning: Learning, note: z.string() }).passthrough()
+
+const AgentSendMessageResponse = z.object({
+  ok: z.boolean(),
+  messageId: z.number().optional(),
+  status: z.string().optional(),
+  truncated: z.boolean().optional(),
+  error: z.string().optional(),
+}).passthrough()
+
+const AgentInboxMessage = z.object({
+  id: z.number(),
+  from: z.string(),
+  kind: z.string(),
+  text: z.string(),
+  createdAt: z.string(),
+  deliveredAt: z.string().nullable().optional(),
+  ackAt: z.string().nullable().optional(),
+})
+
+const AgentInboxResponse = z.object({
+  ok: z.boolean(),
+  messages: z.array(AgentInboxMessage).optional(),
+  error: z.string().optional(),
+}).passthrough()
+
+const AgentAckResponse = z.object({
+  ok: z.boolean(),
+  acked: z.boolean().optional(),
+  ackAt: z.string().optional(),
+  error: z.string().optional(),
+}).passthrough()
+
+const AgentPeerRow = z.object({
+  jobId: z.string(),
+  agent: z.string(),
+  model: z.string(),
+  status: z.string(),
+  stepId: z.string().nullable().optional(),
+  messagingTurnBoundary: z.boolean(),
+  messagingMidRun: z.boolean(),
+})
+
+const AgentPeersResponse = z.object({
+  ok: z.boolean(),
+  peers: z.array(AgentPeerRow).optional(),
+  error: z.string().optional(),
+}).passthrough()
 
 const ok = (payload, structuredContent) => ({
   content: [{ type: 'text', text: JSON.stringify(payload, null, 2) }],
@@ -168,6 +216,90 @@ export function buildServer() {
     TOOLS.push({ name, ...def })
     return server.registerTool(name, def, handler)
   }
+
+  register(
+    'agent_send_message',
+    {
+      title: 'Send a message to a peer agent',
+      description:
+        'Send an inter-agent message to a peer mailbox, scoped to a root execution. ' +
+        'ACK SEMANTICS: an ACK means the message was deposited into the peer context envelope; ' +
+        'it NEVER means the peer read, understood, agreed, or acted on it.',
+      inputSchema: {
+        to: z.string().min(1).describe('Recipient peer: an agent name or jobId. Wildcards are not supported.'),
+        text: z.string().min(1).describe('Message text (truncated to 4000 characters).'),
+        kind: z.enum(['notice', 'query', 'response']).optional().describe('Message kind (notice, query, response; default notice).'),
+        rootExecutionId: z.string().optional().describe('Root execution ID scoping this conversation. Inferred from recipient jobId if omitted.'),
+        from: z.string().optional().describe('Sender identifier (default: orchestrator).'),
+        workflowId: z.string().optional().describe('Optional workflow ID scoping the message.'),
+      },
+      outputSchema: AgentSendMessageResponse,
+      annotations: { readOnlyHint: false, idempotentHint: false },
+    },
+    guard(({ to, text, kind, rootExecutionId, from, workflowId }) =>
+      agentSendMessageTool({ to, text, kind, rootExecutionId, from, workflowId, env: process.env })
+    )
+  )
+
+  register(
+    'agent_inbox',
+    {
+      title: 'Read agent inbox messages',
+      description:
+        'Read messages from the agent mailbox, oldest first, and mark returned messages delivered. ' +
+        'ACK SEMANTICS: an ACK means the message was deposited into the peer context envelope; ' +
+        'it NEVER means the peer read, understood, agreed, or acted on it.',
+      inputSchema: {
+        to: z.string().optional().describe('Filter messages by recipient agent name or jobId.'),
+        rootExecutionId: z.string().optional().describe('Filter messages by root execution ID.'),
+        unreadOnly: z.boolean().optional().describe('When true, return only undelivered messages and mark them delivered (default true).'),
+      },
+      outputSchema: AgentInboxResponse,
+      annotations: { readOnlyHint: false, idempotentHint: false },
+    },
+    guard(({ to, rootExecutionId, unreadOnly }) =>
+      agentInboxTool({ to, rootExecutionId, unreadOnly, env: process.env })
+    )
+  )
+
+  register(
+    'agent_ack',
+    {
+      title: 'Acknowledge an agent message',
+      description:
+        'Acknowledge receipt of a message into the context envelope. ' +
+        'ACK SEMANTICS: an ACK means the message was deposited into the peer context envelope; ' +
+        'it NEVER means the peer read, understood, agreed, or acted on it.',
+      inputSchema: {
+        messageId: z.number().describe('Message ID to acknowledge.'),
+      },
+      outputSchema: AgentAckResponse,
+      annotations: { readOnlyHint: false, idempotentHint: false },
+    },
+    guard(({ messageId }) =>
+      agentAckTool({ messageId, env: process.env })
+    )
+  )
+
+  register(
+    'agent_peers',
+    {
+      title: 'List peers participating in root execution',
+      description:
+        'List active peers participating in a root execution, including their messaging capabilities ' +
+        '(messagingTurnBoundary, messagingMidRun). ' +
+        'ACK SEMANTICS: an ACK means the message was deposited into the peer context envelope; ' +
+        'it NEVER means the peer read, understood, agreed, or acted on it.',
+      inputSchema: {
+        rootExecutionId: z.string().describe('Root execution ID to find peers for.'),
+      },
+      outputSchema: AgentPeersResponse,
+      annotations: { readOnlyHint: false, idempotentHint: true },
+    },
+    guard(({ rootExecutionId }) =>
+      agentPeersTool({ rootExecutionId, env: process.env })
+    )
+  )
 
   register(
     'agents_quota',

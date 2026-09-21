@@ -52,7 +52,7 @@ function readJsonStore(stateHome) {
   try {
     return JSON.parse(fs.readFileSync(p, 'utf8'))
   } catch {
-    return { workflows: {}, workflow_nodes: {}, jobs: {}, leases: {}, harness_origins: {}, task_handoffs: {}, task_context: [] }
+    return { workflows: {}, workflow_nodes: {}, jobs: {}, leases: {}, harness_origins: {}, task_handoffs: {}, task_context: [], agent_messages: [] }
   }
 }
 
@@ -66,7 +66,7 @@ function jsonInitDb(stateHome) {
   ensureDir(stateHome)
   const p = jsonStoragePath(stateHome)
   if (!fs.existsSync(p)) {
-    writeJsonStore(stateHome, { workflows: {}, workflow_nodes: {}, jobs: {}, leases: {}, harness_origins: {}, task_handoffs: {}, task_context: [] })
+    writeJsonStore(stateHome, { workflows: {}, workflow_nodes: {}, jobs: {}, leases: {}, harness_origins: {}, task_handoffs: {}, task_context: [], agent_messages: [] })
   }
 }
 
@@ -347,6 +347,74 @@ function jsonListContextEntries(stateHome, workflowId, stepId = null) {
   return [...filtered].sort((a, b) => (a.id || 0) - (b.id || 0))
 }
 
+function normalizeAgentMessageRow(row) {
+  return {
+    root_execution_id: row.root_execution_id ?? row.rootExecutionId,
+    workflow_id: row.workflow_id ?? row.workflowId ?? null,
+    from_agent: row.from_agent ?? row.fromAgent ?? row.from,
+    to_agent: row.to_agent ?? row.toAgent ?? row.to,
+    kind: row.kind,
+    text: row.text,
+    created_at: row.created_at ?? row.createdAt ?? new Date().toISOString(),
+    delivered_at: row.delivered_at ?? row.deliveredAt ?? null,
+    ack_at: row.ack_at ?? row.ackAt ?? null,
+  }
+}
+
+function jsonInsertAgentMessage(stateHome, row) {
+  const store = readJsonStore(stateHome)
+  store.agent_messages = store.agent_messages || []
+  const norm = normalizeAgentMessageRow(row)
+  const maxId = store.agent_messages.reduce((max, m) => Math.max(max, Number(m.id) || 0), 0)
+  const entry = { id: row.id != null ? Number(row.id) : maxId + 1, ...norm }
+  store.agent_messages.push(entry)
+  writeJsonStore(stateHome, store)
+  return entry
+}
+
+function jsonListAgentMessages(stateHome, { to, rootExecutionId, unreadOnly } = {}) {
+  const store = readJsonStore(stateHome)
+  const messages = store.agent_messages || []
+  const filtered = messages.filter((m) => {
+    if (to) {
+      if (Array.isArray(to)) {
+        if (!to.includes(m.to_agent)) return false
+      } else if (m.to_agent !== to) {
+        return false
+      }
+    }
+    if (rootExecutionId && m.root_execution_id !== rootExecutionId) return false
+    if (unreadOnly && m.delivered_at != null) return false
+    return true
+  })
+  return [...filtered].sort((a, b) => (a.id || 0) - (b.id || 0))
+}
+
+function jsonMarkAgentMessageDelivered(stateHome, id, at) {
+  const store = readJsonStore(stateHome)
+  store.agent_messages = store.agent_messages || []
+  const msg = store.agent_messages.find((m) => m.id === Number(id))
+  if (!msg) return false
+  msg.delivered_at = at ?? new Date().toISOString()
+  writeJsonStore(stateHome, store)
+  return true
+}
+
+function jsonMarkAgentMessageAck(stateHome, id, at) {
+  const store = readJsonStore(stateHome)
+  store.agent_messages = store.agent_messages || []
+  const msg = store.agent_messages.find((m) => m.id === Number(id))
+  if (!msg) return false
+  msg.ack_at = at ?? new Date().toISOString()
+  writeJsonStore(stateHome, store)
+  return true
+}
+
+function jsonGetAgentMessage(stateHome, id) {
+  const store = readJsonStore(stateHome)
+  return (store.agent_messages || []).find((m) => m.id === Number(id)) ?? null
+}
+
 /* ------------------------------------------------------------------ */
 /*  better-sqlite3                                                     */
 /* ------------------------------------------------------------------ */
@@ -415,6 +483,21 @@ CREATE TABLE IF NOT EXISTS task_context (
   text TEXT,
   created_at TEXT
 );
+
+CREATE TABLE IF NOT EXISTS agent_messages (
+  id INTEGER PRIMARY KEY AUTOINCREMENT,
+  root_execution_id TEXT NOT NULL,
+  workflow_id TEXT,
+  from_agent TEXT NOT NULL,
+  to_agent TEXT NOT NULL,
+  kind TEXT NOT NULL,
+  text TEXT NOT NULL,
+  created_at TEXT NOT NULL,
+  delivered_at TEXT,
+  ack_at TEXT
+);
+
+CREATE INDEX IF NOT EXISTS idx_agent_messages_delivery ON agent_messages (to_agent, root_execution_id, delivered_at);
 `
 
 const UPSERT_JOB_SQL = `
@@ -538,6 +621,11 @@ VALUES (@workflow_id, @step_id, @kind, @text, @created_at)
 const LIST_CONTEXT_ENTRIES_SQL = `SELECT * FROM task_context WHERE workflow_id = ? ORDER BY id ASC`
 
 const LIST_CONTEXT_ENTRIES_BY_STEP_SQL = `SELECT * FROM task_context WHERE workflow_id = ? AND step_id = ? ORDER BY id ASC`
+
+const INSERT_AGENT_MESSAGE_SQL = `
+INSERT INTO agent_messages (root_execution_id, workflow_id, from_agent, to_agent, kind, text, created_at, delivered_at, ack_at)
+VALUES (@root_execution_id, @workflow_id, @from_agent, @to_agent, @kind, @text, @created_at, @delivered_at, @ack_at)
+`
 
 function sqliteInitDb(stateHome) {
   const dbPath = paths({ AGENT_HUB_HOME: stateHome }).dbFile
@@ -732,6 +820,56 @@ function sqliteListContextEntries(db, workflowId, stepId = null) {
     return db.prepare(LIST_CONTEXT_ENTRIES_BY_STEP_SQL).all(workflowId, stepId)
   }
   return db.prepare(LIST_CONTEXT_ENTRIES_SQL).all(workflowId)
+}
+
+function sqliteInsertAgentMessage(db, row) {
+  const norm = normalizeAgentMessageRow(row)
+  const info = db.prepare(INSERT_AGENT_MESSAGE_SQL).run(norm)
+  return {
+    id: Number(info.lastInsertRowid),
+    ...norm,
+  }
+}
+
+function sqliteListAgentMessages(db, { to, rootExecutionId, unreadOnly } = {}) {
+  let sql = 'SELECT * FROM agent_messages WHERE 1=1'
+  const params = []
+  if (to) {
+    if (Array.isArray(to)) {
+      if (to.length === 0) return []
+      const placeholders = to.map(() => '?').join(', ')
+      sql += ` AND to_agent IN (${placeholders})`
+      params.push(...to)
+    } else {
+      sql += ' AND to_agent = ?'
+      params.push(to)
+    }
+  }
+  if (rootExecutionId) {
+    sql += ' AND root_execution_id = ?'
+    params.push(rootExecutionId)
+  }
+  if (unreadOnly) {
+    sql += ' AND delivered_at IS NULL'
+  }
+  sql += ' ORDER BY id ASC'
+  return db.prepare(sql).all(...params)
+}
+
+function sqliteMarkAgentMessageDelivered(db, id, at) {
+  const atVal = at ?? new Date().toISOString()
+  const info = db.prepare('UPDATE agent_messages SET delivered_at = ? WHERE id = ?').run(atVal, id)
+  return info.changes > 0
+}
+
+function sqliteMarkAgentMessageAck(db, id, at) {
+  const atVal = at ?? new Date().toISOString()
+  const info = db.prepare('UPDATE agent_messages SET ack_at = ? WHERE id = ?').run(atVal, id)
+  return info.changes > 0
+}
+
+function sqliteGetAgentMessage(db, id) {
+  return db.prepare('SELECT * FROM agent_messages WHERE id = ?').get(id) ?? null
 }
 
 /* ------------------------------------------------------------------ */
@@ -1011,6 +1149,51 @@ export function listContextEntries(ctx, workflowId, stepId = null) {
   }
   const home = normalizeHome(ctx?.stateHome)
   return jsonListContextEntries(home, workflowId, stepId)
+}
+
+export function insertAgentMessage(ctx, row) {
+  if (!ctx) return null
+  if (ctx.backend === 'sqlite') {
+    return sqliteInsertAgentMessage(ctx.db, row)
+  }
+  const home = normalizeHome(ctx?.stateHome)
+  return jsonInsertAgentMessage(home, row)
+}
+
+export function listAgentMessages(ctx, options = {}) {
+  if (!ctx) return []
+  if (ctx.backend === 'sqlite') {
+    return sqliteListAgentMessages(ctx.db, options)
+  }
+  const home = normalizeHome(ctx?.stateHome)
+  return jsonListAgentMessages(home, options)
+}
+
+export function markAgentMessageDelivered(ctx, id, at) {
+  if (!ctx) return false
+  if (ctx.backend === 'sqlite') {
+    return sqliteMarkAgentMessageDelivered(ctx.db, id, at)
+  }
+  const home = normalizeHome(ctx?.stateHome)
+  return jsonMarkAgentMessageDelivered(home, id, at)
+}
+
+export function markAgentMessageAck(ctx, id, at) {
+  if (!ctx) return false
+  if (ctx.backend === 'sqlite') {
+    return sqliteMarkAgentMessageAck(ctx.db, id, at)
+  }
+  const home = normalizeHome(ctx?.stateHome)
+  return jsonMarkAgentMessageAck(home, id, at)
+}
+
+export function getAgentMessage(ctx, id) {
+  if (!ctx) return null
+  if (ctx.backend === 'sqlite') {
+    return sqliteGetAgentMessage(ctx.db, id)
+  }
+  const home = normalizeHome(ctx?.stateHome)
+  return jsonGetAgentMessage(home, id)
 }
 
 export { getDb, closeDb, resetDbInstances } from './db.mjs'
