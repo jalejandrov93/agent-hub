@@ -1,4 +1,4 @@
-import { cleanup, fireEvent, render, screen } from "@testing-library/react"
+import { cleanup, fireEvent, render, screen, within } from "@testing-library/react"
 import { beforeEach, describe, expect, it, vi } from "vitest"
 import type { MetricsRowT } from "@/lib/types"
 import { MetricsView } from "./index"
@@ -22,6 +22,12 @@ const rows: MetricsRowT[] = [
     errorKinds: { timeout: 1 },
     tokensTotal: 1320000,
     tokensAvg: 120000,
+    costUsdAvg: 0.0123,
+    verifiedCount: 8,
+    verifiedSamples: 9,
+    verifiedRate: 0.89,
+    qualityScore: 8.9,
+    revisionAvg: 1.25,
   },
   {
     agent: "opencode",
@@ -38,6 +44,12 @@ const rows: MetricsRowT[] = [
     errorKinds: { empty: 1 },
     tokensTotal: 180000,
     tokensAvg: 90000,
+    costUsdAvg: null,
+    verifiedCount: 0,
+    verifiedSamples: 0,
+    verifiedRate: null,
+    qualityScore: null,
+    revisionAvg: null,
   },
 ]
 
@@ -102,4 +114,26 @@ describe("MetricsView", () => {
     expect(chartRows.map((row) => row.fillOpacity)).toEqual([1, 0.45])
     expect(chartHeightClass(16)).toBe("h-[28rem]")
   })
+
+  it("renders verified, quality, cost, and revision columns", () => {
+    render(<MetricsView />)
+
+    expect(screen.getByText("Verified")).toBeTruthy()
+    expect(screen.getByText("Quality")).toBeTruthy()
+    expect(screen.getByText("Avg cost")).toBeTruthy()
+    expect(screen.getByText("Avg revisions")).toBeTruthy()
+
+    expect(screen.getByText("89.0%")).toBeTruthy()
+    expect(screen.getByText("8.9")).toBeTruthy()
+    expect(screen.getByText("$0.0123")).toBeTruthy()
+    expect(screen.getByText("1.25")).toBeTruthy()
+
+    const opencodeRow = screen.getByText("opencode").closest("tr")!
+    expect(opencodeRow).toBeTruthy()
+    expect(within(opencodeRow).getByText("unverified")).toBeTruthy()
+    const opencodeCells = Array.from(opencodeRow.querySelectorAll("td"))
+    expect(opencodeCells[10]?.textContent).toBe("—")
+    expect(opencodeCells[11]?.textContent).toContain("—")
+  })
 })
+
