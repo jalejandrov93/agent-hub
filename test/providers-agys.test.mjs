@@ -337,14 +337,58 @@ test('parseAgysQuota tolerantly parses valid json and junk input', () => {
   assert.deepEqual(parseAgysQuota('[]'), {})
 })
 
+test('agysRunArgv/agysAutoArgv split an effort-suffixed model into --model + --effort', () => {
+  // agys injects its own `--effort high` when the caller does not pass one, and
+  // agy rejects that against a suffixed model id. The wrapper must split it.
+  assert.deepEqual(agysRunArgv({ profile: 'work', agyArgv: ['--model', 'gemini-3.8-flash-low', '-p', 'hi'] }), [
+    'run',
+    'work',
+    '--',
+    '--model',
+    'gemini-3.8-flash',
+    '-p',
+    'hi',
+    '--effort',
+    'low',
+  ])
+  assert.deepEqual(agysRunArgv({ profile: 'work', agyArgv: ['--model', 'gemini-3.1-pro-high'] }), [
+    'run',
+    'work',
+    '--',
+    '--model',
+    'gemini-3.1-pro',
+    '--effort',
+    'high',
+  ])
+  // An explicit --effort wins and the model id is left alone.
+  assert.deepEqual(agysRunArgv({ profile: 'work', agyArgv: ['--model', 'gemini-3.8-flash-low', '--effort', 'low'] }), [
+    'run',
+    'work',
+    '--',
+    '--model',
+    'gemini-3.8-flash-low',
+    '--effort',
+    'low',
+  ])
+  // No model, or a model without a known effort suffix: unchanged.
+  assert.deepEqual(agysRunArgv({ profile: 'work', agyArgv: ['-p', 'hi'] }), ['run', 'work', '--', '-p', 'hi'])
+  assert.deepEqual(agysRunArgv({ profile: 'work', agyArgv: ['--model', 'gemini-3.8-flash'] }), [
+    'run',
+    'work',
+    '--',
+    '--model',
+    'gemini-3.8-flash',
+  ])
+})
+
 test('agysRunArgv and agysAutoArgv build correct argv arrays', () => {
-  const agyArgv = ['--model', 'gemini-3.8-flash-high', '-p', 'hello']
+  const agyArgv = ['--model', 'gemini-3.8-flash', '-p', 'hello']
   assert.deepEqual(agysRunArgv({ profile: 'work', agyArgv }), [
     'run',
     'work',
     '--',
     '--model',
-    'gemini-3.8-flash-high',
+    'gemini-3.8-flash',
     '-p',
     'hello',
   ])
@@ -353,7 +397,7 @@ test('agysRunArgv and agysAutoArgv build correct argv arrays', () => {
     'auto',
     '--',
     '--model',
-    'gemini-3.8-flash-high',
+    'gemini-3.8-flash',
     '-p',
     'hello',
   ])
@@ -433,7 +477,9 @@ test('runAgyWithProfile invokes agys run when profile given, or falls back to ag
   assert.equal(res1.code, 0)
   assert.equal(calls.length, 1)
   assert.equal(calls[0].cmd, 'agys')
-  assert.deepEqual(calls[0].args, ['run', 'work', '--', ...agyArgv])
+  // The effort suffix moves out of the model id so agys cannot inject its own
+  // --effort high (which agy rejects against a suffixed model).
+  assert.deepEqual(calls[0].args, ['run', 'work', '--', '-p', 'test prompt', '--model', 'gemini-3.8-flash', '--effort', 'high'])
 
   // 2. Fallback when profile is falsy
   calls = []

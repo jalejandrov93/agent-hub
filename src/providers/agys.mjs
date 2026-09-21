@@ -114,12 +114,35 @@ export function parseAgysQuota(input) {
   return result
 }
 
+const AGY_EFFORT_SUFFIXES = ['low', 'medium', 'high']
+
+/**
+ * agys injects its own `--effort high` when the caller does not pass one, and
+ * agy rejects that against a suffixed model id:
+ *   --model gemini-3.8-flash-low conflicts with --effort=high
+ * Our adapter encodes the effort IN the model id (agy's own convention), so
+ * when wrapping through agys we split `<base>-<effort>` into `--model <base>`
+ * plus `--effort <effort>`. An explicit `--effort` is left untouched.
+ */
+export function agyArgvForAgys(agyArgv = []) {
+  const args = [...agyArgv]
+  const modelIdx = args.indexOf('--model')
+  if (modelIdx === -1 || args.includes('--effort')) return args
+  const model = args[modelIdx + 1]
+  if (typeof model !== 'string') return args
+  const match = new RegExp('^(.*)-(' + AGY_EFFORT_SUFFIXES.join('|') + ')$').exec(model)
+  if (!match || !match[1]) return args
+  args[modelIdx + 1] = match[1]
+  args.push('--effort', match[2])
+  return args
+}
+
 export function agysRunArgv({ profile, agyArgv = [] } = {}) {
-  return ['run', profile, '--', ...agyArgv]
+  return ['run', profile, '--', ...agyArgvForAgys(agyArgv)]
 }
 
 export function agysAutoArgv({ agyArgv = [] } = {}) {
-  return ['auto', '--', ...agyArgv]
+  return ['auto', '--', ...agyArgvForAgys(agyArgv)]
 }
 
 export async function isAgysAvailable({ runCommandFn = defaultRunCommand, env = process.env } = {}) {
