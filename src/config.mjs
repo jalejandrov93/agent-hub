@@ -143,10 +143,17 @@ export function resolveTimeoutS(agent, model) {
  * explicit override wins, then the model's MODEL_REGISTRY default, else none.
  */
 /**
- * Sandbox configuration. 'compatibility' is the DEFAULT profile — it only
- * redacts known secret env vars but INHERITS the real HOME directory.
- * compatibility is NOT a security sandbox. Use 'isolated-home' or 'isolated'
- * for stronger credential isolation (HOME points to a fresh temp dir).
+ * Sandbox configuration.
+ * - 'compatibility' (DEFAULT): redacts known secret env vars but INHERITS the real HOME.
+ *   Not a security sandbox.
+ * - 'isolated-home': redacts secret env vars and sets HOME to a fresh empty temp dir.
+ * - 'isolated': redacts secret env vars, sets HOME, TMPDIR, and XDG_* directories to a
+ *   fresh per-call sandbox dir, with opt-in copy via AGENT_HUB_SANDBOX_INCLUDE.
+ *
+ * What these levels do and do NOT protect:
+ * None of these profiles use OS containers, Linux namespaces, cgroups, or network
+ * policies. 'isolated' is still NOT a container; child processes retain regular process
+ * privileges and unrestricted network access.
  */
 export const SANDBOX = {
   defaultProfile: 'compatibility',

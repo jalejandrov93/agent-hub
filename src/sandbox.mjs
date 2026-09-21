@@ -8,19 +8,28 @@ import { SANDBOX } from './config.mjs'
  *
  * Sandbox profiles control how the environment is filtered when spawning CLIs.
  *
- * IMPORTANT: compatibility is NOT a security sandbox. It inherits the real HOME
- * directory and only redacts well-known secret env vars. Use 'isolated-home' or
- * 'isolated' for stronger credential isolation.
+ * Profile levels:
+ * - 'compatibility': Redacts known secret env vars (SECRET_PATTERNS) but inherits
+ *   the real HOME directory. Does NOT isolate disk credentials or filesystem.
+ * - 'isolated-home': Redacts secret env vars and redirects HOME to a fresh empty
+ *   temp directory. Does NOT isolate other paths, temp directories, or network.
+ * - 'isolated': Redacts secret env vars, redirects HOME, TMPDIR, and XDG_* directories
+ *   (XDG_CACHE_HOME, XDG_CONFIG_HOME, XDG_DATA_HOME) into a fresh per-call sandbox
+ *   directory (created via fs.mkdtempSync under os.tmpdir()), creates the XDG subdirs,
+ *   and exposes AGENT_HUB_SANDBOX_DIR. Opt-in credential copy via AGENT_HUB_SANDBOX_INCLUDE
+ *   (comma-separated paths copied into sandbox; relative paths preserve relative path
+ *   under sandbox, absolute paths copy to sandbox root; missing entries skipped; default
+ *   unset/empty copies nothing; uses copy, not symlink).
  *
- * Note on 'isolated': currently `isolated = isolated-home + reserved extension point`
- * until real filesystem and network isolation (e.g. bubblewrap/cgroups/namespaces)
- * is implemented.
+ * What these levels do and do NOT protect:
+ * None of these profiles use OS containers, Linux namespaces, cgroups, or network
+ * policies. 'isolated' is still NOT a container; child processes retain regular process
+ * privileges and unrestricted network access.
  */
 
 export const SANDBOX_PROFILES = Object.freeze({
   compatibility: { inheritHome: true, redactEnv: true },
   'isolated-home': { inheritHome: false, redactEnv: true },
-  // isolated = isolated-home + reserved extension point until real filesystem/network
   isolated: { inheritHome: false, redactEnv: true },
 })
 
@@ -59,7 +68,39 @@ export function filterEnv(env, profile) {
     filtered[key] = value
   }
 
-  if (!config.inheritHome) {
+  if (profile === 'isolated') {
+    const sandboxDir = fs.mkdtempSync(path.join(os.tmpdir(), 'agent-hub-isolated-'))
+    filtered.AGENT_HUB_SANDBOX_DIR = sandboxDir
+    filtered.HOME = sandboxDir
+    filtered.TMPDIR = path.join(sandboxDir, 'tmp')
+    filtered.XDG_CACHE_HOME = path.join(sandboxDir, '.cache')
+    filtered.XDG_CONFIG_HOME = path.join(sandboxDir, '.config')
+    filtered.XDG_DATA_HOME = path.join(sandboxDir, '.local', 'share')
+
+    fs.mkdirSync(filtered.TMPDIR, { recursive: true })
+    fs.mkdirSync(filtered.XDG_CACHE_HOME, { recursive: true })
+    fs.mkdirSync(filtered.XDG_CONFIG_HOME, { recursive: true })
+    fs.mkdirSync(filtered.XDG_DATA_HOME, { recursive: true })
+
+    const rawInclude = env.AGENT_HUB_SANDBOX_INCLUDE ?? process.env.AGENT_HUB_SANDBOX_INCLUDE
+    if (rawInclude) {
+      const entries = rawInclude
+        .split(',')
+        .map((p) => p.trim())
+        .filter(Boolean)
+
+      for (const entry of entries) {
+        if (!fs.existsSync(entry)) {
+          continue
+        }
+        const dest = path.isAbsolute(entry)
+          ? path.join(sandboxDir, path.basename(entry))
+          : path.join(sandboxDir, entry)
+        fs.mkdirSync(path.dirname(dest), { recursive: true })
+        fs.cpSync(entry, dest, { recursive: true })
+      }
+    }
+  } else if (!config.inheritHome) {
     const tmpHome = fs.mkdtempSync(path.join(os.tmpdir(), 'agent-hub-sandbox-home-'))
     filtered.HOME = tmpHome
   }
