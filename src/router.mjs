@@ -1,4 +1,6 @@
-import { readCache, circuitBreakerOpen } from './preflight.mjs'
+import { CIRCUIT_BREAKER_BY_CLASS } from './config.mjs'
+import { readCache } from './preflight.mjs'
+import { circuitBreakerOpen } from './breakers.mjs'
 import { readDiscovery } from './discovery.mjs'
 import { readOverrides, overrideKey } from './overrides.mjs'
 import { acceptedOrderFor } from './proposals.mjs'
@@ -128,6 +130,14 @@ function evaluateCandidate(candidate, env) {
 
   const cached = readCache(env)[`${candidate.agent}:${candidate.model}`]
   if (cached?.status === 'unavailable') return { usable: false, reason: 'cached_unavailable' }
+
+  for (const klass of Object.keys(CIRCUIT_BREAKER_BY_CLASS)) {
+    if (klass === 'default') continue
+    if (circuitBreakerOpen({ agent: candidate.agent, model: candidate.model, klass, env })) {
+      return { usable: false, reason: 'breaker_open:' + klass }
+    }
+  }
+
   if (circuitBreakerOpen({ agent: candidate.agent, model: candidate.model, env })) return { usable: false, reason: 'breaker_open' }
   return { usable: true, reason: null }
 }
