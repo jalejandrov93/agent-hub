@@ -251,7 +251,7 @@ export function startJob({
     const gate = checkWriteAllowed({ cwd, allowlist })
     if (!gate.allowed) {
       updateResult(job.jobId, { status: 'failed', errorKind: 'worktree_denied', error: gate.reason }, env)
-      appendEvent({ kind: 'job.failed', agent, model, cwd, title, jobId: job.jobId, errorKind: 'worktree_denied', taskType, summary: gate.reason, harness: harness ?? null, waitMode: waitMode ?? null }, { env })
+      appendEvent({ kind: 'job.failed', agent, model, cwd, title, jobId: job.jobId, errorKind: 'worktree_denied', taskType, summary: gate.reason, harness: harness ?? null, waitMode: waitMode ?? null, profile: effectiveProfile, profileStatus: effectiveProfileStatus }, { env })
       return { job: readResult(job.jobId, env), done: Promise.resolve() }
     }
     leaseTtlMs = resolveLeaseTtlMs(env, leaseTtlMs)
@@ -259,7 +259,7 @@ export function startJob({
       const adoption = adoptWriteLockFn({ cwd, token: reservationToken, jobId: job.jobId, env, ttlMs: leaseTtlMs })
       if (!adoption.adopted) {
         updateResult(job.jobId, { status: 'failed', errorKind: 'locked', error: `Reservation invalid: ${adoption.reason}` }, env)
-        appendEvent({ kind: 'job.failed', agent, model, cwd, title, jobId: job.jobId, errorKind: 'locked', taskType, summary: `Reservation invalid: ${adoption.reason}`, harness: harness ?? null, waitMode: waitMode ?? null }, { env })
+        appendEvent({ kind: 'job.failed', agent, model, cwd, title, jobId: job.jobId, errorKind: 'locked', taskType, summary: `Reservation invalid: ${adoption.reason}`, harness: harness ?? null, waitMode: waitMode ?? null, profile: effectiveProfile, profileStatus: effectiveProfileStatus }, { env })
         return { job: readResult(job.jobId, env), done: Promise.resolve() }
       }
       leaseToken = adoption.token
@@ -267,7 +267,7 @@ export function startJob({
       const lock = acquireWriteLockFn({ cwd, jobId: job.jobId, env, ttlMs: leaseTtlMs })
       if (!lock.acquired) {
         updateResult(job.jobId, { status: 'failed', errorKind: 'locked', error: lock.reason }, env)
-        appendEvent({ kind: 'job.failed', agent, model, cwd, title, jobId: job.jobId, errorKind: 'locked', taskType, summary: lock.reason, harness: harness ?? null, waitMode: waitMode ?? null }, { env })
+        appendEvent({ kind: 'job.failed', agent, model, cwd, title, jobId: job.jobId, errorKind: 'locked', taskType, summary: lock.reason, harness: harness ?? null, waitMode: waitMode ?? null, profile: effectiveProfile, profileStatus: effectiveProfileStatus }, { env })
         return { job: readResult(job.jobId, env), done: Promise.resolve() }
       }
       leaseToken = lock.token
@@ -310,14 +310,14 @@ export function startJob({
     child = spawn(resolved.cmd, resolved.args, { cwd, env: childEnv, stdin })
   } catch (error) {
     updateResult(job.jobId, { status: 'failed', errorKind: 'crash', error: String(error?.message ?? error) }, env)
-    appendEvent({ kind: 'job.failed', agent, model, cwd, title, jobId: job.jobId, errorKind: 'crash', taskType, summary: String(error?.message ?? error), harness: harness ?? null, waitMode: waitMode ?? null }, { env })
+    appendEvent({ kind: 'job.failed', agent, model, cwd, title, jobId: job.jobId, errorKind: 'crash', taskType, summary: String(error?.message ?? error), harness: harness ?? null, waitMode: waitMode ?? null, profile: effectiveProfile, profileStatus: effectiveProfileStatus }, { env })
     if (mode === 'write') releaseWriteLock({ cwd, token: leaseToken, jobId: job.jobId, env })
     return { job: readResult(job.jobId, env), done: Promise.resolve() }
   }
 
   updateResult(job.jobId, { status: 'running', pid: child.pid, pgid: child.pid }, env)
   const sandbox = sandboxTelemetry(childEnv, process.env, sandboxProfile)
-  appendEvent({ kind: 'job.started', agent, model, cwd, title, jobId: job.jobId, taskType, sandbox, harness: harness ?? null, waitMode: waitMode ?? null }, { env })
+  appendEvent({ kind: 'job.started', agent, model, cwd, title, jobId: job.jobId, taskType, sandbox, harness: harness ?? null, waitMode: waitMode ?? null, profile: effectiveProfile, profileStatus: effectiveProfileStatus }, { env })
   // adapter/runCommandFn are stashed so cancelJob can reach them: a user
   // cancel kills the same process group a timeout does, and must interrupt
   // the server-side session just as the timeout path does.
@@ -337,7 +337,7 @@ export function startJob({
 
   const done = exitPromise
     .then(({ code, timedOut }) =>
-      finishJob({ jobId: job.jobId, agent, model, cwd, title, adapter, mode, env, timedOut, exitCode: code, taskType, snapshot, takeSnapshotFn, diffSnapshotsFn, formatViolationFn, harness, waitMode, runCommandFn, profile: effectiveProfile })
+      finishJob({ jobId: job.jobId, agent, model, cwd, title, adapter, mode, env, timedOut, exitCode: code, taskType, snapshot, takeSnapshotFn, diffSnapshotsFn, formatViolationFn, harness, waitMode, runCommandFn, profile: effectiveProfile, profileStatus: effectiveProfileStatus })
     )
     .finally(() => {
       stopHeartbeat(job.jobId)
@@ -429,11 +429,14 @@ async function finishJob({
   waitMode = null,
   runCommandFn = defaultRunCommand,
   profile = null,
+  profileStatus = null,
 }) {
   const current = readResult(jobId, env)
   if (current.status === 'canceled') return // cancelJob already finalized this job
   const eventHarness = harness ?? current.harness ?? null
   const eventWaitMode = waitMode ?? current.waitMode ?? null
+  const eventProfile = profile ?? current.profile ?? null
+  const eventProfileStatus = profileStatus ?? current.profileStatus ?? null
 
   let stdout = ''
   try {
@@ -473,7 +476,7 @@ async function finishJob({
       env
     )
     appendEvent(
-      { kind: 'job.failed', agent, model, cwd, title, jobId, errorKind: error.kind, taskType, summary: summarize(error.message), harness: eventHarness, waitMode: eventWaitMode },
+      { kind: 'job.failed', agent, model, cwd, title, jobId, errorKind: error.kind, taskType, summary: summarize(error.message), harness: eventHarness, waitMode: eventWaitMode, profile: eventProfile, profileStatus: eventProfileStatus },
       { env }
     )
     if (error.kind === 'timeout') {
@@ -523,7 +526,7 @@ async function finishJob({
       env
     )
     appendEvent(
-      { kind: 'job.failed', agent, model, cwd, title, jobId, errorKind: 'read_mode_violation', taskType, summary: summarize(violation), harness: eventHarness, waitMode: eventWaitMode },
+      { kind: 'job.failed', agent, model, cwd, title, jobId, errorKind: 'read_mode_violation', taskType, summary: summarize(violation), harness: eventHarness, waitMode: eventWaitMode, profile: eventProfile, profileStatus: eventProfileStatus },
       { env }
     )
     return
@@ -541,7 +544,7 @@ async function finishJob({
     env
   )
   appendEvent(
-    { kind: 'job.finished', agent, model, cwd, title, jobId, taskType, tokens: result.tokens ?? null, costUsd: result.costUsd ?? null, summary: summarize(result.text), harness: eventHarness, waitMode: eventWaitMode },
+    { kind: 'job.finished', agent, model, cwd, title, jobId, taskType, tokens: result.tokens ?? null, costUsd: result.costUsd ?? null, summary: summarize(result.text), harness: eventHarness, waitMode: eventWaitMode, profile: eventProfile, profileStatus: eventProfileStatus },
     { env }
   )
 }

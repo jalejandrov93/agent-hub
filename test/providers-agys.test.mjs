@@ -1,5 +1,8 @@
 import { test } from 'node:test'
 import assert from 'node:assert/strict'
+import fs from 'node:fs'
+import os from 'node:os'
+import path from 'node:path'
 import {
   PROFILE_STATES,
   normalizeProfile,
@@ -20,6 +23,9 @@ import {
   resolveAgyProfile,
   resolveAgyProfileSync,
   resetSyncProfileCache,
+  getAgysMode,
+  setAgysMode,
+  agysProfilesSnapshot,
 } from '../src/providers/agys.mjs'
 
 const FIXTURE_AGYS_LIST = `Active Profiles:
@@ -597,6 +603,11 @@ test('resolveAgyProfile returns status unavailable when agys CLI is unavailable'
   assert.deepEqual(res, { profile: null, status: 'unavailable' })
 })
 
+test('resolveAgyProfile returns null profile and status when mode is off', async () => {
+  const res = await resolveAgyProfile({ env: { AGENT_HUB_AGYS: 'off' } })
+  assert.deepEqual(res, { profile: null, status: null })
+})
+
 test('resolveAgyProfile returns null profile and status when env is absent or empty', async () => {
   const res = await resolveAgyProfile({ env: {} })
   assert.deepEqual(res, { profile: null, status: null })
@@ -716,5 +727,158 @@ test('resolveAgyProfileSync memoizes results so a counting execFn is called at m
   const res3 = resolveAgyProfileSync({ env, execFn })
   assert.deepEqual(res3, res1)
   assert.equal(callCount, 4) // 2 more calls
+})
+
+test('getAgysMode respects precedence: env profile -> env auto -> env off -> setting -> default off', () => {
+  const tmpDir = fs.mkdtempSync(path.join(os.tmpdir(), 'agent-hub-agys-mode-test-'))
+  const envHome = { AGENT_HUB_HOME: tmpDir }
+
+  // 1. Env profile non-empty
+  assert.deepEqual(getAgysMode({ ...envHome, AGENT_HUB_AGYS_PROFILE: '  work  ', AGENT_HUB_AGYS: 'off' }), {
+    mode: 'profile',
+    profile: 'work',
+    source: 'env',
+  })
+
+  // 2. Env auto
+  assert.deepEqual(getAgysMode({ ...envHome, AGENT_HUB_AGYS: 'auto' }), {
+    mode: 'auto',
+    profile: null,
+    source: 'env',
+  })
+
+  // 3. Env off
+  assert.deepEqual(getAgysMode({ ...envHome, AGENT_HUB_AGYS: 'off' }), {
+    mode: 'off',
+    profile: null,
+    source: 'env',
+  })
+
+  // 4. Persisted setting file
+  const settingPath = path.join(tmpDir, 'agys-mode.json')
+  fs.writeFileSync(settingPath, JSON.stringify({ mode: 'off' }))
+  assert.deepEqual(getAgysMode(envHome), {
+    mode: 'off',
+    profile: null,
+    source: 'setting',
+  })
+
+  fs.writeFileSync(settingPath, JSON.stringify({ mode: 'profile', profile: 'custom-pinned' }))
+  assert.deepEqual(getAgysMode(envHome), {
+    mode: 'profile',
+    profile: 'custom-pinned',
+    source: 'setting',
+  })
+
+  // 5. Missing / corrupt file -> default off
+  fs.writeFileSync(settingPath, 'corrupted not json {{{')
+  assert.deepEqual(getAgysMode(envHome), {
+    mode: 'off',
+    profile: null,
+    source: 'default',
+  })
+
+  fs.unlinkSync(settingPath)
+  assert.deepEqual(getAgysMode(envHome), {
+    mode: 'off',
+    profile: null,
+    source: 'default',
+  })
+})
+
+test('setAgysMode validates input, writes atomically, and invalidates sync profile cache', () => {
+  const tmpDir = fs.mkdtempSync(path.join(os.tmpdir(), 'agent-hub-agys-mode-set-'))
+  const env = { AGENT_HUB_HOME: tmpDir }
+
+  // Validation
+  assert.throws(() => setAgysMode({ mode: 'invalid' }, env), /invalid mode/i)
+  assert.throws(() => setAgysMode({ mode: 'profile', profile: '' }, env), /profile/i)
+  assert.throws(() => setAgysMode({ mode: 'profile', profile: null }, env), /profile/i)
+
+  // Valid set
+  const saved = setAgysMode({ mode: 'profile', profile: 'pinned-test' }, env)
+  assert.deepEqual(saved, { mode: 'profile', profile: 'pinned-test', source: 'setting' })
+  assert.deepEqual(getAgysMode(env), { mode: 'profile', profile: 'pinned-test', source: 'setting' })
+
+  // Cache invalidation: populate sync cache, change mode, verify cache is cleared
+  let callCount = 0
+  const execFn = (cmd, args) => {
+    callCount++
+    if (args[0] === 'list') return FIXTURE_AGYS_LIST
+    if (args[0] === 'quota') return JSON.stringify(FIXTURE_AGYS_QUOTA)
+    return ''
+  }
+  setAgysMode({ mode: 'auto' }, env)
+  const r1 = resolveAgyProfileSync({ env, execFn })
+  assert.equal(r1.profile, 'work')
+  assert.equal(callCount, 2)
+
+  // Second call within TTL uses memo
+  resolveAgyProfileSync({ env, execFn })
+  assert.equal(callCount, 2)
+
+  // setAgysMode invalidates memo immediately
+  setAgysMode({ mode: 'profile', profile: 'backup' }, env)
+  const r2 = resolveAgyProfileSync({ env, execFn })
+  assert.equal(r2.profile, 'backup')
+  assert.equal(callCount, 4) // called again because memo was invalidated
+})
+
+test('safe degradation: with mode auto or pinned profile and agys unavailable, resolves to plain agy without error', () => {
+  const tmpDir = fs.mkdtempSync(path.join(os.tmpdir(), 'agent-hub-safe-degradation-'))
+  const env = { AGENT_HUB_HOME: tmpDir }
+  const failingExecFn = () => {
+    const err = new Error('spawn ENOENT')
+    err.code = 'ENOENT'
+    throw err
+  }
+
+  // 1. Mode auto with unavailable agys
+  setAgysMode({ mode: 'auto' }, env)
+  const autoRes = resolveAgyProfileSync({ env, execFn: failingExecFn })
+  assert.deepEqual(autoRes, { profile: null, status: 'unavailable', profiles: [] })
+  const autoCmd = resolveAgyCommand({ profile: autoRes.profile, agyCmd: 'agy', agyArgv: ['-p', 'task'] })
+  assert.deepEqual(autoCmd, { cmd: 'agy', args: ['-p', 'task'] })
+
+  // 2. Pinned profile in setting with unavailable agys
+  setAgysMode({ mode: 'profile', profile: 'pinned-profile' }, env)
+  const pinnedRes = resolveAgyProfileSync({ env, execFn: failingExecFn })
+  assert.deepEqual(pinnedRes, { profile: null, status: 'unavailable', profiles: [] })
+  const pinnedCmd = resolveAgyCommand({ profile: pinnedRes.profile, agyCmd: 'agy', agyArgv: ['-p', 'task'] })
+  assert.deepEqual(pinnedCmd, { cmd: 'agy', args: ['-p', 'task'] })
+})
+
+test('agysProfilesSnapshot reports mode, source and pinnedProfile from getAgysMode', async () => {
+  const tmpDir = fs.mkdtempSync(path.join(os.tmpdir(), 'agent-hub-snapshot-mode-'))
+  const env = { AGENT_HUB_HOME: tmpDir }
+  const fakeRunner = async (cmd, args) => {
+    if (args[0] === '--version') return { code: 0, stdout: 'agys v0.2.33', stderr: '' }
+    if (args[0] === 'list') return { code: 0, stdout: FIXTURE_AGYS_LIST, stderr: '' }
+    if (args[0] === 'quota') return { code: 0, stdout: JSON.stringify(FIXTURE_AGYS_QUOTA), stderr: '' }
+    return { code: 0, stdout: '', stderr: '' }
+  }
+
+  // Default mode off
+  const snap1 = await agysProfilesSnapshot({ env, runCommandFn: fakeRunner })
+  assert.equal(snap1.mode, 'off')
+  assert.equal(snap1.source, 'default')
+  assert.equal(snap1.pinnedProfile, null)
+
+  // Persisted setting profile
+  setAgysMode({ mode: 'profile', profile: 'personal' }, env)
+  const snap2 = await agysProfilesSnapshot({ env, runCommandFn: fakeRunner })
+  assert.equal(snap2.mode, 'profile')
+  assert.equal(snap2.source, 'setting')
+  assert.equal(snap2.pinnedProfile, 'personal')
+  assert.equal(snap2.selected?.name, 'personal')
+
+  // Env override wins over setting
+  const snap3 = await agysProfilesSnapshot({
+    env: { ...env, AGENT_HUB_AGYS_PROFILE: 'work' },
+    runCommandFn: fakeRunner,
+  })
+  assert.equal(snap3.mode, 'profile')
+  assert.equal(snap3.source, 'env')
+  assert.equal(snap3.pinnedProfile, 'work')
 })
 

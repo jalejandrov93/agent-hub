@@ -410,3 +410,53 @@ test('write routes under the new API reject a foreign Origin', async () => {
     server.close()
   }
 })
+
+// --- providers mode ---
+
+test('POST /api/providers/mode sets mode and returns snapshot', async () => {
+  const env = { AGENT_HUB_HOME: tmpHome() }
+  const server = createServer({ env })
+  const port = await listen(server)
+  try {
+    // Set off
+    const offRes = await request(port, '/api/providers/mode', {
+      method: 'POST',
+      body: { mode: 'off' },
+    })
+    assert.equal(offRes.status, 200)
+    assert.equal(offRes.body.mode, 'off')
+    assert.equal(offRes.body.source, 'setting')
+
+    // Set profile
+    const profileRes = await request(port, '/api/providers/mode', {
+      method: 'POST',
+      body: { mode: 'profile', profile: 'work' },
+    })
+    assert.equal(profileRes.status, 200)
+    assert.equal(profileRes.body.mode, 'profile')
+    assert.equal(profileRes.body.pinnedProfile, 'work')
+    assert.equal(profileRes.body.source, 'setting')
+
+    // Check file was persisted
+    const modeFile = path.join(env.AGENT_HUB_HOME, 'agys-mode.json')
+    assert.ok(fs.existsSync(modeFile))
+    const persisted = JSON.parse(fs.readFileSync(modeFile, 'utf8'))
+    assert.deepEqual(persisted, { mode: 'profile', profile: 'work' })
+
+    // Invalid mode -> 400
+    const invalidModeRes = await request(port, '/api/providers/mode', {
+      method: 'POST',
+      body: { mode: 'invalid' },
+    })
+    assert.equal(invalidModeRes.status, 400)
+
+    // Missing profile when mode is profile -> 400
+    const missingProfileRes = await request(port, '/api/providers/mode', {
+      method: 'POST',
+      body: { mode: 'profile' },
+    })
+    assert.equal(missingProfileRes.status, 400)
+  } finally {
+    server.close()
+  }
+})
