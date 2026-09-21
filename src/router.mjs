@@ -283,10 +283,21 @@ export async function route({
 
   const agysEnv = env?.AGENT_HUB_AGYS
   const isAgysSet = typeof agysEnv === 'string' ? agysEnv.trim() !== '' : Boolean(agysEnv)
-  let agysProfiles = null
-  if (isAgysSet) {
-    const resolved = _resolveAgyProfileSync({ env })
-    agysProfiles = Array.isArray(resolved?.profiles) ? resolved.profiles : []
+  // Quota exhaustion/headroom is per model group (Gemini vs Claude/GPT), so
+  // each agy candidate's OWN model is threaded through and memoized here —
+  // a chain can carry agy candidates from different groups (e.g. a gemini
+  // primary with a claude fallback), and resolveAgyProfileSync's own cache
+  // key is keyed by group too, so this memo just avoids redundant sync calls
+  // within one route() invocation.
+  const agysProfilesByGroup = new Map()
+  const agysProfilesFor = (model) => {
+    if (!isAgysSet) return null
+    const groupKey = model ?? ''
+    if (!agysProfilesByGroup.has(groupKey)) {
+      const resolved = _resolveAgyProfileSync({ env, model })
+      agysProfilesByGroup.set(groupKey, Array.isArray(resolved?.profiles) ? resolved.profiles : [])
+    }
+    return agysProfilesByGroup.get(groupKey)
   }
 
   // Annotate fresh copies, never DELEGATION_MAP's own candidate objects: `chain`
@@ -300,7 +311,7 @@ export async function route({
     const q = quotaByCandidate.get(c)
     let candidate = q ? { ...c, quota: q } : { ...c }
     if (isAgysSet && c.agent === 'agy') {
-      candidate = { ...candidate, profiles: [...agysProfiles] }
+      candidate = { ...candidate, profiles: [...agysProfilesFor(c.model)] }
     }
     return candidate
   }

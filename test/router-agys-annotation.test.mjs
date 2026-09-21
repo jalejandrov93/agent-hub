@@ -95,6 +95,27 @@ test('with AGENT_HUB_AGYS set, agy in fallbacks also carries profiles[]', async 
   assert.deepEqual(agyFallback.profiles, [{ name: 'work', status: 'selected' }])
 })
 
+test('with AGENT_HUB_AGYS set, each agy candidate resolves profiles for its OWN model (quota is per model group)', async () => {
+  resetSyncProfileCache()
+  const home = tmpHome()
+  const { route } = await fresh(home)
+
+  const seenModels = []
+  const fakeResolver = ({ model }) => {
+    seenModels.push(model)
+    return { profile: 'work', status: 'selected', profiles: [{ name: 'work', status: 'selected' }] }
+  }
+
+  // research: opencode, opencode, agy gemini-3.8-flash-medium (only one agy candidate)
+  await route({
+    taskType: 'research',
+    env: { AGENT_HUB_HOME: home, AGENT_HUB_AGYS: 'auto' },
+    _resolveAgyProfileSync: fakeResolver,
+  })
+
+  assert.deepEqual(seenModels, ['gemini-3.8-flash-medium'])
+})
+
 test('without AGENT_HUB_AGYS set, output has no profiles key', async () => {
   resetSyncProfileCache()
   const home = tmpHome()

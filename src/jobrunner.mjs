@@ -207,7 +207,7 @@ export function startJob({
       effectiveProfile = profile
       effectiveProfileStatus = profileStatus ?? 'selected'
     } else {
-      const resolved = resolveAgyProfileSyncFn({ env })
+      const resolved = resolveAgyProfileSyncFn({ env, model })
       effectiveProfile = resolved?.profile ?? null
       effectiveProfileStatus = effectiveProfile ? (resolved?.status ?? 'selected') : null
     }

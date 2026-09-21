@@ -1,6 +1,6 @@
 import child_process from 'node:child_process'
 import { runCommand as defaultRunCommand } from '../process.mjs'
-import { normalizeProfile, selectProfile, profileStateFor } from './profiles.mjs'
+import { normalizeProfile, selectProfile, profileStateFor, modelGroupFor } from './profiles.mjs'
 import { paths } from '../config.mjs'
 import { writeJsonAtomic, readJsonSafe } from '../fsutil.mjs'
 
@@ -299,6 +299,7 @@ export async function resolveAgyProfile({
   listFn,
   quotaFn,
   selectFn = selectProfile,
+  model = null,
 } = {}) {
   try {
     const safeEnv = env || {}
@@ -332,11 +333,11 @@ export async function resolveAgyProfile({
       const profiles = Array.isArray(rawProfiles) ? rawProfiles : []
       const candidates = profiles.map((p) => {
         const quotaEntry = quotaMap && typeof quotaMap === 'object' ? quotaMap[p.name] : null
-        const state = p?.state ?? profileStateFor({ profile: p, quotaEntry })
-        return { ...p, state }
+        const state = p?.state ?? profileStateFor({ profile: p, quotaEntry, model })
+        return { ...p, state, quotaEntry }
       })
 
-      const chosen = selectFn({ profiles: candidates })
+      const chosen = selectFn({ profiles: candidates, model })
       if (!chosen) {
         return { profile: null, status: null }
       }
@@ -364,6 +365,7 @@ export function resolveAgyProfileSync({
   execFn,
   cache = defaultSyncCache,
   now = Date.now,
+  model = null,
 } = {}) {
   try {
     const safeEnv = env || {}
@@ -378,7 +380,12 @@ export function resolveAgyProfileSync({
       return { profile, status: 'selected', profiles: [{ name: profile, status: 'selected' }] }
     }
 
-    const cacheKey = `agys:${modeInfo.mode}:${modeInfo.profile ?? ''}:${modeInfo.source}`
+    // The model GROUP (not the raw model id) is part of the cache key: two
+    // models in the same group (e.g. two gemini-* variants) may safely share
+    // a cached resolution, but a Gemini pick must never leak into a
+    // Claude/GPT resolution (or vice versa) — their exhaustion differs.
+    const modelGroup = modelGroupFor(model)
+    const cacheKey = `agys:${modeInfo.mode}:${modeInfo.profile ?? ''}:${modeInfo.source}:${modelGroup ?? 'unknown'}`
     if (cache && typeof cache.get === 'function') {
       const cached = cache.get(cacheKey)
       if (cached && typeof cached.expiresAt === 'number' && now() < cached.expiresAt) {
@@ -431,8 +438,8 @@ export function resolveAgyProfileSync({
 
     const candidates = profiles.map((p) => {
       const quotaEntry = quotaMap && typeof quotaMap === 'object' ? quotaMap[p.name] : null
-      const state = p?.state ?? profileStateFor({ profile: p, quotaEntry })
-      return { ...p, state }
+      const state = p?.state ?? profileStateFor({ profile: p, quotaEntry, model })
+      return { ...p, state, quotaEntry }
     })
 
     const annotatedProfiles = candidates.map((c) => ({
@@ -442,7 +449,7 @@ export function resolveAgyProfileSync({
 
     let chosen = null
     if (modeInfo.mode === 'auto') {
-      chosen = selectProfile({ profiles: candidates })
+      chosen = selectProfile({ profiles: candidates, model })
     }
 
     const result = {

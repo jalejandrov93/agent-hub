@@ -1,5 +1,6 @@
 import crypto from 'node:crypto'
 import { route } from './router.mjs'
+import { modelGroupFor } from './providers/profiles.mjs'
 import { policyFor } from './policy/registry.mjs'
 import { executeWithPolicy } from './policy/executor.mjs'
 import { startJob } from './jobrunner.mjs'
@@ -803,23 +804,29 @@ export async function dispatch({
         let profileStatus = null
 
         if (candidate?.agent === 'agy') {
-          if (!profileMemo.has(candidate.agent)) {
+          // Quota is per model group (Gemini vs Claude/GPT — see
+          // src/providers/profiles.mjs), so the memo is keyed by agent+group,
+          // not just agent: a fallback in a DIFFERENT group (e.g. a gemini
+          // primary falling back to a claude candidate) must re-resolve
+          // instead of reusing the other group's profile.
+          const memoKey = `${candidate.agent}:${modelGroupFor(candidate.model) ?? 'unknown'}`
+          if (!profileMemo.has(memoKey)) {
             try {
-              const res = await resolveProfileFn({ env })
+              const res = await resolveProfileFn({ env, model: candidate.model })
               if (res && typeof res === 'object') {
                 const p = typeof res.profile === 'string' && res.profile.trim() !== '' ? res.profile.trim() : null
                 const s = typeof (res.profileStatus ?? res.status) === 'string' && (res.profileStatus ?? res.status).trim() !== ''
                   ? (res.profileStatus ?? res.status).trim()
                   : null
-                profileMemo.set(candidate.agent, { profile: p, profileStatus: p ? s : null })
+                profileMemo.set(memoKey, { profile: p, profileStatus: p ? s : null })
               } else {
-                profileMemo.set(candidate.agent, { profile: null, profileStatus: null })
+                profileMemo.set(memoKey, { profile: null, profileStatus: null })
               }
             } catch {
-              profileMemo.set(candidate.agent, { profile: null, profileStatus: null })
+              profileMemo.set(memoKey, { profile: null, profileStatus: null })
             }
           }
-          const memoEntry = profileMemo.get(candidate.agent)
+          const memoEntry = profileMemo.get(memoKey)
           profile = memoEntry?.profile ?? null
           profileStatus = memoEntry?.profileStatus ?? null
         }

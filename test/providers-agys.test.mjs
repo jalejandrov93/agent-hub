@@ -421,6 +421,41 @@ test('selectProfile never selects exhausted or unavailable profiles when viable 
   assert.equal(selectProfile({ profiles: allDead, policy: 'priority' }), null)
 })
 
+test('selectProfile with a model picks the viable profile with the most remaining quota in that model group', () => {
+  // esp: Claude/GPT group exhausted (remainingFraction 0 on 3p-5h) -> not viable for a claude job.
+  // ita: Claude/GPT group has 100% left -> wins over esp for a claude job, even though esp
+  //      has more Gemini quota and identical priority/name would otherwise tie-break differently.
+  const esp = { name: 'esp', priority: 0, active: true, quotaEntry: REAL_SHAPE_QUOTA[0] }
+  const ita = { name: 'ita', priority: 0, active: false, quotaEntry: REAL_SHAPE_QUOTA[1] }
+
+  const claudeChoice = selectProfile({ profiles: [esp, ita], model: 'claude-sonnet-4-6' })
+  assert.equal(claudeChoice?.name, 'ita', 'ita has full Claude/GPT quota; esp is exhausted there')
+
+  const geminiChoice = selectProfile({ profiles: [esp, ita], model: 'gemini-3.8-flash-low' })
+  assert.equal(geminiChoice?.name, 'esp', 'esp has more Gemini headroom (0.8) than ita (0.5)')
+})
+
+test('selectProfile with a model tie-breaks equal remaining quota by priority, then name', () => {
+  const quotaA = { quota: { groups: [{ displayName: 'Gemini Models', buckets: [{ bucketId: 'gemini-5h', remainingFraction: 0.5 }] }] } }
+  const quotaB = { quota: { groups: [{ displayName: 'Gemini Models', buckets: [{ bucketId: 'gemini-5h', remainingFraction: 0.5 }] }] } }
+
+  const zed = { name: 'zed', priority: 0, active: false, quotaEntry: quotaA }
+  const abc = { name: 'abc', priority: 0, active: false, quotaEntry: quotaB }
+  // Equal remaining quota, equal priority -> name breaks the tie.
+  assert.equal(selectProfile({ profiles: [zed, abc], model: 'gemini-3.8-flash-low' })?.name, 'abc')
+
+  const lowPrio = { name: 'zed', priority: 0, active: false, quotaEntry: quotaA }
+  const highPrio = { name: 'abc', priority: 5, active: false, quotaEntry: quotaB }
+  // Equal remaining quota, priority breaks the tie before name.
+  assert.equal(selectProfile({ profiles: [lowPrio, highPrio], model: 'gemini-3.8-flash-low' })?.name, 'abc')
+})
+
+test('selectProfile with a model treats missing quota data as lowest priority (known headroom wins over unknown)', () => {
+  const withQuota = { name: 'known', priority: 0, active: false, quotaEntry: REAL_SHAPE_QUOTA[1] }
+  const withoutQuota = { name: 'unknown', priority: 0, active: false }
+  assert.equal(selectProfile({ profiles: [withQuota, withoutQuota], model: 'claude-sonnet-4-6' })?.name, 'known')
+})
+
 test('parseAgysList parses fixture and handles spacing, (default), and (-)', () => {
   const parsed = parseAgysList(FIXTURE_AGYS_LIST)
   assert.equal(parsed.length, 3)
@@ -864,6 +899,88 @@ test('resolveAgyProfileSync memoizes results so a counting execFn is called at m
   const res3 = resolveAgyProfileSync({ env, execFn })
   assert.deepEqual(res3, res1)
   assert.equal(callCount, 4) // 2 more calls
+})
+
+const REAL_SHAPE_LIST = `Active Profiles:
+PROFILE          PRIO  EMAIL                       CONFIG  PATH
+esp (default)    0     esp-account@example.com     (-)     ~/.agys/profiles/esp
+ita              0     ita-account@example.com     (-)     ~/.agys/profiles/ita
+`
+
+test('resolveAgyProfileSync threads the job model through so selection is quota-aware per model group', () => {
+  const execFn = (cmd, args) => {
+    if (args[0] === 'list') return REAL_SHAPE_LIST
+    if (args[0] === 'quota') return JSON.stringify(REAL_SHAPE_QUOTA)
+    return ''
+  }
+
+  // esp is the default/active profile but its Claude/GPT group is exhausted
+  // (remainingFraction 0) -> a claude job must resolve to ita instead.
+  resetSyncProfileCache()
+  const claudeRes = resolveAgyProfileSync({ env: { AGENT_HUB_AGYS: 'auto' }, execFn, model: 'claude-sonnet-4-6' })
+  assert.equal(claudeRes.profile, 'ita')
+
+  // A gemini job still prefers esp (more Gemini headroom than ita).
+  resetSyncProfileCache()
+  const geminiRes = resolveAgyProfileSync({ env: { AGENT_HUB_AGYS: 'auto' }, execFn, model: 'gemini-3.8-flash-low' })
+  assert.equal(geminiRes.profile, 'esp')
+})
+
+test('resolveAgyProfileSync cache key includes the model group, so a cached Gemini pick never leaks into a Claude/GPT resolution', () => {
+  resetSyncProfileCache()
+  let callCount = 0
+  const execFn = (cmd, args) => {
+    callCount++
+    if (args[0] === 'list') return REAL_SHAPE_LIST
+    if (args[0] === 'quota') return JSON.stringify(REAL_SHAPE_QUOTA)
+    return ''
+  }
+  const env = { AGENT_HUB_AGYS: 'auto' }
+
+  const geminiRes = resolveAgyProfileSync({ env, execFn, model: 'gemini-3.8-flash-low' })
+  assert.equal(geminiRes.profile, 'esp')
+  assert.equal(callCount, 2)
+
+  // Different model GROUP -> must not reuse the Gemini-cached result; esp is
+  // exhausted for Claude/GPT, so a cache leak would wrongly keep returning esp.
+  const claudeRes = resolveAgyProfileSync({ env, execFn, model: 'claude-sonnet-4-6' })
+  assert.equal(claudeRes.profile, 'ita')
+  assert.equal(callCount, 4, 'a distinct model group must re-resolve, not reuse the other group cache entry')
+
+  // Same model group again within TTL -> memoized, no further execFn calls.
+  const claudeAgain = resolveAgyProfileSync({ env, execFn, model: 'claude-sonnet-4-6' })
+  assert.equal(claudeAgain.profile, 'ita')
+  assert.equal(callCount, 4)
+})
+
+test('resolveAgyProfile (async) threads the job model through selectFn for quota-aware auto selection', async () => {
+  const fakeRunner = async (cmd, args) => {
+    if (args[0] === '--version') return { code: 0, stdout: 'agys v0.2.33', stderr: '' }
+    return { code: 0, stdout: '', stderr: '' }
+  }
+  const fakeList = async () => [
+    { name: 'esp', active: true, priority: 0 },
+    { name: 'ita', active: false, priority: 0 },
+  ]
+  const fakeQuota = async () => ({ esp: REAL_SHAPE_QUOTA[0], ita: REAL_SHAPE_QUOTA[1] })
+
+  const claudeRes = await resolveAgyProfile({
+    env: { AGENT_HUB_AGYS: 'auto' },
+    runCommandFn: fakeRunner,
+    listFn: fakeList,
+    quotaFn: fakeQuota,
+    model: 'claude-sonnet-4-6',
+  })
+  assert.equal(claudeRes.profile, 'ita', 'esp is exhausted for Claude/GPT quota')
+
+  const geminiRes = await resolveAgyProfile({
+    env: { AGENT_HUB_AGYS: 'auto' },
+    runCommandFn: fakeRunner,
+    listFn: fakeList,
+    quotaFn: fakeQuota,
+    model: 'gemini-3.8-flash-low',
+  })
+  assert.equal(geminiRes.profile, 'esp', 'esp still has the most Gemini headroom')
 })
 
 test('getAgysMode respects precedence: env profile -> env auto -> env off -> setting -> default auto', () => {

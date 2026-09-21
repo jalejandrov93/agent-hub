@@ -247,20 +247,28 @@ function usageCount(usage) {
  * Pick one profile from candidate profiles by policy.
  * Viable profiles are those whose state is NOT 'exhausted' and NOT 'unavailable'.
  * If viable candidates exist, dead profiles are never selected.
+ *
+ * When `model` is given, selection ignores `policy` and instead picks the
+ * viable profile with the most remaining quota in that model's group
+ * (headroom = min remainingFraction across the group's windows, read from
+ * each profile's `.quotaEntry`), tie-broken by priority then name. A profile
+ * with no readable quota data sorts after every profile with known headroom.
  */
-export function selectProfile({ profiles = [], policy = 'priority', usageByProfile = {} }) {
+export function selectProfile({ profiles = [], policy = 'priority', usageByProfile = {}, model = null }) {
   if (!Array.isArray(profiles) || profiles.length === 0) return null
   if (!POLICIES.includes(policy)) throw new Error(`invalid policy: ${policy}`)
 
   const entries = profiles.map((p) => {
     const norm = normalizeProfile(p)
-    const state = p?.state ?? profileStateFor({ profile: norm })
+    const state = p?.state ?? profileStateFor({ profile: norm, quotaEntry: p?.quotaEntry ?? null, model })
     const usage = usageByProfile[norm.name] ?? usageByProfile[p?.id] ?? null
+    const remainingQuota = model != null ? remainingQuotaForModel(p?.quotaEntry ?? null, model) : null
     return {
       profile: p,
       normalized: norm,
       state,
       usage,
+      remainingQuota,
     }
   })
 
@@ -269,7 +277,17 @@ export function selectProfile({ profiles = [], policy = 'priority', usageByProfi
   if (pool.length === 0) return null
 
   const sorted = pool.slice()
-  if (policy === 'least_used') {
+  if (model != null) {
+    // Quota-aware selection: most remaining headroom in the job's model
+    // group wins; unknown headroom (no quotaEntry / no data for that group)
+    // sorts last, priority then name break ties.
+    sorted.sort((a, b) => {
+      if (a.remainingQuota == null && b.remainingQuota == null) return byPriority(a, b) || byName(a, b)
+      if (a.remainingQuota == null) return 1
+      if (b.remainingQuota == null) return -1
+      return b.remainingQuota - a.remainingQuota || byPriority(a, b) || byName(a, b)
+    })
+  } else if (policy === 'least_used') {
     sorted.sort(
       (a, b) =>
         usageCount(a.usage) - usageCount(b.usage) ||

@@ -198,6 +198,33 @@ test('startJob with AGENT_HUB_AGYS=auto and a faked sync resolver spawns agys ru
   assert.equal(job.profileStatus, 'selected')
 })
 
+test('startJob forwards the job model to resolveAgyProfileSyncFn (T3 quota-aware selection needs it)', async () => {
+  const home = tmpHome()
+  const { startJob } = await freshModules(home)
+  const spawn = () => fakeChild()
+
+  let receivedModel = 'NOT_CALLED'
+  const capturingResolver = ({ model }) => {
+    receivedModel = model
+    return { profile: 'work', status: 'selected' }
+  }
+
+  const { done } = startJob({
+    agent: 'agy',
+    model: 'claude-sonnet-4-6',
+    task: 'auto task',
+    cwd: '/tmp',
+    mode: 'read',
+    adapterFor,
+    spawn,
+    resolveAgyProfileSyncFn: capturingResolver,
+    env: { AGENT_HUB_HOME: home, AGENT_HUB_AGYS: 'auto' },
+  })
+  await done
+
+  assert.equal(receivedModel, 'claude-sonnet-4-6')
+})
+
 test('startJob with faked sync resolver without agys env stays plain agy', async () => {
   const home = tmpHome()
   const { startJob, jobstore } = await freshModules(home)
