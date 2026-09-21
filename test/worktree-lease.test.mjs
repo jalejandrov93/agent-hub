@@ -58,20 +58,23 @@ test('acquire returns a tokenized lease (pid, jobId, token, acquiredAt, heartbea
   assert.equal(releaseWriteLock({ cwd: secondary, token: first.token, env }), true)
 })
 
-test('a) old holder cannot release the new holder lock after reclaim', async () => {
+test('a) old holder cannot release the new holder lock after reclaim', () => {
   const { secondary } = makeRepoWithSecondaryWorktree()
   const env = { AGENT_HUB_HOME: tmpHome() }
 
-  const a = acquireWriteLock({ cwd: secondary, jobId: 'job-A', env, ttlMs: 80 })
+  // Deterministic clock: staleness is judged against the lease's OWN expiresAt
+  // (never an assumed 'start + ttl', which drifts by however long acquire took
+  // after the test read the clock) so this cannot race suite load.
+  const a = acquireWriteLock({ cwd: secondary, jobId: 'job-A', env, ttlMs: 60000 })
   assert.equal(a.acquired, true)
+  const expiresAtA = new Date(readWriteLock({ cwd: secondary, env }).expiresAt).getTime()
 
-  // Live lease blocks a second holder (control).
-  const blocked = acquireWriteLock({ cwd: secondary, jobId: 'job-B', env })
+  // Control: one millisecond before A's real expiry, B is blocked.
+  const blocked = acquireWriteLock({ cwd: secondary, jobId: 'job-B', env, nowMs: expiresAtA - 1 })
   assert.equal(blocked.acquired, false)
 
-  await sleep(150) // A's lease expires (pid still alive — expiry alone reclaims)
-
-  const b = acquireWriteLock({ cwd: secondary, jobId: 'job-B', env })
+  // One millisecond after A's real expiry, B reclaims it — no sleeping.
+  const b = acquireWriteLock({ cwd: secondary, jobId: 'job-B', env, nowMs: expiresAtA + 1 })
   assert.equal(b.acquired, true, 'expired lease is reclaimed by B')
   assert.notEqual(b.token, a.token)
 
@@ -87,23 +90,27 @@ test('a) old holder cannot release the new holder lock after reclaim', async () 
   assert.equal(readWriteLock({ cwd: secondary, env }), null, 'lock freed after B releases')
 })
 
-test('b) heartbeat stops -> lease expires -> new holder acquires -> old write/heartbeat/release fail', async () => {
+test('b) heartbeat stops -> lease expires -> new holder acquires -> old write/heartbeat/release fail', () => {
   const { secondary } = makeRepoWithSecondaryWorktree()
   const env = { AGENT_HUB_HOME: tmpHome() }
 
-  const a = acquireWriteLock({ cwd: secondary, jobId: 'job-A', env, ttlMs: 200 })
+  // Deterministic clock: staleness is judged against an injected instant, so
+  // this test never races the wall clock under suite load.
+  const t0 = Date.now()
+  const a = acquireWriteLock({ cwd: secondary, jobId: 'job-A', env, ttlMs: 60000, nowMs: t0 })
   assert.equal(a.acquired, true)
 
-  // While A heartbeats, the lease stays alive past its original expiry.
-  await sleep(120)
-  assert.equal(heartbeatWriteLock({ cwd: secondary, token: a.token, env, ttlMs: 200 }), true)
-  await sleep(120)
-  const stillHeld = acquireWriteLock({ cwd: secondary, jobId: 'job-B', env })
+  assert.equal(acquireWriteLock({ cwd: secondary, jobId: 'job-B', env, nowMs: t0 }).acquired, false)
+
+  // A heartbeat extends the lease (from the real clock, ttlMs 60000), so a
+  // later judgement inside the new window still sees a live lease.
+  assert.equal(heartbeatWriteLock({ cwd: secondary, token: a.token, env, ttlMs: 60000 }), true)
+  const extended = readWriteLock({ cwd: secondary, env })
+  const stillHeld = acquireWriteLock({ cwd: secondary, jobId: 'job-B', env, nowMs: new Date(extended.expiresAt).getTime() - 1 })
   assert.equal(stillHeld.acquired, false, 'heartbeat extended the lease, B is still blocked')
 
-  // Heartbeat stops: the lease expires and B reclaims it.
-  await sleep(250)
-  const b = acquireWriteLock({ cwd: secondary, jobId: 'job-B', env })
+  // Heartbeat stops: judged one millisecond past the extended expiry, B reclaims it.
+  const b = acquireWriteLock({ cwd: secondary, jobId: 'job-B', env, nowMs: new Date(extended.expiresAt).getTime() + 1 })
   assert.equal(b.acquired, true, 'B acquires after A stopped heartbeating')
 
   // Old holder wakes up: every guarded operation with the stale token fails.
