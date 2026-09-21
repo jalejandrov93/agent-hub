@@ -211,8 +211,10 @@ export function buildServer() {
     {
       title: 'Pick an agent+model for a task type',
       description:
-        `Look up the delegation map for one task type and return {primary, fallbacks, reason}, skipping any ` +
-        `pair whose cached preflight is unavailable or whose circuit breaker is open. Known task types: ` +
+        `Look up the delegation map for one task type and return {primary, fallbacks, reason, ranking}, skipping any ` +
+        `pair whose cached preflight is unavailable or whose circuit breaker is open. The result includes a ranking ` +
+        `array (per candidate: agent, model, score, reasons per dimension); adaptive reorders only when asked. ` +
+        `Known task types: ` +
         knownTaskTypes().join(', '),
       inputSchema: {
         taskType: z.enum(knownTaskTypes()),
@@ -221,11 +223,35 @@ export function buildServer() {
           .boolean()
           .optional()
           .describe('Return the full discovered model catalog per CLI instead of a {binPath, version, modelCount, checkedAt, error} summary.'),
+        requirements: z
+          .array(z.string())
+          .optional()
+          .describe(
+            'Capability keys a candidate must satisfy: read, write, git, github, web, sessionResume, largeContext. A candidate missing one is skipped with a missing_capabilities reason.'
+          ),
+        preferences: z
+          .object({
+            quality: z.number().nonnegative().optional(),
+            cost: z.number().nonnegative().optional(),
+            latency: z.number().nonnegative().optional(),
+          })
+          .optional()
+          .describe(
+            'Weights for the ranking; higher means more important. Omitted/zero weights fall back to the defaults (quality .5, cost .2, latency .3).'
+          ),
+        adaptive: z
+          .boolean()
+          .optional()
+          .describe(
+            'When true, reorder primary/fallbacks by the computed ranking. Default false keeps the static chain order; ranking is always returned for transparency.'
+          ),
       },
       outputSchema: RouteResult,
       annotations: { readOnlyHint: true, idempotentHint: true },
     },
-    guard(({ taskType, mode, includeCatalog }) => routeTool({ taskType, mode, includeCatalog: !!includeCatalog }))
+    guard(({ taskType, mode, includeCatalog, requirements, preferences, adaptive }) =>
+      routeTool({ taskType, mode, includeCatalog: !!includeCatalog, requirements, preferences, adaptive })
+    )
   )
 
   register(
@@ -617,7 +643,8 @@ export function buildServer() {
     'agents_metrics',
     {
       title: 'Delegation metrics',
-      description: 'Success rate, p50/p95 latency, error kinds and tokens per agent/model/mode/taskType from job history.',
+      description:
+        'Success rate, p50/p95 latency, error kinds, tokens, costUsd, verified, quality, revisions and retries per agent/model/mode/taskType from job history.',
       inputSchema: {
         groupBy: z
           .array(z.enum(['agent', 'model', 'mode', 'taskType']))
