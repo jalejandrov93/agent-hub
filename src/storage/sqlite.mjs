@@ -52,7 +52,7 @@ function readJsonStore(stateHome) {
   try {
     return JSON.parse(fs.readFileSync(p, 'utf8'))
   } catch {
-    return { workflows: {}, workflow_nodes: {}, jobs: {}, leases: {}, harness_origins: {} }
+    return { workflows: {}, workflow_nodes: {}, jobs: {}, leases: {}, harness_origins: {}, task_handoffs: {}, task_context: [] }
   }
 }
 
@@ -66,7 +66,7 @@ function jsonInitDb(stateHome) {
   ensureDir(stateHome)
   const p = jsonStoragePath(stateHome)
   if (!fs.existsSync(p)) {
-    writeJsonStore(stateHome, { workflows: {}, workflow_nodes: {}, jobs: {}, leases: {}, harness_origins: {} })
+    writeJsonStore(stateHome, { workflows: {}, workflow_nodes: {}, jobs: {}, leases: {}, harness_origins: {}, task_handoffs: {}, task_context: [] })
   }
 }
 
@@ -270,6 +270,78 @@ function jsonGetHarnessOrigin(stateHome, jobId) {
   return store.harness_origins?.[jobId] ?? null
 }
 
+function normalizeHandoffRow(row) {
+  return {
+    workflow_id: row.workflow_id,
+    step_id: row.step_id,
+    handoff_json: typeof row.handoff_json === 'string'
+      ? row.handoff_json
+      : JSON.stringify(row.handoff_json ?? {}),
+    updated_at: row.updated_at ?? new Date().toISOString(),
+  }
+}
+
+function jsonUpsertHandoff(stateHome, row) {
+  const store = readJsonStore(stateHome)
+  store.task_handoffs = store.task_handoffs || {}
+  const norm = normalizeHandoffRow(row)
+  const key = `${norm.workflow_id}:${norm.step_id}`
+  store.task_handoffs[key] = norm
+  writeJsonStore(stateHome, store)
+  return norm
+}
+
+function jsonGetHandoff(stateHome, workflowId, stepId) {
+  const store = readJsonStore(stateHome)
+  return store.task_handoffs?.[`${workflowId}:${stepId}`] ?? null
+}
+
+function jsonListHandoffs(stateHome, workflowId) {
+  const store = readJsonStore(stateHome)
+  const prefix = `${workflowId}:`
+  const result = []
+  for (const [k, v] of Object.entries(store.task_handoffs || {})) {
+    if (k.startsWith(prefix) || v.workflow_id === workflowId) {
+      result.push(v)
+    }
+  }
+  return result.sort((a, b) => a.step_id.localeCompare(b.step_id))
+}
+
+function normalizeContextRow(row) {
+  return {
+    workflow_id: row.workflow_id,
+    step_id: row.step_id ?? null,
+    kind: row.kind,
+    text: row.text,
+    created_at: row.created_at ?? new Date().toISOString(),
+  }
+}
+
+function jsonAddContextEntry(stateHome, row) {
+  const store = readJsonStore(stateHome)
+  store.task_context = store.task_context || []
+  const norm = normalizeContextRow(row)
+  const maxId = store.task_context.reduce((max, e) => Math.max(max, Number(e.id) || 0), 0)
+  const entry = { id: maxId + 1, ...norm }
+  store.task_context.push(entry)
+  writeJsonStore(stateHome, store)
+  return entry
+}
+
+function jsonListContextEntries(stateHome, workflowId, stepId = null) {
+  const store = readJsonStore(stateHome)
+  const entries = store.task_context || []
+  const filtered = entries.filter((e) => {
+    if (e.workflow_id !== workflowId) return false
+    if (stepId !== null && stepId !== undefined) {
+      return e.step_id === stepId
+    }
+    return true
+  })
+  return [...filtered].sort((a, b) => (a.id || 0) - (b.id || 0))
+}
+
 /* ------------------------------------------------------------------ */
 /*  better-sqlite3                                                     */
 /* ------------------------------------------------------------------ */
@@ -319,6 +391,23 @@ CREATE TABLE IF NOT EXISTS harness_origins (
   job_id TEXT PRIMARY KEY,
   harness_session_id TEXT,
   harness TEXT,
+  created_at TEXT
+);
+
+CREATE TABLE IF NOT EXISTS task_handoffs (
+  workflow_id TEXT,
+  step_id TEXT,
+  handoff_json TEXT,
+  updated_at TEXT,
+  PRIMARY KEY(workflow_id, step_id)
+);
+
+CREATE TABLE IF NOT EXISTS task_context (
+  id INTEGER PRIMARY KEY AUTOINCREMENT,
+  workflow_id TEXT,
+  step_id TEXT,
+  kind TEXT,
+  text TEXT,
   created_at TEXT
 );
 `
@@ -422,6 +511,27 @@ ON CONFLICT(job_id) DO UPDATE SET
 `
 
 const GET_HARNESS_ORIGIN_SQL = `SELECT * FROM harness_origins WHERE job_id = ?`
+
+const UPSERT_HANDOFF_SQL = `
+INSERT INTO task_handoffs (workflow_id, step_id, handoff_json, updated_at)
+VALUES (@workflow_id, @step_id, @handoff_json, @updated_at)
+ON CONFLICT(workflow_id, step_id) DO UPDATE SET
+  handoff_json = @handoff_json,
+  updated_at = @updated_at
+`
+
+const GET_HANDOFF_SQL = `SELECT * FROM task_handoffs WHERE workflow_id = ? AND step_id = ?`
+
+const LIST_HANDOFFS_SQL = `SELECT * FROM task_handoffs WHERE workflow_id = ? ORDER BY step_id ASC`
+
+const ADD_CONTEXT_ENTRY_SQL = `
+INSERT INTO task_context (workflow_id, step_id, kind, text, created_at)
+VALUES (@workflow_id, @step_id, @kind, @text, @created_at)
+`
+
+const LIST_CONTEXT_ENTRIES_SQL = `SELECT * FROM task_context WHERE workflow_id = ? ORDER BY id ASC`
+
+const LIST_CONTEXT_ENTRIES_BY_STEP_SQL = `SELECT * FROM task_context WHERE workflow_id = ? AND step_id = ? ORDER BY id ASC`
 
 function sqliteInitDb(stateHome) {
   const dbPath = paths({ AGENT_HUB_HOME: stateHome }).dbFile
@@ -581,6 +691,36 @@ function sqliteUpsertHarnessOrigin(db, row) {
 
 function sqliteGetHarnessOrigin(db, jobId) {
   return db.prepare(GET_HARNESS_ORIGIN_SQL).get(jobId) ?? null
+}
+
+function sqliteUpsertHandoff(db, row) {
+  const norm = normalizeHandoffRow(row)
+  db.prepare(UPSERT_HANDOFF_SQL).run(norm)
+  return norm
+}
+
+function sqliteGetHandoff(db, workflowId, stepId) {
+  return db.prepare(GET_HANDOFF_SQL).get(workflowId, stepId) ?? null
+}
+
+function sqliteListHandoffs(db, workflowId) {
+  return db.prepare(LIST_HANDOFFS_SQL).all(workflowId)
+}
+
+function sqliteAddContextEntry(db, row) {
+  const norm = normalizeContextRow(row)
+  const info = db.prepare(ADD_CONTEXT_ENTRY_SQL).run(norm)
+  return {
+    id: Number(info.lastInsertRowid),
+    ...norm,
+  }
+}
+
+function sqliteListContextEntries(db, workflowId, stepId = null) {
+  if (stepId !== null && stepId !== undefined) {
+    return db.prepare(LIST_CONTEXT_ENTRIES_BY_STEP_SQL).all(workflowId, stepId)
+  }
+  return db.prepare(LIST_CONTEXT_ENTRIES_SQL).all(workflowId)
 }
 
 /* ------------------------------------------------------------------ */
@@ -804,6 +944,46 @@ export function getHarnessOrigin(ctx, jobId) {
   }
   const home = normalizeHome(ctx?.stateHome)
   return jsonGetHarnessOrigin(home, jobId)
+}
+
+export function upsertHandoff(ctx, row) {
+  if (ctx.backend === 'sqlite') {
+    return sqliteUpsertHandoff(ctx.db, row)
+  }
+  const home = normalizeHome(ctx?.stateHome)
+  return jsonUpsertHandoff(home, row)
+}
+
+export function getHandoff(ctx, workflowId, stepId) {
+  if (ctx.backend === 'sqlite') {
+    return sqliteGetHandoff(ctx.db, workflowId, stepId)
+  }
+  const home = normalizeHome(ctx?.stateHome)
+  return jsonGetHandoff(home, workflowId, stepId)
+}
+
+export function listHandoffs(ctx, workflowId) {
+  if (ctx.backend === 'sqlite') {
+    return sqliteListHandoffs(ctx.db, workflowId)
+  }
+  const home = normalizeHome(ctx?.stateHome)
+  return jsonListHandoffs(home, workflowId)
+}
+
+export function addContextEntry(ctx, row) {
+  if (ctx.backend === 'sqlite') {
+    return sqliteAddContextEntry(ctx.db, row)
+  }
+  const home = normalizeHome(ctx?.stateHome)
+  return jsonAddContextEntry(home, row)
+}
+
+export function listContextEntries(ctx, workflowId, stepId = null) {
+  if (ctx.backend === 'sqlite') {
+    return sqliteListContextEntries(ctx.db, workflowId, stepId)
+  }
+  const home = normalizeHome(ctx?.stateHome)
+  return jsonListContextEntries(home, workflowId, stepId)
 }
 
 export { getDb, closeDb, resetDbInstances } from './db.mjs'
