@@ -6,6 +6,7 @@ import { fetchUsage } from './quota/codexbar.mjs'
 import { quotaFor, getProvider } from './quota/mapping.mjs'
 import { computeMetrics } from './metrics.mjs'
 import { rankCandidates, metricKey } from './routing/score.mjs'
+import { resolveAgyProfileSync as defaultResolveAgyProfileSync } from './providers/agys.mjs'
 
 /**
  * The delegation map from the plan, expressed as ordered candidate chains.
@@ -190,6 +191,7 @@ export async function route({
   adaptive = false,
   env = process.env,
   _computeMetrics = computeMetrics,
+  _resolveAgyProfileSync = defaultResolveAgyProfileSync,
 }) {
   const entry = DELEGATION_MAP[taskType]
   if (!entry) {
@@ -269,6 +271,14 @@ export async function route({
   // already in the quota cache and never awaits the network.
   const usageByProvider = await fetchUsage({ providers: [...providers], env, mode: 'cached' })
 
+  const agysEnv = env?.AGENT_HUB_AGYS
+  const isAgysSet = typeof agysEnv === 'string' ? agysEnv.trim() !== '' : Boolean(agysEnv)
+  let agysProfiles = null
+  if (isAgysSet) {
+    const resolved = _resolveAgyProfileSync({ env })
+    agysProfiles = Array.isArray(resolved?.profiles) ? resolved.profiles : []
+  }
+
   // Annotate fresh copies, never DELEGATION_MAP's own candidate objects: `chain`
   // (and therefore `primary`/`fallbacks`) are the same shared, module-level
   // objects on every call, so mutating them in place with `.quota = q` let one
@@ -278,7 +288,11 @@ export async function route({
   const quotaByCandidate = new Map(toAnnotate.map((c) => [c, quotaFor(c, usageByProvider)]))
   const annotate = (c) => {
     const q = quotaByCandidate.get(c)
-    return q ? { ...c, quota: q } : { ...c }
+    let candidate = q ? { ...c, quota: q } : { ...c }
+    if (isAgysSet && c.agent === 'agy') {
+      candidate = { ...candidate, profiles: [...agysProfiles] }
+    }
+    return candidate
   }
 
   return {

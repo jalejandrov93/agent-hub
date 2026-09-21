@@ -152,3 +152,84 @@ test('a non-agy agent ignores AGENT_HUB_AGYS_PROFILE entirely', async () => {
   assert.equal(record.profile, null)
   assert.equal(record.profileStatus, null)
 })
+
+test('startJob with AGENT_HUB_AGYS=auto and a faked sync resolver spawns agys run <profile> -- ...', async () => {
+  const home = tmpHome()
+  const { startJob, jobstore } = await freshModules(home)
+  const captured = []
+  const spawn = (cmd, args, opts) => {
+    captured.push({ cmd, args, opts })
+    return fakeChild()
+  }
+
+  const fakeResolver = ({ env }) => {
+    if (env?.AGENT_HUB_AGYS === 'auto') {
+      return { profile: 'auto-picked', status: 'selected' }
+    }
+    return { profile: null, status: null }
+  }
+
+  const { job, done } = startJob({
+    agent: 'agy',
+    model: 'gemini-3.8-flash-low',
+    task: 'auto task',
+    cwd: '/tmp',
+    mode: 'read',
+    adapterFor,
+    spawn,
+    resolveAgyProfileSyncFn: fakeResolver,
+    env: { AGENT_HUB_HOME: home, AGENT_HUB_AGYS: 'auto' },
+  })
+  await done
+
+  assert.equal(captured.length, 1)
+  assert.equal(captured[0].cmd, 'agys')
+  assert.deepEqual(captured[0].args.slice(0, 3), ['run', 'auto-picked', '--'])
+  assert.ok(captured[0].args.includes('--model'))
+  assert.ok(captured[0].args.includes('gemini-3.8-flash-low'))
+
+  const record = jobstore.readResult(job.jobId)
+  assert.equal(record.profile, 'auto-picked')
+  assert.equal(record.profileStatus, 'selected')
+  assert.equal(job.profile, 'auto-picked')
+  assert.equal(job.profileStatus, 'selected')
+})
+
+test('startJob with faked sync resolver without agys env stays plain agy', async () => {
+  const home = tmpHome()
+  const { startJob, jobstore } = await freshModules(home)
+  const captured = []
+  const spawn = (cmd, args, opts) => {
+    captured.push({ cmd, args, opts })
+    return fakeChild()
+  }
+
+  const fakeResolver = ({ env }) => {
+    if (env?.AGENT_HUB_AGYS === 'auto') {
+      return { profile: 'auto-picked', status: 'selected' }
+    }
+    return { profile: null, status: null }
+  }
+
+  const { job, done } = startJob({
+    agent: 'agy',
+    model: 'gemini-3.8-flash-low',
+    task: 'plain task',
+    cwd: '/tmp',
+    mode: 'read',
+    adapterFor,
+    spawn,
+    resolveAgyProfileSyncFn: fakeResolver,
+    env: { AGENT_HUB_HOME: home },
+  })
+  await done
+
+  assert.equal(captured.length, 1)
+  assert.equal(captured[0].cmd, 'agy')
+  assert.ok(!captured[0].args.includes('run'))
+
+  const record = jobstore.readResult(job.jobId)
+  assert.equal(record.profile, null)
+  assert.equal(record.profileStatus, null)
+})
+
