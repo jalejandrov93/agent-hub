@@ -17,7 +17,7 @@ function makeTempEnv() {
 }
 
 test('VERIFY_CHECK_KINDS is frozen array of expected check kinds', () => {
-  assert.deepEqual(VERIFY_CHECK_KINDS, ['argv', 'artifact', 'diff'])
+  assert.deepEqual(VERIFY_CHECK_KINDS, ['argv', 'artifact', 'diff', 'schema'])
   assert.ok(Object.isFrozen(VERIFY_CHECK_KINDS))
 })
 
@@ -453,3 +453,164 @@ test('runVerification: aggregation requires every check to pass and captures ISO
   assert.equal(vOneFails.checks[0].passed, true)
   assert.equal(vOneFails.checks[1].passed, false)
 })
+
+test('normalizeVerifyCheck handles schema kind with defaults, precedence, and error handling', () => {
+  const checkDefault = normalizeVerifyCheck({
+    name: 'schema-default',
+    schema: 'BaseHandoff'
+  })
+  assert.deepEqual(checkDefault, {
+    name: 'schema-default',
+    kind: 'schema',
+    schema: 'BaseHandoff',
+    artifact: 'handoff.json',
+    from: null
+  })
+
+  const checkCustom = normalizeVerifyCheck({
+    name: 'schema-custom',
+    schema: 'ReviewHandoff',
+    artifact: 'custom-review.json',
+    from: 'prev-step'
+  })
+  assert.deepEqual(checkCustom, {
+    name: 'schema-custom',
+    kind: 'schema',
+    schema: 'ReviewHandoff',
+    artifact: 'custom-review.json',
+    from: 'prev-step'
+  })
+
+  // Precedence: schema evaluated before argv/artifact/forbid
+  const checkPrecedence = normalizeVerifyCheck({
+    name: 'schema-precedence',
+    schema: 'BaseHandoff',
+    artifact: 'artifact.json',
+    argv: ['echo', 'hi'],
+    forbid: ['docs/']
+  })
+  assert.equal(checkPrecedence.kind, 'schema')
+  assert.equal(checkPrecedence.artifact, 'artifact.json')
+
+  // (f) an unknown schema name throws when normalizing
+  assert.throws(
+    () => normalizeVerifyCheck({ name: 'schema-unknown', schema: 'NonExistentSchema' }),
+    /NonExistentSchema/
+  )
+})
+
+test('runVerification: schema check cases (a) valid passes, (b) invalid fails with path, (c) unparseable JSON, (d) missing file, (e) from step', async () => {
+  const env = makeTempEnv()
+  const workflowId = 'wf-schema'
+  const stepId = 'step-curr'
+
+  // (a) valid handoff passes
+  writeArtifact({
+    workflowId,
+    stepId,
+    name: 'handoff.json',
+    content: JSON.stringify({ summary: 'Implemented schema validation' })
+  }, env)
+
+  // (b) invalid handoff (missing summary) fails and detail.errors names the path
+  writeArtifact({
+    workflowId,
+    stepId,
+    name: 'invalid-handoff.json',
+    content: JSON.stringify({ summary: '' })
+  }, env)
+
+  // (c) unparseable JSON fails with a json error entry
+  writeArtifact({
+    workflowId,
+    stepId,
+    name: 'corrupt.json',
+    content: '{ not json '
+  }, env)
+
+  // (e) 'from' selects another step's artifact
+  writeArtifact({
+    workflowId,
+    stepId: 'step-producer',
+    name: 'from-handoff.json',
+    content: JSON.stringify({ summary: 'Producer step summary' })
+  }, env)
+
+  // (d) missing file is not written: 'missing.json'
+
+  const node = {
+    verify: [
+      { name: 'check-valid', schema: 'BaseHandoff' },
+      { name: 'check-invalid', schema: 'BaseHandoff', artifact: 'invalid-handoff.json' },
+      { name: 'check-bad-json', schema: 'BaseHandoff', artifact: 'corrupt.json' },
+      { name: 'check-missing', schema: 'BaseHandoff', artifact: 'missing.json' },
+      { name: 'check-from', schema: 'BaseHandoff', artifact: 'from-handoff.json', from: 'step-producer' }
+    ]
+  }
+
+  const verdict = await runVerification({
+    node,
+    workflowId,
+    stepId,
+    env
+  })
+
+  assert.equal(verdict.verified, false)
+  assert.equal(verdict.checks.length, 5)
+
+  // (a) valid handoff passes
+  assert.deepEqual(verdict.checks[0], {
+    name: 'check-valid',
+    kind: 'schema',
+    passed: true,
+    ref: 'artifact://wf-schema/step-curr/handoff.json',
+    schema: 'BaseHandoff',
+    errors: []
+  })
+
+  // (b) invalid handoff fails and detail.errors names the path
+  assert.equal(verdict.checks[1].name, 'check-invalid')
+  assert.equal(verdict.checks[1].kind, 'schema')
+  assert.equal(verdict.checks[1].passed, false)
+  assert.equal(verdict.checks[1].ref, 'artifact://wf-schema/step-curr/invalid-handoff.json')
+  assert.equal(verdict.checks[1].schema, 'BaseHandoff')
+  assert.ok(Array.isArray(verdict.checks[1].errors))
+  assert.ok(verdict.checks[1].errors.some(e => e.path === 'summary'))
+
+  // (c) unparseable JSON fails with a json error entry
+  assert.deepEqual(verdict.checks[2], {
+    name: 'check-bad-json',
+    kind: 'schema',
+    passed: false,
+    ref: 'artifact://wf-schema/step-curr/corrupt.json',
+    schema: 'BaseHandoff',
+    errors: verdict.checks[2].errors
+  })
+  assert.equal(verdict.checks[2].errors.length, 1)
+  assert.equal(verdict.checks[2].errors[0].path, 'json')
+  assert.ok(typeof verdict.checks[2].errors[0].message === 'string')
+
+  // (d) missing file fails with an artifact error entry
+  assert.deepEqual(verdict.checks[3], {
+    name: 'check-missing',
+    kind: 'schema',
+    passed: false,
+    ref: 'artifact://wf-schema/step-curr/missing.json',
+    schema: 'BaseHandoff',
+    errors: verdict.checks[3].errors
+  })
+  assert.equal(verdict.checks[3].errors.length, 1)
+  assert.equal(verdict.checks[3].errors[0].path, 'artifact')
+  assert.ok(typeof verdict.checks[3].errors[0].message === 'string')
+
+  // (e) 'from' selects another step's artifact
+  assert.deepEqual(verdict.checks[4], {
+    name: 'check-from',
+    kind: 'schema',
+    passed: true,
+    ref: 'artifact://wf-schema/step-producer/from-handoff.json',
+    schema: 'BaseHandoff',
+    errors: []
+  })
+})
+
