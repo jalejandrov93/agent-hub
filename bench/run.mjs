@@ -228,6 +228,10 @@ const isDirectExecution = () => {
 }
 
 if (isDirectExecution()) {
+  if (process.env.AGENT_HUB_LIVE === '1') {
+    console.log('AGENT_HUB_LIVE=1: Live benchmark mode is not implemented yet.')
+    process.exit(0)
+  }
   try {
     const report = await runCorpus()
     process.stdout.write(JSON.stringify(report, null, 2) + '\n')
