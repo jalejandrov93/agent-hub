@@ -124,3 +124,12 @@ Out of scope (explicit follow-ups):
 - 2026-09-20: **T1 done** — `src/verify.mjs` + `test/verify.test.mjs` (9 tests:
   normalize, argv/artifact/diff kinds, aggregation, prefix safety).
   Verified independently: `node --test test/verify.test.mjs` -> 9 pass / 0 fail.
+  Commit `4c6f83e`.
+- 2026-09-20: **T2 done** — `NodeSchema.verify`, engine wiring
+  (`runCommandFn` injection → `runVerification` → `verification.json` artifact
+  → `job.finished`/`job.failed` verdict → `jobs.verified` mirror →
+  `VERIFICATION_FAILED` breaks the retry loop), `test/workflow-verify.test.mjs`
+  (4 integration tests). Verified: targeted 37 pass / 0 fail; full `npm test`
+  1032 pass / 1 fail (pre-existing `worktree-lease` full-suite flake) /
+  8 cancelled (`quota-codexbar`, pre-existing).
+- T3 pending: README + CHANGELOG.

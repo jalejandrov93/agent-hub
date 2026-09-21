@@ -19,6 +19,7 @@ export const NodeSchema = z
     timeoutS: z.number().positive().optional(),
     onSuccess: z.any().optional(),
     onFailure: z.any().optional(),
+    verify: z.any().optional(),
     items: z.union([z.array(z.any()), z.string()]).optional(),
     metadata: z.record(z.any()).optional(),
     artifacts: z.array(z.string()).optional(),
