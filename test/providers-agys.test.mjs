@@ -16,6 +16,8 @@ import {
   listAgysProfiles,
   readAgysQuota,
   runAgyWithProfile,
+  resolveAgyCommand,
+  resolveAgyProfile,
 } from '../src/providers/agys.mjs'
 
 const FIXTURE_AGYS_LIST = `Active Profiles:
@@ -454,4 +456,128 @@ test('runAgyWithProfile invokes agys run when profile given, or falls back to ag
   })
   assert.equal(res3.code, 1)
   assert.ok(res3.error)
+})
+
+test('resolveAgyCommand with and without a profile produces exact argv shape', () => {
+  const agyArgv = ['--model', 'gemini-3.8-flash', '-p', 'hello']
+
+  // With profile: ['run', profile, '--', ...argv]
+  const withProfile = resolveAgyCommand({ profile: 'work', agyCmd: 'agy', agyArgv })
+  assert.deepEqual(withProfile, {
+    cmd: 'agys',
+    args: ['run', 'work', '--', '--model', 'gemini-3.8-flash', '-p', 'hello']
+  })
+
+  // Without profile: plain agyCmd and copy of argv
+  const withoutProfile = resolveAgyCommand({ profile: null, agyCmd: 'agy', agyArgv })
+  assert.deepEqual(withoutProfile, {
+    cmd: 'agy',
+    args: ['--model', 'gemini-3.8-flash', '-p', 'hello']
+  })
+
+  // Defaults with no arguments
+  const defaults = resolveAgyCommand()
+  assert.deepEqual(defaults, {
+    cmd: 'agy',
+    args: []
+  })
+})
+
+test('resolveAgyProfile returns explicit profile without calling agys CLI', async () => {
+  let commandCalled = false
+  const runCommandFn = async () => {
+    commandCalled = true
+    return { code: 0, stdout: '', stderr: '' }
+  }
+
+  const res = await resolveAgyProfile({
+    env: { AGENT_HUB_AGYS_PROFILE: 'personal' },
+    runCommandFn
+  })
+
+  assert.deepEqual(res, { profile: 'personal', status: 'selected' })
+  assert.equal(commandCalled, false, 'explicit profile must not call agys CLI')
+})
+
+test('resolveAgyProfile in auto mode selects active or fallback profile using injected functions', async () => {
+  const fakeRunner = async (cmd, args) => {
+    if (args[0] === '--version') return { code: 0, stdout: 'agys v0.2.33', stderr: '' }
+    return { code: 0, stdout: '', stderr: '' }
+  }
+
+  const fakeList = async () => [
+    { name: 'work', active: true, priority: 0 },
+    { name: 'backup', active: false, priority: 1 }
+  ]
+
+  const fakeQuota = async () => ({
+    work: { profileName: 'work' },
+    backup: { profileName: 'backup' }
+  })
+
+  // Active profile picked
+  const res1 = await resolveAgyProfile({
+    env: { AGENT_HUB_AGYS: 'auto' },
+    runCommandFn: fakeRunner,
+    listFn: fakeList,
+    quotaFn: fakeQuota
+  })
+  assert.deepEqual(res1, { profile: 'work', status: 'selected' })
+
+  // When active is exhausted, fallback is picked
+  const exhaustedActiveQuota = async () => ({
+    work: { profileName: 'work', exhausted: true },
+    backup: { profileName: 'backup' }
+  })
+  const res2 = await resolveAgyProfile({
+    env: { AGENT_HUB_AGYS: 'auto' },
+    runCommandFn: fakeRunner,
+    listFn: fakeList,
+    quotaFn: exhaustedActiveQuota
+  })
+  assert.deepEqual(res2, { profile: 'backup', status: 'fallback' })
+})
+
+test('resolveAgyProfile returns status unavailable when agys CLI is unavailable', async () => {
+  const failRunner = async () => ({ code: 1, stdout: '', stderr: 'command not found' })
+
+  const res = await resolveAgyProfile({
+    env: { AGENT_HUB_AGYS: 'auto' },
+    runCommandFn: failRunner
+  })
+
+  assert.deepEqual(res, { profile: null, status: 'unavailable' })
+})
+
+test('resolveAgyProfile returns null profile and status when env is absent or empty', async () => {
+  const res = await resolveAgyProfile({ env: {} })
+  assert.deepEqual(res, { profile: null, status: null })
+})
+
+test('resolveAgyProfile never throws on junk or errors', async () => {
+  const throwingRunner = async () => {
+    throw new Error('catastrophic failure')
+  }
+
+  assert.deepEqual(await resolveAgyProfile({ env: null }), { profile: null, status: null })
+  assert.deepEqual(await resolveAgyProfile({
+    env: { AGENT_HUB_AGYS: 'auto' },
+    runCommandFn: async () => ({ code: 0, stdout: 'agys v0.2.33', stderr: '' }),
+    listFn: throwingRunner
+  }), { profile: null, status: null })
+  assert.deepEqual(await resolveAgyProfile({
+    env: { AGENT_HUB_AGYS: 'auto' },
+    runCommandFn: async () => ({ code: 0, stdout: 'agys v0.2.33', stderr: '' }),
+    selectFn: () => { throw new Error('select failed') }
+  }), { profile: null, status: null })
+})
+
+
+test('profileFromEnv resolves only the explicit env profile, synchronously', async () => {
+  const mod = await import('../src/providers/agys.mjs')
+  assert.deepEqual(mod.profileFromEnv({}), { profile: null, status: null })
+  assert.deepEqual(mod.profileFromEnv({ AGENT_HUB_AGYS_PROFILE: '  work  ' }), { profile: 'work', status: 'selected' })
+  assert.deepEqual(mod.profileFromEnv({ AGENT_HUB_AGYS_PROFILE: '' }), { profile: null, status: null })
+  assert.deepEqual(mod.profileFromEnv({ AGENT_HUB_AGYS: 'auto' }), { profile: null, status: null })
+  assert.deepEqual(mod.profileFromEnv(null), { profile: null, status: null })
 })

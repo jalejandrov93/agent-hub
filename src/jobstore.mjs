@@ -125,6 +125,8 @@ export function createJob({
   // so every pre-existing record and caller stays valid).
   harness = null,
   waitMode = null,
+  profile = null,
+  profileStatus = null,
 }) {
   // A job record without an identity is not a job. `JobRecord` (src/schemas.mjs)
   // requires agent/model, and the dashboard validates /api/state as ONE payload,
@@ -189,6 +191,8 @@ export function createJob({
     // never gates, locks, or routes — see src/harness/registry.mjs).
     harness: harness ?? null,
     waitMode: waitMode ?? null,
+    profile: profile ?? null,
+    profileStatus: profileStatus ?? null,
   }
   // Dual state: if remote_state is provided, mirror it into remote.state for compat.
   if (remote_state != null) {
