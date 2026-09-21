@@ -17,7 +17,9 @@ test('engine verify: verified pass writes verification.json, updates job.finishe
   const home = tmpHome()
   const env = { AGENT_HUB_HOME: home }
 
-  const job = createJob({ workflow_id: 'wf-ver-1', step_id: 'step1', env })
+  // A job record must carry its identity: JobRecord requires agent/model, and a
+  // record missing them makes the dashboard's /api/state validation fail.
+  const job = createJob({ agent: 'agy', model: 'test-model', task: 'verify test', cwd: null, workflow_id: 'wf-ver-1', step_id: 'step1', env })
   const jobId = job.jobId
   updateResult(jobId, { status: 'succeeded' }, env)
 
