@@ -20,21 +20,23 @@ test('filterEnv redacts the 8 secret families and preserves PATH/LANG/TZ', () =>
     NORMAL_VAR: 'keep-me',
   }
 
-  const filtered = filterEnv(env, 'compatibility')
+  for (const profile of ['compatibility', 'isolated-home']) {
+    const filtered = filterEnv(env, profile)
 
-  assert.equal(filtered.PATH, '/usr/bin')
-  assert.equal(filtered.LANG, 'en_US.UTF-8')
-  assert.equal(filtered.TZ, 'UTC')
-  assert.equal(filtered.NORMAL_VAR, 'keep-me')
-  assert.equal(filtered.MY_TOKEN, '***')
-  assert.equal(filtered.AWS_SECRET_ACCESS_KEY, '***')
-  assert.equal(filtered.AWS_ACCESS_KEY_ID, '***')
-  assert.equal(filtered.GH_TOKEN, '***')
-  assert.equal(filtered.ANTHROPIC_API_KEY, '***')
-  assert.equal(filtered.OPENAI_API_KEY, '***')
-  assert.equal(filtered.JULES_API_KEY, '***')
-  assert.equal(filtered.FOO_SECRET, '***')
-  assert.equal(filtered.MY_API_KEY, '***')
+    assert.equal(filtered.PATH, '/usr/bin')
+    assert.equal(filtered.LANG, 'en_US.UTF-8')
+    assert.equal(filtered.TZ, 'UTC')
+    assert.equal(filtered.NORMAL_VAR, 'keep-me')
+    assert.equal(Object.prototype.hasOwnProperty.call(filtered, 'MY_TOKEN'), false)
+    assert.equal(Object.prototype.hasOwnProperty.call(filtered, 'AWS_SECRET_ACCESS_KEY'), false)
+    assert.equal(Object.prototype.hasOwnProperty.call(filtered, 'AWS_ACCESS_KEY_ID'), false)
+    assert.equal(Object.prototype.hasOwnProperty.call(filtered, 'GH_TOKEN'), false)
+    assert.equal(Object.prototype.hasOwnProperty.call(filtered, 'ANTHROPIC_API_KEY'), false)
+    assert.equal(Object.prototype.hasOwnProperty.call(filtered, 'OPENAI_API_KEY'), false)
+    assert.equal(Object.prototype.hasOwnProperty.call(filtered, 'JULES_API_KEY'), false)
+    assert.equal(Object.prototype.hasOwnProperty.call(filtered, 'FOO_SECRET'), false)
+    assert.equal(Object.prototype.hasOwnProperty.call(filtered, 'MY_API_KEY'), false)
+  }
 })
 
 test('compatibility profile inherits HOME', () => {
@@ -72,7 +74,7 @@ test('resolveSandboxProfile falls back to compatibility for bogus names', () => 
 
 test('sandboxTelemetry counts redactions and reports homeIsolation', () => {
   const original = { MY_TOKEN: 'abc', PATH: '/usr/bin', AWS_SECRET: 'x' }
-  const filtered = { MY_TOKEN: '***', PATH: '/usr/bin', AWS_SECRET: '***' }
+  const filtered = { PATH: '/usr/bin' }
 
   const telemetry = sandboxTelemetry(filtered, original, 'compatibility')
   assert.equal(telemetry.profile, 'compatibility')
