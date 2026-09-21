@@ -16,6 +16,7 @@ import { computeAttention } from './cloud/check.mjs'
 import { agentsQuotaTool } from './tools/agents.mjs'
 import { resumeRemoteJobs } from './cloud/runner.mjs'
 import { metricsTool, executionGraphTool } from './tools/insights.mjs'
+import { planTaskTool, executePlanTool } from './tools/planner.mjs'
 import { learningProposeTool } from './tools/learnings.mjs'
 import { scheduleStartupDiscovery, scheduleQuotaWarmup } from './startup.mjs'
 import { dispatch } from './dispatch.mjs'
@@ -671,6 +672,39 @@ export function buildServer() {
       annotations: { readOnlyHint: true, idempotentHint: true },
     },
     guard(({ rootExecutionId }) => executionGraphTool({ rootExecutionId: rootExecutionId ?? null }))
+  )
+
+  register(
+    'plan_task',
+    {
+      title: 'Plan a task',
+      description:
+        'Validate a WorkflowPlan (goal + steps with roles) and materialize it into a runnable workflow WITHOUT executing anything. ' +
+        'Pass the plan object you wrote (the calling orchestrator plans); pass intent only when a planner is configured. ' +
+        'Returns { ok, plan, workflow } or the validation errors.',
+      inputSchema: {
+        plan: z.any().optional().describe('The WorkflowPlan to validate: { goal, steps: [{ id, role, dependsOn?, task?, taskType? }] }.'),
+        intent: z.string().min(1).optional().describe('A goal to decompose when a planner is configured.'),
+        maxSteps: z.number().int().min(1).max(50).optional().describe('Reject a plan with more steps than this (default 12).'),
+      },
+      annotations: { readOnlyHint: true, idempotentHint: true },
+    },
+    guard(({ plan, intent, maxSteps }) => planTaskTool({ plan: plan ?? null, intent, maxSteps }))
+  )
+
+  register(
+    'execute_plan',
+    {
+      title: 'Execute a plan',
+      description:
+        'Validate a WorkflowPlan, materialize it and run it. REQUIRES approve:true — review the plan first (plan_task). ' +
+        'Never executes an invalid plan and never partially executes.',
+      inputSchema: {
+        plan: z.any().describe('The WorkflowPlan to execute.'),
+        approve: z.boolean().describe('Must be true; confirms the plan was reviewed.'),
+      },
+    },
+    guard(({ plan, approve }) => executePlanTool({ plan, approve }))
   )
 
   register(

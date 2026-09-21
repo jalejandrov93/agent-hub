@@ -37,6 +37,7 @@ test('the server boots over stdio and exposes the full tool set', async () => {
         'agents_status',
         'delegate',
         'dispatch',
+        'execute_plan',
         'execution_graph',
         'job_cancel',
         'job_reply',
@@ -53,6 +54,7 @@ test('the server boots over stdio and exposes the full tool set', async () => {
         'jules_supervise',
         'jules_wait',
         'learning_propose',
+        'plan_task',
         'route',
       ]
     )
