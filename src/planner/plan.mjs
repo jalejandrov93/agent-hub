@@ -21,7 +21,7 @@ export const WorkflowPlanSchema = z
   })
   .passthrough()
 
-export function validatePlan(plan) {
+export function validatePlan(plan, { maxSteps = 12, maxDepth = 10, maxFanout = 20 } = {}) {
   const parsed = WorkflowPlanSchema.safeParse(plan)
   if (!parsed.success) {
     return {
@@ -94,11 +94,81 @@ export function validatePlan(plan) {
     }
   }
 
+  if (data.steps.length > maxSteps) {
+    return {
+      ok: false,
+      errors: [{
+        path: 'steps',
+        message: `plan contains ${data.steps.length} steps, exceeding maximum of ${maxSteps}`
+      }]
+    }
+  }
+
+  const boundsErrors = []
+
+  // Calculate DAG depth
+  const depths = new Map()
+  const calculating = new Set()
+  function getDepth(id) {
+    if (depths.has(id)) return depths.get(id)
+    if (calculating.has(id)) return 0 // cycles handled by findCycleInGraph
+    calculating.add(id)
+    const step = data.steps.find((s) => s.id === id)
+    if (!step || step.dependsOn.length === 0) {
+      depths.set(id, 1)
+      calculating.delete(id)
+      return 1
+    }
+    let maxDepDepth = 0
+    for (const depId of step.dependsOn) {
+      const depDepth = getDepth(depId)
+      if (depDepth > maxDepDepth) maxDepDepth = depDepth
+    }
+    const currentDepth = maxDepDepth + 1
+    depths.set(id, currentDepth)
+    calculating.delete(id)
+    return currentDepth
+  }
+
+  let maxActualDepth = 0
+  for (const step of data.steps) {
+    const depth = getDepth(step.id)
+    if (depth > maxActualDepth) maxActualDepth = depth
+  }
+
+  if (maxActualDepth > maxDepth) {
+    boundsErrors.push({
+      path: 'steps',
+      message: `plan depth of ${maxActualDepth} exceeds maximum of ${maxDepth}`
+    })
+  }
+
+  for (let i = 0; i < data.steps.length; i++) {
+    const step = data.steps[i]
+    if (step.dependsOn.length > maxFanout) {
+      boundsErrors.push({
+        path: `steps.${i}.dependsOn`,
+        message: `step "${step.id}" depends on ${step.dependsOn.length} steps, exceeds maxFanout of ${maxFanout}`
+      })
+    }
+
+    if (step.type === 'fanout' && Array.isArray(step.items) && step.items.length > maxFanout) {
+      boundsErrors.push({
+        path: `steps.${i}.items`,
+        message: `step "${step.id}" items length of ${step.items.length} exceeds maxFanout of ${maxFanout}`
+      })
+    }
+  }
+
+  if (boundsErrors.length > 0) {
+    return { ok: false, errors: boundsErrors }
+  }
+
   return { ok: true, plan: data }
 }
 
-export async function materializePlan({ plan, routeFn = route, env = process.env } = {}) {
-  const validation = validatePlan(plan)
+export async function materializePlan({ plan, routeFn = route, env = process.env, maxSteps = 12, maxDepth = 10, maxFanout = 20 } = {}) {
+  const validation = validatePlan(plan, { maxSteps, maxDepth, maxFanout })
   if (!validation.ok) {
     const details = validation.errors.map((e) => `${e.path}: ${e.message}`).join('; ')
     throw new Error(`Invalid plan: ${details}`)

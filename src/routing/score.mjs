@@ -1,4 +1,5 @@
 import { capabilitiesFor } from '../capabilities.mjs'
+import { METRICS_MIN_SAMPLES } from '../config.mjs'
 
 export const DEFAULT_PREFERENCES = Object.freeze({ quality: 0.5, cost: 0.2, latency: 0.3 })
 
@@ -37,7 +38,7 @@ export function normalizePreferences(preferences = {}) {
   return weights
 }
 
-export function rankCandidates({ candidates = [], metrics = {}, preferences = {}, requirements = [], modelRegistry } = {}) {
+export function rankCandidates({ candidates = [], metrics = {}, preferences = {}, requirements = [], modelRegistry, minSamples = METRICS_MIN_SAMPLES } = {}) {
   const excluded = []
   const eligible = []
 
@@ -55,6 +56,9 @@ export function rankCandidates({ candidates = [], metrics = {}, preferences = {}
   for (const item of eligible) {
     const { candidate } = item
     const row = metrics?.[metricKey(candidate.agent, candidate.model)]
+    const insufficientSamples = row && row.samples !== undefined && row.samples < minSamples
+
+    item.insufficientSamples = insufficientSamples
     item.qualityRaw = Number.isFinite(row?.qualityScore) ? Math.min(Math.max(row.qualityScore / 10, 0), 1)
                     : Number.isFinite(row?.verifiedRate) ? row.verifiedRate
                     : Number.isFinite(row?.successRate) ? row.successRate : null
@@ -64,15 +68,22 @@ export function rankCandidates({ candidates = [], metrics = {}, preferences = {}
     item.qualityNorm = item.qualityRaw !== null ? item.qualityRaw : null
   }
 
-  const latencies = eligible.map((item) => item.latencyMs).filter((v) => v !== null)
+  const latencies = eligible.filter(item => !item.insufficientSamples).map((item) => item.latencyMs).filter((v) => v !== null)
   const minLatency = latencies.length > 0 ? Math.min(...latencies) : null
   const maxLatency = latencies.length > 0 ? Math.max(...latencies) : null
 
-  const costs = eligible.map((item) => item.costUsd).filter((v) => v !== null)
+  const costs = eligible.filter(item => !item.insufficientSamples).map((item) => item.costUsd).filter((v) => v !== null)
   const minCost = costs.length > 0 ? Math.min(...costs) : null
   const maxCost = costs.length > 0 ? Math.max(...costs) : null
 
   for (const item of eligible) {
+    if (item.insufficientSamples) {
+      item.latencyNorm = null
+      item.costNorm = null
+      item.qualityNorm = null
+      continue
+    }
+
     if (item.latencyMs === null) {
       item.latencyNorm = null
     } else if (maxLatency === minLatency) {
@@ -104,6 +115,18 @@ export function rankCandidates({ candidates = [], metrics = {}, preferences = {}
     let totalScore = 0
     const reasons = ['quality', 'latency', 'cost'].map((dim) => {
       const raw = rawMap[dim]
+
+      if (item.insufficientSamples) {
+        return {
+          dimension: dim,
+          raw,
+          normalized: null,
+          weight: 0,
+          contribution: 0,
+          note: 'insufficient samples',
+        }
+      }
+
       const normalized = normMap[dim]
       if (normalized === null || activeWeightSum === 0) {
         return {

@@ -125,7 +125,7 @@ export function claimNode(ctx, { workflowId, stepId, claimedBy, attempt }) {
 /**
  * C1.1: vía para el resto de transiciones. Always asserts validity first.
  */
-export function transitionNode(ctx, { workflowId, stepId, from, to, attempt, resultJson = null, claimedBy = null }) {
+export function transitionNode(ctx, { workflowId, stepId, from, to, attempt, resultJson = null, claimedBy }) {
   const row = getWorkflowNode(ctx, workflowId, stepId)
   const current = from ?? row?.status
   assertValidTransition(current, to, stepId)
@@ -136,7 +136,7 @@ export function transitionNode(ctx, { workflowId, stepId, from, to, attempt, res
     status: to,
     attempt: attempt ?? row?.attempt ?? 0,
     updated_at: now,
-    claimed_by: claimedBy ?? row?.claimed_by ?? null,
+    claimed_by: claimedBy === undefined ? (row?.claimed_by ?? null) : claimedBy,
     ...(resultJson !== null ? { result_json: resultJson } : {}),
   })
   return getWorkflowNode(ctx, workflowId, stepId)
@@ -601,14 +601,9 @@ async function executeNode({
           items.map(async (item, idx) => {
             const childStepId = `${node.id}_${idx}`
             const now = new Date().toISOString()
-            upsertWorkflowNode(ctx, {
-              workflow_id: workflow.id,
-              step_id: childStepId,
-              status: NODE_STATUS.RUNNING,
-              attempt: 1,
-              updated_at: now,
-              claimed_by: claimedBy,
-            })
+            upsertWorkflowNode(ctx, { workflow_id: workflow.id, step_id: childStepId, status: NODE_STATUS.PENDING, attempt: 1, updated_at: now })
+            transitionNode(ctx, { workflowId: workflow.id, stepId: childStepId, to: NODE_STATUS.READY, attempt: 1 })
+            claimNode(ctx, { workflowId: workflow.id, stepId: childStepId, claimedBy, attempt: 1 })
             nodeStates.set(childStepId, {
               status: NODE_STATUS.RUNNING,
               attempt: 1,
@@ -681,14 +676,7 @@ async function executeNode({
               })
 
               const finalChild = evidenceOutcome.result
-              upsertWorkflowNode(ctx, {
-                workflow_id: workflow.id,
-                step_id: childStepId,
-                status: NODE_STATUS.SUCCEEDED,
-                attempt: 1,
-                updated_at: new Date().toISOString(),
-                result_json: JSON.stringify(finalChild ?? { success: true }),
-              })
+              transitionNode(ctx, { workflowId: workflow.id, stepId: childStepId, to: NODE_STATUS.SUCCEEDED, attempt: 1, resultJson: JSON.stringify(finalChild ?? { success: true }) })
               nodeStates.set(childStepId, {
                 ...nodeStates.get(childStepId),
                 status: NODE_STATUS.SUCCEEDED,
@@ -712,14 +700,7 @@ async function executeNode({
                 ...(err?.judge ? { judge: err.judge } : {}),
                 revision: 0,
               }
-              upsertWorkflowNode(ctx, {
-                workflow_id: workflow.id,
-                step_id: childStepId,
-                status: NODE_STATUS.FAILED,
-                attempt: 1,
-                updated_at: new Date().toISOString(),
-                result_json: JSON.stringify(childErrorPayload),
-              })
+              transitionNode(ctx, { workflowId: workflow.id, stepId: childStepId, to: NODE_STATUS.FAILED, attempt: 1, resultJson: JSON.stringify(childErrorPayload) })
               nodeStates.set(childStepId, {
                 ...nodeStates.get(childStepId),
                 status: NODE_STATUS.FAILED,
@@ -759,14 +740,7 @@ async function executeNode({
 
       // Transition to SUCCEEDED (only reachable after a real terminal outcome)
       const now = new Date().toISOString()
-      upsertWorkflowNode(ctx, {
-        workflow_id: workflow.id,
-        step_id: node.id,
-        status: NODE_STATUS.SUCCEEDED,
-        attempt,
-        updated_at: now,
-        result_json: JSON.stringify(result ?? { success: true }),
-      })
+      transitionNode(ctx, { workflowId: workflow.id, stepId: node.id, to: NODE_STATUS.SUCCEEDED, attempt, resultJson: JSON.stringify(result ?? { success: true }) })
       nodeStates.set(node.id, {
         ...nodeStates.get(node.id),
         status: NODE_STATUS.SUCCEEDED,
@@ -807,13 +781,8 @@ async function executeNode({
         revisionFeedback = buildRevisionFeedback({ judge: err.judge, verification: err.verification })
         revision++
         attempt = 1
-        upsertWorkflowNode(ctx, {
-          workflow_id: workflow.id,
-          step_id: node.id,
-          status: NODE_STATUS.RUNNING,
-          attempt,
-          updated_at: new Date().toISOString(),
-        })
+        transitionNode(ctx, { workflowId: workflow.id, stepId: node.id, to: NODE_STATUS.READY, attempt })
+        claimNode(ctx, { workflowId: workflow.id, stepId: node.id, claimedBy, attempt })
         nodeStates.set(node.id, {
           ...nodeStates.get(node.id),
           attempt,
@@ -828,13 +797,8 @@ async function executeNode({
         const delay = backoffMs * attempt
         if (delay > 0) await sleep(delay)
         attempt++
-        upsertWorkflowNode(ctx, {
-          workflow_id: workflow.id,
-          step_id: node.id,
-          status: NODE_STATUS.RUNNING,
-          attempt,
-          updated_at: new Date().toISOString(),
-        })
+        transitionNode(ctx, { workflowId: workflow.id, stepId: node.id, to: NODE_STATUS.READY, attempt })
+        claimNode(ctx, { workflowId: workflow.id, stepId: node.id, claimedBy, attempt })
         nodeStates.set(node.id, {
           ...nodeStates.get(node.id),
           attempt,
@@ -855,14 +819,7 @@ async function executeNode({
     ...(lastError?.judge ? { judge: lastError.judge } : {}),
     revision,
   }
-  upsertWorkflowNode(ctx, {
-    workflow_id: workflow.id,
-    step_id: node.id,
-    status: NODE_STATUS.FAILED,
-    attempt,
-    updated_at: now,
-    result_json: JSON.stringify(errorPayload),
-  })
+  transitionNode(ctx, { workflowId: workflow.id, stepId: node.id, to: NODE_STATUS.FAILED, attempt, resultJson: JSON.stringify(errorPayload) })
   nodeStates.set(node.id, {
     ...nodeStates.get(node.id),
     status: NODE_STATUS.FAILED,
@@ -942,17 +899,8 @@ async function waitForHandleTerminal({
     if (outcome?.waiting) {
       const reason = outcome.reason ?? 'external_event'
       // running -> waiting (persisted; scheduler holds the claim)
-      assertValidTransition(NODE_STATUS.RUNNING, NODE_STATUS.WAITING, node.id)
       const now = new Date().toISOString()
-      upsertWorkflowNode(ctx, {
-        workflow_id: workflow.id,
-        step_id: node.id,
-        status: NODE_STATUS.WAITING,
-        attempt,
-        updated_at: now,
-        claimed_by: claimedBy,
-        result_json: JSON.stringify({ waiting: true, waitReason: reason, jobId, remoteState: outcome.remoteState ?? null }),
-      })
+      transitionNode(ctx, { workflowId: workflow.id, stepId: node.id, to: NODE_STATUS.WAITING, attempt, claimedBy, resultJson: JSON.stringify({ waiting: true, waitReason: reason, jobId, remoteState: outcome.remoteState ?? null }) })
       nodeStates.set(node.id, {
         ...nodeStates.get(node.id),
         status: NODE_STATUS.WAITING,
@@ -1124,16 +1072,8 @@ export async function runWorkflow({
           const updatedAt = Date.parse(row.updated_at ?? '') || 0
           const leaseExpired = Date.now() - updatedAt > leaseTtlMs
           if (leaseExpired || !hasExplicitProbe) {
-            assertValidTransition(NODE_STATUS.RUNNING, NODE_STATUS.READY, node.id)
             status = NODE_STATUS.READY
-            upsertWorkflowNode(dbCtx, {
-              workflow_id: workflow.id,
-              step_id: node.id,
-              status: NODE_STATUS.READY,
-              attempt: row.attempt,
-              claimed_by: null,
-              updated_at: new Date().toISOString(),
-            })
+            transitionNode(dbCtx, { workflowId: workflow.id, stepId: node.id, to: NODE_STATUS.READY, attempt: row.attempt, claimedBy: null })
             claimed = null
           }
         } else if (!owner || owner === claimedBy) {
@@ -1156,13 +1096,7 @@ export async function runWorkflow({
       })
     } else {
       const now = new Date().toISOString()
-      upsertWorkflowNode(dbCtx, {
-        workflow_id: workflow.id,
-        step_id: node.id,
-        status: NODE_STATUS.PENDING,
-        attempt: 0,
-        updated_at: now,
-      })
+      upsertWorkflowNode(dbCtx, { workflow_id: workflow.id, step_id: node.id, status: NODE_STATUS.PENDING, attempt: 0, updated_at: now })
       nodeStates.set(node.id, {
         status: NODE_STATUS.PENDING,
         attempt: 0,
@@ -1187,17 +1121,9 @@ export async function runWorkflow({
     for (const { node, reason } of resolution.skipped) {
       const current = nodeStates.get(node.id)
       if (current && current.status !== NODE_STATUS.SKIPPED) {
-        assertValidTransition(current.status, NODE_STATUS.SKIPPED, node.id)
         const now = new Date().toISOString()
         const skipResult = { skipped: true, reason }
-        upsertWorkflowNode(dbCtx, {
-          workflow_id: workflow.id,
-          step_id: node.id,
-          status: NODE_STATUS.SKIPPED,
-          attempt: current.attempt,
-          updated_at: now,
-          result_json: JSON.stringify(skipResult),
-        })
+        transitionNode(dbCtx, { workflowId: workflow.id, stepId: node.id, to: NODE_STATUS.SKIPPED, attempt: current.attempt, resultJson: JSON.stringify(skipResult) })
         nodeStates.set(node.id, {
           ...current,
           status: NODE_STATUS.SKIPPED,
@@ -1221,6 +1147,7 @@ export async function runWorkflow({
     }
 
     // 4. Parallel wave execution via Promise.all
+    let claimedAny = false
     await Promise.all(
       readyNodes.map(async (node) => {
         // Publish PENDING -> READY through a CONDITIONAL update (only from
@@ -1244,6 +1171,7 @@ export async function runWorkflow({
           // Another scheduler already claimed or executed this node
           return
         }
+        claimedAny = true
 
         nodeStates.set(node.id, {
           ...nodeStates.get(node.id),
@@ -1270,6 +1198,11 @@ export async function runWorkflow({
         })
       })
     )
+
+    // A whole ready wave that nobody could claim means another scheduler owns
+    // those nodes (or a stale claim blocks the CAS). Yield instead of spinning:
+    // without this the loop burns CPU at 100% until the claim frees up.
+    if (!claimedAny) await sleep(pollIntervalMs)
   }
 
   refreshNodeStates(dbCtx, workflow.id, nodeStates)

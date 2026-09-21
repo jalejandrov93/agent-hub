@@ -1,5 +1,6 @@
 import { test } from 'node:test'
 import assert from 'node:assert/strict'
+import http from 'node:http'
 import fs from 'node:fs'
 import path from 'node:path'
 import os from 'node:os'
@@ -325,4 +326,83 @@ test('opencode-bridge: bridgeSupportsWake stays false when the flag is off', () 
 
   const bridgeOn = resolveBridge('opencode', { version: '2.0.11', env: envOn })
   assert.equal(bridgeOn.id, 'opencode')
+})
+
+test('opencode-bridge: wake performs a real HTTP POST to the local server', async () => {
+  const tmpDir = makeTempServiceDir()
+  let server
+  try {
+    let requestCount = 0
+    let lastReq = null
+    let lastBody = null
+
+    server = http.createServer((req, res) => {
+      requestCount++
+      let body = ''
+      req.on('data', chunk => {
+        body += chunk.toString()
+      })
+      req.on('end', () => {
+        lastReq = req
+        lastBody = body
+        if (req.url.includes('err')) {
+          res.writeHead(500)
+          res.end('Error')
+        } else {
+          res.writeHead(200, { 'Content-Type': 'application/json' })
+          res.end(JSON.stringify({ ok: true }))
+        }
+      })
+    })
+
+    await new Promise((resolve) => server.listen(0, '127.0.0.1', resolve))
+    const port = server.address().port
+    const url = `http://127.0.0.1:${port}`
+
+    const serviceFile = path.join(tmpDir, 'service.json')
+    fs.writeFileSync(
+      serviceFile,
+      JSON.stringify({ url, password: 'real-password' })
+    )
+
+    const bridge = opencodeBridge({
+      env: {
+        AGENT_HUB_OPENCODE_BRIDGE: '1',
+        AGENT_HUB_OPENCODE_SERVICE_FILE: serviceFile,
+      },
+      version: '2.0.11',
+    })
+
+    const origin = { harness: 'opencode', sessionId: 'sess-real' }
+    const payload = { jobId: 'job-real', summary: 'real summary' }
+
+    const outcome = await bridge.wake(origin, payload)
+
+    assert.equal(outcome.delivered, true)
+    assert.equal(outcome.status, 200)
+
+    assert.equal(lastReq.method, 'POST')
+    assert.equal(lastReq.url, '/api/session/sess-real/prompt')
+    assert.equal(lastReq.headers['content-type'], 'application/json')
+
+    const expectedAuth = 'Basic ' + Buffer.from('opencode:real-password').toString('base64')
+    assert.equal(lastReq.headers['authorization'], expectedAuth)
+
+    const parsedBody = JSON.parse(lastBody)
+    assert.equal(parsedBody.resume, true)
+    assert.ok(parsedBody.text.includes('job-real'))
+
+    // Now test 500 error
+    const originErr = { harness: 'opencode', sessionId: 'sess-err' }
+    const outcomeErr = await bridge.wake(originErr, payload)
+
+    assert.equal(outcomeErr.delivered, false)
+    assert.equal(outcomeErr.status, 500)
+
+  } finally {
+    if (server) {
+      await new Promise(resolve => server.close(resolve))
+    }
+    fs.rmSync(tmpDir, { recursive: true, force: true })
+  }
 })

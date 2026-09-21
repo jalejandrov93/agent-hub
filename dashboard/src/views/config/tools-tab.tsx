@@ -1,5 +1,4 @@
 import { Wrench } from "lucide-react"
-import { PageHeader } from "@/components/PageHeader"
 import { EmptyState } from "@/components/EmptyState"
 import { DataTable, type DataTableColumn } from "@/components/DataTable"
 import { Alert, AlertDescription, AlertTitle } from "@/components/ui/alert"
@@ -31,20 +30,13 @@ const columns: DataTableColumn<McpToolT>[] = [
   },
 ]
 
-export function ToolsView({ embedded = false }: { embedded?: boolean } = {}) {
+export function ToolsTab() {
   const toolsQuery = useToolsQuery()
   const tools = toolsQuery.data?.tools ?? []
   const sortedTools = [...tools].sort((a, b) => a.name.localeCompare(b.name))
 
   return (
     <div className="flex flex-col gap-6">
-      {!embedded ? (
-        <PageHeader
-          title="Tools"
-          description="MCP tools registered by the agent-hub server. Every test run validates this list loads."
-        />
-      ) : null}
-
       {toolsQuery.isPending ? (
         <div className="flex flex-col gap-4">
           <Skeleton className="h-24 w-full" />
