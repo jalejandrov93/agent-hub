@@ -104,3 +104,10 @@ cost/latency/success is wanted later, it is one documented constant away.
   off `dev` (`8b2ca1c`, after C4 re-landed via PR #14).
 - Note: PR #13 was marked MERGED while never reaching `dev` (stacked base
   merged first). Re-landed as #14. Future slices branch from `dev`.
+- 2026-09-21: **T1 done** — plumbing + metrics aggregation + 12 tests.
+  Verified: `node --test test/metrics-intelligence.test.mjs test/metrics.test.mjs`
+  -> 25 pass / 0 fail; `npm test` -> 1062 pass / 1 pre-existing flake / 8
+  cancelled. Commit `d51ef00`.
+- 2026-09-21: **T2 done** — dashboard columns + tests. Verified: dashboard 161
+  pass, typecheck clean. Commit `67e03d3`.
+- 2026-09-21: **T3 done** — README + CHANGELOG. Feature complete.
