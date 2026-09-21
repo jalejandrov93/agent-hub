@@ -142,4 +142,56 @@ describe("JobsView", () => {
     fireEvent.click(within(dialog).getByRole("button", { name: /close/i }))
     await waitFor(() => expect(screen.queryByRole("dialog")).toBeNull())
   })
+
+  it("renders the 'Awaiting feedback' badge when remote.state is AWAITING_USER_FEEDBACK", async () => {
+    vi.mocked(api.getState).mockResolvedValue(
+      stateWith([
+        makeJob({
+          jobId: "j-awaiting",
+          title: "awaiting-task",
+          status: "running",
+          remote: { provider: "jules", sessionId: "sess-awaiting", state: "AWAITING_USER_FEEDBACK" },
+        }),
+      ])
+    )
+
+    renderView()
+
+    expect(await screen.findByText("Awaiting feedback")).toBeTruthy()
+  })
+
+  it("does not render 'Awaiting feedback' for a running job without a remote waiting state", async () => {
+    vi.mocked(api.getState).mockResolvedValue(
+      stateWith([
+        makeJob({
+          jobId: "j-running",
+          title: "running-task",
+          status: "running",
+          remote: { provider: "jules", sessionId: "sess-running", state: "IN_PROGRESS" },
+        }),
+      ])
+    )
+
+    renderView()
+
+    await screen.findByText("running-task")
+    expect(screen.queryByText("Awaiting feedback")).toBeNull()
+  })
+
+  it("renders the normal status badge for an ordinary job", async () => {
+    vi.mocked(api.getState).mockResolvedValue(
+      stateWith([
+        makeJob({
+          jobId: "j-ordinary",
+          title: "ordinary-task",
+          status: "running",
+        }),
+      ])
+    )
+
+    renderView()
+
+    await screen.findByText("ordinary-task")
+    expect(screen.getByText("Running")).toBeTruthy()
+  })
 })

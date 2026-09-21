@@ -1,8 +1,9 @@
 import * as React from "react"
 import { Link } from "@tanstack/react-router"
-import { PlayCircle } from "lucide-react"
+import { AlertTriangle, PlayCircle } from "lucide-react"
 import { PageHeader } from "@/components/PageHeader"
 import { ProviderMark } from "@/components/ProviderMark"
+import { StatusBadge } from "@/components/StatusBadge"
 import { EmptyState } from "@/components/EmptyState"
 import { DataTable, type DataTableColumn } from "@/components/DataTable"
 import { ConfirmDialog } from "@/components/ConfirmDialog"
@@ -16,10 +17,23 @@ import { Tooltip, TooltipContent, TooltipProvider, TooltipTrigger } from "@/comp
 import { runningJobs } from "@/lib/badges"
 import { formatDuration, formatModel } from "@/lib/format"
 import { useCancelJobMutation, useStateQuery } from "@/lib/queries"
+import { TONE_BADGE_CLASS } from "@/lib/tone"
 import type { Job } from "@/lib/types"
+import { cn } from "@/lib/utils"
 import { JobProfileBadge } from "@/views/providers"
 import { ElapsedCell } from "./ElapsedCell"
 import { JobDetailModal } from "./JobDetailModal"
+
+function remoteWaitingState(job: Job): string | null {
+  const state = job.remote?.state ?? job.remote_state
+  if (typeof state === "string") {
+    const s = state.toUpperCase()
+    if (s.startsWith("AWAITING_") || s === "PAUSED") {
+      return state
+    }
+  }
+  return null
+}
 
 const PAGE_HEADER = {
   title: "Running jobs",
@@ -104,6 +118,26 @@ export function JobsView() {
         ) : (
           <span className="text-muted-foreground">—</span>
         ),
+    },
+    {
+      key: "status",
+      header: "Status",
+      cell: (job) => {
+        const waitingState = remoteWaitingState(job)
+        if (waitingState) {
+          return (
+            <Badge
+              variant="outline"
+              title={waitingState}
+              className={cn("border-transparent", TONE_BADGE_CLASS.warning)}
+            >
+              <AlertTriangle data-icon="inline-start" />
+              Awaiting feedback
+            </Badge>
+          )
+        }
+        return <StatusBadge kind="status" value={job.status} />
+      },
     },
     {
       key: "cwd",
