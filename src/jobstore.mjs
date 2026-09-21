@@ -1,9 +1,17 @@
+/**
+ * Job store and persistence.
+ *
+ * Architecture Invariant: SQLite is coordination state, the filesystem is content.
+ * In sqlite mode (C0.1.3/C0.1.4), SQLite acts as the index and coordination state.
+ * result.json continues to be written on createJob and updateResult as a durability
+ * and content artifact, but is no longer the primary index for queries.
+ */
 import fs from 'node:fs'
 import path from 'node:path'
 import crypto from 'node:crypto'
 import { paths } from './config.mjs'
 import { updateJsonLocked } from './fsutil.mjs'
-import { getDb, upsertJob, getJob } from './storage/index.mjs'
+import { getDb, upsertJob, getJob, listJobIds } from './storage/index.mjs'
 
 function ensureDir(dir) {
   fs.mkdirSync(dir, { recursive: true })
@@ -65,7 +73,7 @@ function mirrorJobToDb(job, env = process.env) {
       return
     }
     upsertJob(ctx, {
-      job_id: job.jobId,
+      job_id: job.jobId ?? job.job_id ?? null,
       workflow_id: job.workflow_id ?? null,
       step_id: job.step_id ?? null,
       parent_execution_id: job.parent_execution_id ?? null,
@@ -267,6 +275,27 @@ export function compareJobReadPaths(jobId, env = process.env) {
   return { json, sqlite, divergences }
 }
 
+function warnIfDivergent(jobId, env = process.env) {
+  const comparison = compareJobReadPaths(jobId, env)
+  if (comparison.divergences.length > 0 && !_warnedDivergentJobIds.has(jobId)) {
+    _warnedDivergentJobIds.add(jobId)
+    console.warn(`[agent-hub] job read divergence for ${jobId}:`, comparison.divergences)
+  }
+  return comparison
+}
+
+/**
+ * Read a job result.
+ *
+ * In sqlite mode (C0.1.3/C0.1.4), SQLite is coordination state and primary index:
+ * readResult reads the DB row first. When absent, it falls back to result.json
+ * and best-effort backfills/mirrors it into SQLite so legacy jobs are indexed.
+ *
+ * In shadow mode (C0.1.2), reads compare JSON and SQLite, warning once per
+ * divergent jobId while JSON always wins (returns JSON record).
+ *
+ * Default (json) mode preserves legacy filesystem-only behaviour.
+ */
 export function readResult(jobId, env = process.env) {
   const storeMode = env?.AGENT_HUB_STORE || 'json'
 
@@ -283,15 +312,18 @@ export function readResult(jobId, env = process.env) {
         // fall back to JSON file below
       }
     }
-    return readJsonResult(jobId, env)
+    const result = readJsonResult(jobId, env)
+    try {
+      if (!result.jobId) result.jobId = jobId
+      mirrorJobToDb(result, env)
+    } catch {
+      // best-effort backfill into SQLite
+    }
+    return result
   }
 
   if (storeMode === 'shadow') {
-    const comparison = compareJobReadPaths(jobId, env)
-    if (comparison.divergences.length > 0 && !_warnedDivergentJobIds.has(jobId)) {
-      _warnedDivergentJobIds.add(jobId)
-      console.warn(`[agent-hub] job read divergence for ${jobId}:`, comparison.divergences)
-    }
+    warnIfDivergent(jobId, env)
     return readJsonResult(jobId, env)
   }
 
@@ -324,10 +356,106 @@ export function updateResult(jobId, patchOrUpdater, env = process.env) {
   })
 }
 
-// listJobs behaviour stays JSON (scanning runs/ directories and reading result.json).
-// SQLite is coordination state; job listing cutover is deferred (C0.1.1).
+/**
+ * List all jobs, sorted by createdAt descending.
+ *
+ * In sqlite mode (C0.1.3/C0.1.4), SQLite is coordination state and primary index.
+ * result.json is no longer the index; listJobs computes the UNION of DB job IDs
+ * and runs/ directory names, reading each DB-first with fallback to result.json
+ * (and backfilling legacy jobs into SQLite).
+ *
+ * In shadow mode (C0.1.2), reads compare JSON and SQLite for every job,
+ * warning once per divergent jobId without altering returned JSON data.
+ *
+ * Default (json) mode preserves byte-for-byte legacy filesystem-scanning behaviour.
+ */
 export function listJobs(env = process.env) {
   const { runsDir } = paths(env)
+  const storeMode = env?.AGENT_HUB_STORE || 'json'
+
+  if (storeMode === 'sqlite') {
+    const ctx = getDb(env)
+    let dbIds = []
+    if (ctx) {
+      try {
+        dbIds = listJobIds(ctx)
+      } catch {
+        dbIds = []
+      }
+    }
+
+    let runIds = []
+    try {
+      const entries = fs.readdirSync(runsDir, { withFileTypes: true })
+      for (const entry of entries) {
+        if (entry.isDirectory() && entry.name !== '.locks') {
+          runIds.push(entry.name)
+        }
+      }
+    } catch (error) {
+      if (error.code !== 'ENOENT') throw error
+    }
+
+    const unionIds = new Set([...dbIds, ...runIds])
+    const jobs = []
+    for (const id of unionIds) {
+      try {
+        jobs.push(readResult(id, env))
+      } catch {
+        // skip missing or unreadable jobs
+      }
+    }
+    jobs.sort((a, b) => (b.createdAt || '').localeCompare(a.createdAt || ''))
+    return jobs
+  }
+
+  if (storeMode === 'shadow') {
+    let entries = []
+    try {
+      entries = fs.readdirSync(runsDir, { withFileTypes: true })
+    } catch (error) {
+      if (error.code !== 'ENOENT') throw error
+    }
+
+    const ctx = getDb(env)
+    let dbIds = []
+    if (ctx) {
+      try {
+        dbIds = listJobIds(ctx)
+      } catch {
+        dbIds = []
+      }
+    }
+
+    const runIds = []
+    for (const entry of entries) {
+      if (entry.isDirectory() && entry.name !== '.locks') {
+        runIds.push(entry.name)
+      }
+    }
+
+    const allIds = new Set([...runIds, ...dbIds])
+    for (const id of allIds) {
+      try {
+        warnIfDivergent(id, env)
+      } catch {
+        // ignore
+      }
+    }
+
+    const jobs = []
+    for (const entry of entries) {
+      if (!entry.isDirectory() || entry.name === '.locks') continue
+      try {
+        jobs.push(readJsonResult(entry.name, env))
+      } catch {
+        // skip a job directory without a readable result.json
+      }
+    }
+    jobs.sort((a, b) => (b.createdAt || '').localeCompare(a.createdAt || ''))
+    return jobs
+  }
+
   let entries
   try {
     entries = fs.readdirSync(runsDir, { withFileTypes: true })
