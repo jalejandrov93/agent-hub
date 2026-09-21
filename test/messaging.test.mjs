@@ -167,6 +167,7 @@ test('mailbox_full after 10', async () => {
   for (let i = 0; i < 10; i++) {
     const res = await agentSendMessageTool({
       to: 'codex',
+      from: `sender-${i}`,
       text: `notice ${i}`,
       rootExecutionId: 'root-cap',
       env,
@@ -176,6 +177,7 @@ test('mailbox_full after 10', async () => {
 
   const overflow = await agentSendMessageTool({
     to: 'codex',
+    from: 'sender-overflow',
     text: 'notice 11',
     rootExecutionId: 'root-cap',
     env,
@@ -403,4 +405,61 @@ test("job_reply receives '[Inter-Agent Notice' block and marks delivered", async
     env,
   })
   assert.equal(inbox.messages.length, 0)
+})
+
+test('message loop guard: 6th undelivered message from same sender is rejected', async () => {
+  const home = tmpHome()
+  const env = { AGENT_HUB_HOME: home }
+
+  // Send 5 messages from 'sender-A' to 'target-agent'
+  for (let i = 0; i < 5; i++) {
+    const res = await agentSendMessageTool({
+      to: 'target-agent',
+      from: 'sender-A',
+      text: `notice ${i}`,
+      rootExecutionId: 'root-loop-guard',
+      env,
+    })
+    assert.equal(res.ok, true, `message ${i} should succeed`)
+  }
+
+  // The 6th message from 'sender-A' should be rejected
+  const loopGuardMsg = await agentSendMessageTool({
+    to: 'target-agent',
+    from: 'sender-A',
+    text: 'notice 6',
+    rootExecutionId: 'root-loop-guard',
+    env,
+  })
+  assert.equal(loopGuardMsg.ok, false)
+  assert.equal(loopGuardMsg.error, 'message loop guard: too many undelivered messages for this pair')
+
+  // A message from a different sender should still succeed
+  const otherSenderMsg = await agentSendMessageTool({
+    to: 'target-agent',
+    from: 'sender-B',
+    text: 'notice from B',
+    rootExecutionId: 'root-loop-guard',
+    env,
+  })
+  assert.equal(otherSenderMsg.ok, true)
+
+  // Reading the inbox marks messages as delivered, clearing the undelivered count
+  const inboxRes = await agentInboxTool({
+    to: 'target-agent',
+    rootExecutionId: 'root-loop-guard',
+    env,
+  })
+  assert.equal(inboxRes.ok, true)
+  assert.equal(inboxRes.messages.length, 6) // 5 from A, 1 from B
+
+  // Now 'sender-A' should be able to send again
+  const afterDrain = await agentSendMessageTool({
+    to: 'target-agent',
+    from: 'sender-A',
+    text: 'notice 7',
+    rootExecutionId: 'root-loop-guard',
+    env,
+  })
+  assert.equal(afterDrain.ok, true)
 })
