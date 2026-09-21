@@ -12,5 +12,6 @@ export const qk = {
   activities: (id: string) => ["activities", id] as const,
   workGraph: ["work-graph"] as const,
   tools: ["tools"] as const,
+  providers: ["providers"] as const,
   executionGraph: (root?: string | null) => (root ? (['execution-graph', root] as const) : (['execution-graph'] as const)),
 }

@@ -373,4 +373,210 @@ export function resolveAgyProfileSync({
   }
 }
 
+export const defaultSnapshotCache = new Map()
+export const SNAPSHOT_CACHE_TTL_MS = 60_000
+
+export function resetSnapshotCache() {
+  defaultSnapshotCache.clear()
+}
+
+function extractQuotaBuckets(quotaEntry) {
+  if (!quotaEntry || typeof quotaEntry !== 'object') return []
+  if (Array.isArray(quotaEntry.buckets)) return quotaEntry.buckets
+  if (Array.isArray(quotaEntry.quota?.buckets)) return quotaEntry.quota.buckets
+  if (Array.isArray(quotaEntry.quota?.groups)) {
+    return quotaEntry.quota.groups.flatMap((g) => (Array.isArray(g.buckets) ? g.buckets : []))
+  }
+  return []
+}
+
+function mapQuotaBucket(rawBucket) {
+  if (!rawBucket || typeof rawBucket !== 'object') {
+    return {
+      id: '',
+      label: '',
+      window: null,
+      resetTime: null,
+      usedPercent: null,
+      remainingPercent: null,
+      description: null,
+    }
+  }
+
+  const id = String(rawBucket.bucketId ?? rawBucket.id ?? '')
+  const label = String(rawBucket.displayName ?? rawBucket.label ?? rawBucket.bucketId ?? rawBucket.id ?? '')
+  const windowVal = rawBucket.window != null ? String(rawBucket.window) : null
+  const resetTime = rawBucket.resetTime != null ? String(rawBucket.resetTime) : null
+  const description = rawBucket.description != null ? String(rawBucket.description) : null
+
+  let usedPercent = null
+  let remainingPercent = null
+
+  if (typeof rawBucket.remainingPercent === 'number' && Number.isFinite(rawBucket.remainingPercent)) {
+    remainingPercent = rawBucket.remainingPercent
+  } else if (typeof rawBucket.remainingFraction === 'number' && Number.isFinite(rawBucket.remainingFraction)) {
+    remainingPercent = rawBucket.remainingFraction * 100
+  }
+
+  if (typeof rawBucket.usedPercent === 'number' && Number.isFinite(rawBucket.usedPercent)) {
+    usedPercent = rawBucket.usedPercent
+  } else if (typeof rawBucket.usedFraction === 'number' && Number.isFinite(rawBucket.usedFraction)) {
+    usedPercent = rawBucket.usedFraction * 100
+  } else if (typeof rawBucket.percent === 'number' && Number.isFinite(rawBucket.percent)) {
+    usedPercent = rawBucket.percent
+  } else if (typeof rawBucket.percentage === 'number' && Number.isFinite(rawBucket.percentage)) {
+    usedPercent = rawBucket.percentage
+  } else if (remainingPercent !== null) {
+    usedPercent = Math.max(0, Math.min(100, 100 - remainingPercent))
+  }
+
+  if (remainingPercent === null && usedPercent !== null) {
+    remainingPercent = Math.max(0, Math.min(100, 100 - usedPercent))
+  }
+
+  return {
+    id,
+    label,
+    window: windowVal,
+    resetTime,
+    usedPercent,
+    remainingPercent,
+    description,
+  }
+}
+
+export async function agysProfilesSnapshot({
+  env = process.env,
+  runCommandFn = defaultRunCommand,
+  cache = defaultSnapshotCache,
+  now = Date.now,
+} = {}) {
+  const safeEnv = env || {}
+  const rawPinned = safeEnv.AGENT_HUB_AGYS_PROFILE
+  const pinnedProfile = typeof rawPinned === 'string' && rawPinned.trim() !== '' ? rawPinned.trim() : null
+  let mode = 'off'
+  if (pinnedProfile) {
+    mode = 'profile'
+  } else if (safeEnv.AGENT_HUB_AGYS === 'auto') {
+    mode = 'auto'
+  }
+
+  const cacheKey = `snapshot:${pinnedProfile ?? ''}:${safeEnv.AGENT_HUB_AGYS ?? ''}`
+  if (cache && typeof cache.get === 'function') {
+    const cached = cache.get(cacheKey)
+    if (cached && typeof cached.expiresAt === 'number' && now() < cached.expiresAt) {
+      return cached.value
+    }
+  }
+
+  try {
+    const versionRes = await runCommandFn('agys', ['--version'], { env: safeEnv, timeoutMs: 10_000 })
+    if (!versionRes || versionRes.code !== 0 || versionRes.timedOut || versionRes.error) {
+      const reason =
+        versionRes?.error?.message ||
+        versionRes?.stderr?.trim() ||
+        'agys CLI not found or unavailable on PATH'
+      const result = {
+        available: false,
+        reason,
+        mode,
+        pinnedProfile,
+        selected: null,
+        profiles: [],
+      }
+      if (cache && typeof cache.set === 'function') {
+        cache.set(cacheKey, { value: result, expiresAt: now() + SNAPSHOT_CACHE_TTL_MS })
+      }
+      return result
+    }
+
+    const [listRes, quotaRes] = await Promise.all([
+      runCommandFn('agys', ['list'], { env: safeEnv, timeoutMs: 10_000 }),
+      runCommandFn('agys', ['quota', '--json'], { env: safeEnv, timeoutMs: 15_000 }),
+    ])
+
+    if (!listRes || listRes.code !== 0 || listRes.timedOut || listRes.error) {
+      const reason =
+        listRes?.error?.message ||
+        listRes?.stderr?.trim() ||
+        'agys list command failed'
+      const result = {
+        available: false,
+        reason,
+        mode,
+        pinnedProfile,
+        selected: null,
+        profiles: [],
+      }
+      if (cache && typeof cache.set === 'function') {
+        cache.set(cacheKey, { value: result, expiresAt: now() + SNAPSHOT_CACHE_TTL_MS })
+      }
+      return result
+    }
+
+    const rawProfiles = parseAgysList(listRes.stdout || '')
+    let quotaMap = {}
+    if (quotaRes && quotaRes.code === 0 && quotaRes.stdout && !quotaRes.error) {
+      quotaMap = parseAgysQuota(quotaRes.stdout)
+    }
+
+    const candidates = rawProfiles.map((p) => {
+      const quotaEntry = quotaMap && typeof quotaMap === 'object' ? quotaMap[p.name] : null
+      const state = p?.state ?? profileStateFor({ profile: p, quotaEntry })
+      const rawBuckets = extractQuotaBuckets(quotaEntry)
+      const buckets = rawBuckets.map(mapQuotaBucket)
+      return {
+        ...p,
+        state,
+        quota: { buckets },
+      }
+    })
+
+    let selected = null
+    if (mode === 'auto') {
+      const chosen = selectProfile({ profiles: candidates })
+      selected = chosen?.name ? { name: chosen.name } : null
+    } else if (mode === 'profile' && pinnedProfile) {
+      selected = { name: pinnedProfile }
+    }
+
+    const profiles = candidates.map((c) => ({
+      name: c.name,
+      email: c.email ?? null,
+      active: Boolean(c.active),
+      priority: typeof c.priority === 'number' ? c.priority : 0,
+      state: c.state,
+      quota: c.quota,
+    }))
+
+    const result = {
+      available: true,
+      mode,
+      pinnedProfile,
+      selected,
+      profiles,
+    }
+
+    if (cache && typeof cache.set === 'function') {
+      cache.set(cacheKey, { value: result, expiresAt: now() + SNAPSHOT_CACHE_TTL_MS })
+    }
+
+    return result
+  } catch (error) {
+    const fallbackResult = {
+      available: false,
+      reason: String(error?.message ?? error),
+      mode,
+      pinnedProfile,
+      selected: null,
+      profiles: [],
+    }
+    if (cache && typeof cache.set === 'function') {
+      cache.set(cacheKey, { value: fallbackResult, expiresAt: now() + SNAPSHOT_CACHE_TTL_MS })
+    }
+    return fallbackResult
+  }
+}
+
+
 

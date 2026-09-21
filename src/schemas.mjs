@@ -816,3 +816,48 @@ export const WorkGraphResponse = z
     edges: z.array(WorkGraphEdge),
   })
   .passthrough()
+
+export const AgysBucket = z
+  .object({
+    id: z.string(),
+    label: z.string(),
+    window: nullableString,
+    resetTime: nullableString,
+    usedPercent: nullableNumber,
+    remainingPercent: nullableNumber,
+    description: nullableString,
+  })
+  .passthrough()
+
+export const AgysProfileQuota = z
+  .object({
+    buckets: z.array(AgysBucket),
+  })
+  .passthrough()
+
+export const AgysProfile = z
+  .object({
+    name: z.string(),
+    email: nullableString,
+    active: z.boolean(),
+    priority: z.number(),
+    state: z.enum(['selected', 'fallback', 'exhausted', 'unavailable']),
+    quota: AgysProfileQuota,
+  })
+  .passthrough()
+
+export const AgysSnapshotResponse = z
+  .object({
+    available: z.boolean(),
+    reason: z.string().optional(),
+    mode: z.enum(['off', 'profile', 'auto']),
+    pinnedProfile: nullableString,
+    selected: z
+      .object({
+        name: z.string(),
+      })
+      .nullable(),
+    profiles: z.array(AgysProfile),
+  })
+  .passthrough()
+
