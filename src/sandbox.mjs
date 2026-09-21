@@ -54,10 +54,9 @@ export function filterEnv(env, profile) {
 
   for (const [key, value] of Object.entries(env)) {
     if (config.redactEnv && isSecretKey(key)) {
-      filtered[key] = '***'
-    } else {
-      filtered[key] = value
+      continue
     }
+    filtered[key] = value
   }
 
   if (!config.inheritHome) {
@@ -75,12 +74,14 @@ export function filterEnv(env, profile) {
  * @param {SandboxProfile} profile
  */
 export function sandboxTelemetry(filteredEnv, originalEnv, profile) {
+  const config = SANDBOX_PROFILES[profile] ?? SANDBOX_PROFILES.compatibility
   let envRedactions = 0
   for (const [key, value] of Object.entries(originalEnv)) {
-    if (filteredEnv[key] === '***') envRedactions++
+    if (filteredEnv[key] === '***' || (config.redactEnv && isSecretKey(key) && !Object.prototype.hasOwnProperty.call(filteredEnv, key))) {
+      envRedactions++
+    }
   }
 
-  const config = SANDBOX_PROFILES[profile] ?? SANDBOX_PROFILES.compatibility
   return {
     profile,
     envRedactions,
