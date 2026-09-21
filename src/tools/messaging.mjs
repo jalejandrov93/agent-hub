@@ -71,6 +71,11 @@ export async function agentSendMessageTool({
     return { ok: false, error: 'mailbox_full' }
   }
 
+  const undeliveredFromSameSender = undelivered.filter(m => (m.from_agent ?? m.from) === from)
+  if (undeliveredFromSameSender.length >= 5) {
+    return { ok: false, error: 'message loop guard: too many undelivered messages for this pair' }
+  }
+
   let finalText = text
   let truncated = false
   if (text.length > MAX_TEXT_LEN) {
