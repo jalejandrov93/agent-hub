@@ -8,6 +8,13 @@ and this project adheres to [Semantic Versioning](https://semver.org/).
 
 ### Added
 
+- Workflow judge and revision loop (`src/judge.mjs`): a delegate node can set
+  `maxRevisionAttempts` and the engine turns the verifier verdict into
+  `accepted | needs_revision | rejected | blocked` — `needs_revision`
+  re-dispatches the worker (no backoff, bounded), `blocked` short-circuits on
+  missing upstream evidence, and the verdict is persisted as
+  `artifacts/judge.json` and carried on the node result and `job.finished`/
+  `job.failed`.
 - Workflow verifier (`src/verify.mjs`): a delegate node can declare `verify`
   checks (`argv` commands, `artifact` evidence existence, `forbid` diff scope)
   and the engine records a `{ verified, required, checks }` verdict next to the
