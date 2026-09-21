@@ -132,4 +132,5 @@ Out of scope (explicit follow-ups):
   (4 integration tests). Verified: targeted 37 pass / 0 fail; full `npm test`
   1032 pass / 1 fail (pre-existing `worktree-lease` full-suite flake) /
   8 cancelled (`quota-codexbar`, pre-existing).
-- T3 pending: README + CHANGELOG.
+- 2026-09-20: **T3 done** — README layout + "C3 verifier" section + CHANGELOG.
+  Feature complete; all acceptance criteria met.

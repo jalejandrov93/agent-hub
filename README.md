@@ -32,6 +32,7 @@ src/
   fsutil.mjs           writeJsonAtomic()/updateJsonLocked() (lock + tmp + rename) for state shared by two processes
   jobstore.mjs        runs/<jobId>/{prompt.txt,stdout.log,response.txt,result.json}
   artifacts.mjs       runs/<workflowId>/<stepId>/artifacts/ evidence store + artifact:// refs (C2)
+  verify.mjs          declarative argv/artifact/diff checks -> { verified, checks } (C3)
   process.mjs         spawn argv, SIGTERM->SIGKILL ladder, runCommand()
   jobrunner.mjs        ties process+jobstore+worktree+timeouts+learnings+readguard into startJob/cancelJob
   preflight.mjs        L0-L3 ladder, TTL cache, circuit breaker
@@ -547,6 +548,46 @@ response.
   `jobstore` uses for job ids) and writes atomically. A declared file that is
   missing is recorded, not yet fatal — enforcement belongs to the verifier
   (C3).
+
+### C3 verifier (`src/verify.mjs`)
+
+A node reaching a terminal success only means the CLI finished. A node can
+declare deterministic checks, and the engine records a verdict next to the
+result:
+
+```js
+{
+  id: 'implementation',
+  type: 'delegate',
+  artifacts: ['diff.patch', 'test-report.json'],
+  verify: {
+    required: true,
+    checks: [
+      { name: 'tests', argv: ['npm', 'test'] },
+      { name: 'typecheck', argv: ['npm', 'run', 'typecheck'] },
+      { name: 'evidence', artifact: 'test-report.json' },
+      { name: 'scope', forbid: ['src/generated'] },
+    ],
+  },
+}
+```
+
+- Three check kinds, all deterministic and shell-free: `argv` (run a command,
+  pass on the expected exit code), `artifact` (a C2 evidence file must exist,
+  optionally from another step via `from`) and a diff/`forbid` check (`git diff
+  --name-only` must not touch those path prefixes).
+- The verdict is `{ verified, required, checks, startedAt, finishedAt }`. It is
+  written to `runs/<workflowId>/<stepId>/artifacts/verification.json`, travels
+  on `job.finished`/`job.failed`, and is mirrored best-effort onto the job
+  record's `verified` column.
+- `required: true` makes a failed verdict fatal: the node ends `failed` with
+  `verification failed: <checks>` and the verdict attached, and the retry loop
+  is skipped — a deterministic failure is not a transient one. With the default
+  `required: false` the node still succeeds and the verdict is simply the truth
+  a later judge acts on.
+- C3 produces the verdict; it does not revise. Turning `needs_revision` into a
+  re-dispatch is C4's job. There is no shell string anywhere: checks are argv
+  arrays run through the same `runCommand` the rest of the hub uses.
 
 ### Harness profiles (`src/harness/`)
 
