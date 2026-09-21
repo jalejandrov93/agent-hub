@@ -94,3 +94,55 @@ test('agentsStatusTool with refresh:true does not await the network — quota re
     global.fetch = originalFetch
   }
 })
+
+test('routeTool forwards default requirements, preferences and adaptive when omitted', async () => {
+  const home = tmpHome()
+  const { routeTool } = await fresh(home)
+  let receivedArgs = null
+  const fakeRoute = async (args) => {
+    receivedArgs = args
+    return { primary: null, fallbacks: [], skipped: [], discovery: {}, ranking: [], reason: 'test' }
+  }
+
+  await routeTool({ taskType: 'recon', routeFn: fakeRoute })
+
+  assert.ok(receivedArgs, 'fakeRoute should be called')
+  assert.equal(receivedArgs.taskType, 'recon')
+  assert.equal(receivedArgs.mode, undefined)
+  assert.equal(receivedArgs.includeCatalog, false)
+  assert.deepEqual(receivedArgs.requirements, [])
+  assert.deepEqual(receivedArgs.preferences, {})
+  assert.equal(receivedArgs.adaptive, false)
+})
+
+test('routeTool forwards requirements, preferences and adaptive verbatim to routeFn', async () => {
+  const home = tmpHome()
+  const { routeTool } = await fresh(home)
+  let receivedArgs = null
+  const fakeRoute = async (args) => {
+    receivedArgs = args
+    return { primary: null, fallbacks: [], skipped: [], discovery: {}, ranking: [], reason: 'test' }
+  }
+
+  const requirements = ['write', 'git']
+  const preferences = { quality: 0.8, cost: 0.1, latency: 0.1 }
+  const adaptive = true
+
+  await routeTool({
+    taskType: 'recon',
+    mode: 'write',
+    includeCatalog: true,
+    requirements,
+    preferences,
+    adaptive,
+    routeFn: fakeRoute,
+  })
+
+  assert.ok(receivedArgs, 'fakeRoute should be called')
+  assert.equal(receivedArgs.taskType, 'recon')
+  assert.equal(receivedArgs.mode, 'write')
+  assert.equal(receivedArgs.includeCatalog, true)
+  assert.equal(receivedArgs.requirements, requirements)
+  assert.equal(receivedArgs.preferences, preferences)
+  assert.equal(receivedArgs.adaptive, true)
+})

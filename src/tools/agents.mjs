@@ -1,5 +1,5 @@
 import { agentsStatus as runAgentsStatus } from '../preflight.mjs'
-import { route as routeFn, DELEGATION_MAP, knownTaskTypes } from '../router.mjs'
+import { route as defaultRoute, DELEGATION_MAP, knownTaskTypes } from '../router.mjs'
 import { MODEL_REGISTRY } from '../config.mjs'
 import { readDiscovery } from '../discovery.mjs'
 import { runCommand } from '../process.mjs'
@@ -64,8 +64,17 @@ export async function agentsStatusTool({ refresh = false, cwd = process.cwd(), e
   }))
 }
 
-export async function routeTool({ taskType, mode, includeCatalog = false, env = process.env }) {
-  const result = await routeFn({ taskType, mode, includeCatalog, env })
+export async function routeTool({
+  taskType,
+  mode,
+  includeCatalog = false,
+  requirements = [],
+  preferences = {},
+  adaptive = false,
+  env = process.env,
+  routeFn = defaultRoute,
+} = {}) {
+  const result = await routeFn({ taskType, mode, includeCatalog, requirements, preferences, adaptive, env })
   return result
 }
 
