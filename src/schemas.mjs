@@ -154,6 +154,7 @@ export const JobRecord = z
     waitMode: z.enum(['none', 'attention', 'terminal']).nullable().optional(),
     profile: z.string().nullable().optional(),
     profileStatus: z.string().nullable().optional(),
+    noChanges: z.boolean().optional(),
   })
   .passthrough()
 

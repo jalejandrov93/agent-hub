@@ -837,3 +837,104 @@ test('cancelJob also interrupts the server-side session, not just the local clie
 
   await done
 })
+
+test('a write-mode job whose command changes no file reports noChanges: true and emits job.no_changes', async () => {
+  const home = tmpHome()
+  const { secondary } = makeRepoWithSecondaryWorktree()
+  const { startJob, jobstore, eventlog } = await freshModules(home)
+  const adapters = { fake: fakeAdapter(SUCCESS_SCRIPT) }
+
+  const { job, done } = startJob({
+    agent: 'fake',
+    model: 'x',
+    task: 't',
+    cwd: secondary,
+    mode: 'write',
+    title: 'test write job',
+    taskType: 'mechanical-edit',
+    adapterFor: (a) => adapters[a],
+  })
+  await done
+
+  const result = jobstore.readResult(job.jobId)
+  assert.equal(result.status, 'succeeded')
+  assert.equal(result.noChanges, true)
+
+  const events = eventlog.readTail({ n: 20 }).filter((e) => e.jobId === job.jobId)
+  const noChangesEvent = events.find((e) => e.kind === 'job.no_changes')
+  assert.ok(noChangesEvent, 'a job.no_changes event must exist')
+  assert.equal(noChangesEvent.agent, 'fake')
+  assert.equal(noChangesEvent.model, 'x')
+  assert.equal(noChangesEvent.cwd, secondary)
+  assert.equal(noChangesEvent.title, 'test write job')
+  assert.equal(noChangesEvent.taskType, 'mechanical-edit')
+  assert.equal(noChangesEvent.summary, 'write-mode job finished without modifying any file')
+})
+
+test('a write-mode job that modifies a file has falsy noChanges and no job.no_changes event', async () => {
+  const home = tmpHome()
+  const { secondary } = makeRepoWithSecondaryWorktree()
+  const { startJob, jobstore, eventlog } = await freshModules(home)
+  const script = `require('fs').writeFileSync(${JSON.stringify(path.join(secondary, 'changed.txt'))}, 'y'); console.log(JSON.stringify({status:"SUCCESS",response:"PONG",usage:{total_tokens:5}}))`
+  const adapters = {
+    fake: {
+      id: 'fake',
+      cmd: process.execPath,
+      buildArgv: () => ['-e', script],
+      parseResult: (stdout) => {
+        const json = extractLastJsonLine(stdout)
+        return { ok: true, text: json.response, tokens: json.usage?.total_tokens ?? null, sessionId: null }
+      },
+      classifyError: (stdout, exitInfo = {}) => {
+        if (exitInfo.timedOut) return { kind: 'timeout', message: 'timeout' }
+        const json = extractLastJsonLine(stdout)
+        if (!json) return { kind: 'crash', message: 'no JSON' }
+        if (json.status !== 'SUCCESS') return { kind: 'crash', message: `status=${json.status}` }
+        return null
+      },
+      listModels: () => [],
+    },
+  }
+
+  const { job, done } = startJob({
+    agent: 'fake',
+    model: 'x',
+    task: 't',
+    cwd: secondary,
+    mode: 'write',
+    adapterFor: (a) => adapters[a],
+  })
+  await done
+
+  const result = jobstore.readResult(job.jobId)
+  assert.equal(result.status, 'succeeded')
+  assert.ok(!result.noChanges, 'noChanges must be falsy when files were modified')
+
+  const events = eventlog.readTail({ n: 20 }).filter((e) => e.jobId === job.jobId)
+  assert.ok(!events.some((e) => e.kind === 'job.no_changes'), 'must not emit job.no_changes when files were modified')
+})
+
+test('an existing read-mode job result is unchanged (noChanges is falsy/omitted)', async () => {
+  const home = tmpHome()
+  const { primary } = makeRepoWithSecondaryWorktree()
+  const { startJob, jobstore, eventlog } = await freshModules(home)
+  const adapters = { fake: fakeAdapter(SUCCESS_SCRIPT) }
+
+  const { job, done } = startJob({
+    agent: 'fake',
+    model: 'x',
+    task: 't',
+    cwd: primary,
+    mode: 'read',
+    adapterFor: (a) => adapters[a],
+  })
+  await done
+
+  const result = jobstore.readResult(job.jobId)
+  assert.equal(result.status, 'succeeded')
+  assert.equal(result.noChanges, undefined)
+
+  const events = eventlog.readTail({ n: 20 }).filter((e) => e.jobId === job.jobId)
+  assert.ok(!events.some((e) => e.kind === 'job.no_changes'), 'read-mode job must not emit job.no_changes')
+})
+
