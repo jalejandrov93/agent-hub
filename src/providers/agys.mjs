@@ -1,3 +1,4 @@
+import child_process from 'node:child_process'
 import { runCommand as defaultRunCommand } from '../process.mjs'
 import { normalizeProfile, selectProfile, profileStateFor } from './profiles.mjs'
 
@@ -259,4 +260,117 @@ export async function resolveAgyProfile({
     return { profile: null, status: null }
   }
 }
+
+export const defaultSyncCache = new Map()
+export const SYNC_PROFILE_CACHE_TTL_MS = 60_000
+
+export function resetSyncProfileCache() {
+  defaultSyncCache.clear()
+}
+
+export function resolveAgyProfileSync({
+  env = process.env,
+  execFn,
+  cache = defaultSyncCache,
+  now = Date.now,
+} = {}) {
+  try {
+    const safeEnv = env || {}
+    const explicit = safeEnv.AGENT_HUB_AGYS_PROFILE
+    if (typeof explicit === 'string' && explicit.trim() !== '') {
+      const profile = explicit.trim()
+      return { profile, status: 'selected', profiles: [{ name: profile, status: 'selected' }] }
+    }
+
+    const agysMode = safeEnv.AGENT_HUB_AGYS
+    const isAuto = agysMode === 'auto'
+    const isAgysSet = typeof agysMode === 'string' && agysMode.trim() !== ''
+
+    if (!isAgysSet) {
+      return { profile: null, status: null, profiles: [] }
+    }
+
+    const cacheKey = `agys:${agysMode}`
+    if (cache && typeof cache.get === 'function') {
+      const cached = cache.get(cacheKey)
+      if (cached && typeof cached.expiresAt === 'number' && now() < cached.expiresAt) {
+        return cached.value
+      }
+    }
+
+    const effectiveExecFn = execFn ?? child_process.execFileSync
+    let stdoutList = ''
+    let stdoutQuota = ''
+
+    try {
+      stdoutList = effectiveExecFn('agys', ['list'], {
+        encoding: 'utf8',
+        timeout: 2500,
+        env: safeEnv,
+      })
+      if (typeof stdoutList !== 'string') {
+        stdoutList = stdoutList?.toString?.('utf8') ?? ''
+      }
+    } catch (err) {
+      const isUnavailable = err?.code === 'ENOENT' || err?.code === 127
+      const failureResult = {
+        profile: null,
+        status: isUnavailable ? 'unavailable' : null,
+        profiles: [],
+      }
+      if (cache && typeof cache.set === 'function') {
+        cache.set(cacheKey, { value: failureResult, expiresAt: now() + SYNC_PROFILE_CACHE_TTL_MS })
+      }
+      return failureResult
+    }
+
+    try {
+      stdoutQuota = effectiveExecFn('agys', ['quota', '--json'], {
+        encoding: 'utf8',
+        timeout: 2500,
+        env: safeEnv,
+      })
+      if (typeof stdoutQuota !== 'string') {
+        stdoutQuota = stdoutQuota?.toString?.('utf8') ?? ''
+      }
+    } catch {
+      stdoutQuota = ''
+    }
+
+    const rawProfiles = parseAgysList(stdoutList)
+    const quotaMap = parseAgysQuota(stdoutQuota)
+    const profiles = Array.isArray(rawProfiles) ? rawProfiles : []
+
+    const candidates = profiles.map((p) => {
+      const quotaEntry = quotaMap && typeof quotaMap === 'object' ? quotaMap[p.name] : null
+      const state = p?.state ?? profileStateFor({ profile: p, quotaEntry })
+      return { ...p, state }
+    })
+
+    const annotatedProfiles = candidates.map((c) => ({
+      name: c.name,
+      status: c.state,
+    }))
+
+    let chosen = null
+    if (isAuto) {
+      chosen = selectProfile({ profiles: candidates })
+    }
+
+    const result = {
+      profile: chosen?.name ?? null,
+      status: chosen ? (chosen.active ? 'selected' : 'fallback') : null,
+      profiles: annotatedProfiles,
+    }
+
+    if (cache && typeof cache.set === 'function') {
+      cache.set(cacheKey, { value: result, expiresAt: now() + SYNC_PROFILE_CACHE_TTL_MS })
+    }
+
+    return result
+  } catch {
+    return { profile: null, status: null, profiles: [] }
+  }
+}
+
 

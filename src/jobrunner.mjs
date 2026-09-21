@@ -10,7 +10,7 @@ import { resolveEffectiveTimeoutS as defaultResolveEffectiveTimeoutS } from './t
 import { selectLearnings as defaultSelectLearnings, augmentTask as defaultAugmentTask } from './learnings.mjs'
 import { takeSnapshot as defaultTakeSnapshot, diffSnapshots as defaultDiffSnapshots, formatViolation as defaultFormatViolation } from './readguard.mjs'
 import { startRemoteJob as defaultStartRemoteJob } from './cloud/runner.mjs'
-import { resolveAgyCommand, profileFromEnv } from './providers/agys.mjs'
+import { resolveAgyCommand, profileFromEnv, resolveAgyProfileSync as defaultResolveAgyProfileSync } from './providers/agys.mjs'
 
 // jobId -> { pgid, leaseToken, heartbeatTimer, leaseTtlMs } for jobs still
 // running in THIS process. Used by cancelJob for an immediate kill; the
@@ -101,6 +101,7 @@ export function startJob({
   variant,
   profile = null,
   profileStatus = null,
+  resolveAgyProfileSyncFn = defaultResolveAgyProfileSync,
   sessionId,
   parentJobId,
   resolveEffectiveTimeoutSFn = defaultResolveEffectiveTimeoutS,
@@ -197,11 +198,20 @@ export function startJob({
   })
   const effectiveVariant = resolveVariant(agent, model, variant)
   // agy may run through agys (multi-account profiles). Resolution is env-based
-  // and SYNCHRONOUS on purpose: startJob is synchronous and delegate()/dispatch()
-  // read `.job` immediately. The async quota-based 'auto' selection belongs to an
-  // async caller (dispatch) and is not resolved here.
-  const effectiveProfile = adapter.cmd === 'agy' ? (profile ?? profileFromEnv(env).profile) : null
-  const effectiveProfileStatus = effectiveProfile ? (profileStatus ?? 'selected') : null
+  // and SYNCHRONOUS: startJob is synchronous and delegate()/dispatch()
+  // read `.job` immediately.
+  let effectiveProfile = null
+  let effectiveProfileStatus = null
+  if (adapter.cmd === 'agy') {
+    if (profile) {
+      effectiveProfile = profile
+      effectiveProfileStatus = profileStatus ?? 'selected'
+    } else {
+      const resolved = resolveAgyProfileSyncFn({ env })
+      effectiveProfile = resolved?.profile ?? null
+      effectiveProfileStatus = effectiveProfile ? (resolved?.status ?? 'selected') : null
+    }
+  }
   const job = createJob({
     agent,
     model,

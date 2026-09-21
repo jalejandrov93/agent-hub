@@ -18,6 +18,8 @@ import {
   runAgyWithProfile,
   resolveAgyCommand,
   resolveAgyProfile,
+  resolveAgyProfileSync,
+  resetSyncProfileCache,
 } from '../src/providers/agys.mjs'
 
 const FIXTURE_AGYS_LIST = `Active Profiles:
@@ -581,3 +583,92 @@ test('profileFromEnv resolves only the explicit env profile, synchronously', asy
   assert.deepEqual(mod.profileFromEnv({ AGENT_HUB_AGYS: 'auto' }), { profile: null, status: null })
   assert.deepEqual(mod.profileFromEnv(null), { profile: null, status: null })
 })
+
+test('resolveAgyProfileSync resolves explicit AGENT_HUB_AGYS_PROFILE without calling execFn', () => {
+  let execCalled = false
+  const execFn = () => {
+    execCalled = true
+    return ''
+  }
+  const res = resolveAgyProfileSync({
+    env: { AGENT_HUB_AGYS_PROFILE: 'custom-prof' },
+    execFn,
+  })
+  assert.equal(execCalled, false)
+  assert.equal(res.profile, 'custom-prof')
+  assert.equal(res.status, 'selected')
+})
+
+test('resolveAgyProfileSync in auto mode runs agys list and quota via execFn and picks with selectProfile', () => {
+  const calls = []
+  const execFn = (cmd, args) => {
+    calls.push({ cmd, args })
+    if (args[0] === 'list') return FIXTURE_AGYS_LIST
+    if (args[0] === 'quota') return JSON.stringify(FIXTURE_AGYS_QUOTA)
+    return ''
+  }
+  resetSyncProfileCache()
+  const res = resolveAgyProfileSync({
+    env: { AGENT_HUB_AGYS: 'auto' },
+    execFn,
+  })
+  assert.equal(res.profile, 'work')
+  assert.equal(res.status, 'selected')
+  assert.ok(Array.isArray(res.profiles))
+  assert.equal(res.profiles.length, 3)
+  assert.equal(res.profiles[0].name, 'work')
+  assert.equal(res.profiles[0].status, 'selected')
+  assert.equal(res.profiles[1].name, 'personal')
+  assert.equal(res.profiles[1].status, 'exhausted')
+  assert.equal(calls.length, 2)
+  assert.equal(calls[0].cmd, 'agys')
+  assert.deepEqual(calls[0].args, ['list'])
+  assert.equal(calls[1].cmd, 'agys')
+  assert.deepEqual(calls[1].args, ['quota', '--json'])
+})
+
+test('resolveAgyProfileSync handles execFn errors gracefully (unavailable on ENOENT, null on generic error)', () => {
+  resetSyncProfileCache()
+  const enoentErr = new Error('not found')
+  enoentErr.code = 'ENOENT'
+  const unavailRes = resolveAgyProfileSync({
+    env: { AGENT_HUB_AGYS: 'auto' },
+    execFn: () => {
+      throw enoentErr
+    },
+  })
+  assert.deepEqual(unavailRes, { profile: null, status: 'unavailable', profiles: [] })
+
+  resetSyncProfileCache()
+  const genericErr = new Error('generic failure')
+  const genericRes = resolveAgyProfileSync({
+    env: { AGENT_HUB_AGYS: 'auto' },
+    execFn: () => {
+      throw genericErr
+    },
+  })
+  assert.deepEqual(genericRes, { profile: null, status: null, profiles: [] })
+})
+
+test('resolveAgyProfileSync memoizes results so a counting execFn is called at most once within TTL', () => {
+  resetSyncProfileCache()
+  let callCount = 0
+  const execFn = (cmd, args) => {
+    callCount++
+    if (args[0] === 'list') return FIXTURE_AGYS_LIST
+    if (args[0] === 'quota') return JSON.stringify(FIXTURE_AGYS_QUOTA)
+    return ''
+  }
+  const env = { AGENT_HUB_AGYS: 'auto' }
+  const res1 = resolveAgyProfileSync({ env, execFn })
+  const res2 = resolveAgyProfileSync({ env, execFn })
+  assert.deepEqual(res1, res2)
+  assert.equal(callCount, 2) // 1 for list, 1 for quota
+
+  // Calling resetSyncProfileCache forces a re-execution
+  resetSyncProfileCache()
+  const res3 = resolveAgyProfileSync({ env, execFn })
+  assert.deepEqual(res3, res1)
+  assert.equal(callCount, 4) // 2 more calls
+})
+
