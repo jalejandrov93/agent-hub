@@ -1,0 +1,147 @@
+# Routing
+
+## Preflight ladder
+
+Every agent+model pair is checked through an ordered ladder before a job is
+routed to it. Each rung short-circuits on failure, and results are cached
+for `PREFLIGHT_TTL_MS` (15 minutes):
+
+| Level | Check | When it runs |
+|---|---|---|
+| L0 | `--version` succeeds | `agents_status`, `route`, startup discovery |
+| L1 | The requested model appears in the CLI's own model catalog | `agents_status`, `route`, startup discovery |
+| L2 | Quota signal + circuit-breaker state | `agents_status`, `route` |
+| L3 | A real `PONG` prompt round-trip | Only on an explicit dashboard "Ping" action — never at startup, never in bulk |
+
+## Startup discovery
+
+`scheduleStartupDiscovery()` runs in the background via `setImmediate` right
+after the MCP process starts, so it never delays the stdio handshake with
+Claude Code. It runs L0 + L1 only (never L3) for every CLI referenced in the
+delegation map, prunes preflight-cache rows for agent:model pairs no longer
+reachable from the map, and writes the merged result to `discovery.json`
+(`{ [agent]: {agent, cmd, binPath, version, models, checkedAt, error,
+note?} }`). It is TTL-gated the same 15 minutes as the preflight cache, and
+can be disabled entirely with `AGENT_HUB_DISABLE_STARTUP_DISCOVERY=1`.
+
+State writes (preflight cache, discovery, overrides) use atomic tmp+rename
+writes because the MCP process and the dashboard process both write the same
+files. The model list is fetched once per agent, not once per agent+model
+pair; the three agents are probed in parallel, but pairs within one agent
+are probed serially to avoid more than one live CLI process per agent at a
+time.
+
+## Delegation map
+
+`route({taskType})` looks up an ordered candidate chain in
+`DELEGATION_MAP` (`src/router.mjs`) and returns the first candidate that
+passes availability filtering, plus the rest as fallbacks:
+
+| Task type | Primary | Fallbacks | Why |
+|---|---|---|---|
+| `recon` | agy gemini-3.8-flash-low | opencode muse-spark-1.3 → claude haiku | proven context compression, cheap refreshable quota |
+| `call-chain-trace` | agy gemini-3.8-flash-high | opencode nemotron-3-ultra → claude sonnet | needs multi-hop reasoning, 1M ctx |
+| `research` | opencode muse-spark-1.3 | opencode mimo-v2.5 → agy gemini-3.8-flash-medium | zero cost, 1M ctx |
+| `triage` | opencode muse-spark-1.3 | copilot auto → codex default | lowest latency |
+| `second-opinion` | agy gemini-3.1-pro-high | copilot auto | different model lineage than Claude Code |
+| `adversarial-review` | agy claude-sonnet-4-6 (parallel with copilot auto) | agy claude-opus-4-6-thinking | dual blind review off the Claude Code quota |
+| `github-context` | copilot auto | — | built-in GitHub MCP; cheap models keep premium quota |
+| `mechanical-edit` | opencode deepseek-v4-flash (write) | copilot auto (write) → codex default (write) | cheap write-capable; single writer |
+| `implementation-with-repo-rules` | claude sonnet | — | only Claude Code loads CLAUDE.md + skills + hooks |
+| `architecture` | claude opus | agy claude-opus-4-6-thinking | highest reasoning |
+| `structured-mechanical` | claude haiku | — | cheapest Claude tier |
+
+Codex is only ever a last fallback, for small bounded tasks: its plan quota is
+limited, and every call carries a baseline of about 17,000 input tokens (its own
+system prompt), even for a one-word reply. Batch questions into one task. Model
+`default` means the CLI's own default model, so no model name is guessed.
+
+A `{agent: 'claude', model: 'haiku'|'sonnet'|'opus'}` candidate is a Claude
+Code subagent tier, run by the caller through its own Agent tool — it is
+never CLI-preflighted or breaker-checked. A candidate is filtered out of the
+chain (and reported in the result's `skipped` list, with a reason) when it
+is manually held, its CLI was not found on `PATH`, its cached preflight is
+`unavailable`, or its circuit breaker is open. `route()` is advisory: it
+never blocks the caller from delegating to a skipped pair directly.
+
+## Quota state before delegating
+
+agent-hub can show how much of each agent's usage limit is left before you
+delegate, read from a local [CodexBar](https://github.com/steipete/CodexBar)
+server (`codexbar serve`, default `http://127.0.0.1:8787`, override with
+`AGENT_HUB_CODEXBAR_URL`). It appears as a `quota` field on `agents_status`
+rows and on `route()`'s primary and fallbacks, in the `agents_quota` tool, at
+`GET /api/quota`, and in the dashboard's Agents view.
+
+**It never decides anything.** Quota data does not choose, skip, reorder or
+block an agent, and `route()` returns the same chain with or without it — a test
+pins that. An exhausted agent stays in its place; the point is that you see it
+before a job fails, and decide.
+
+Each pair maps to the CodexBar windows that actually limit it. agy splits by
+model family: `gemini-*` models read the Gemini windows, while `claude-*` and
+`gpt-*` models read the shared Claude/GPT windows, which are exhausted
+independently. copilot and codex read their own provider, `opencode-go/*`
+models read OpenCode Go, and the free opencode models and `deepseek/*` are not
+metered by CodexBar. A window CodexBar reports with `usageKnown: false` is shown
+as unknown, never as 0%. Readings are cached for five minutes, requested one
+provider at a time (`/usage?provider=all` probes about 69 providers and is
+slow), and a missing CodexBar never blocks or slows a delegation.
+
+## Adaptive routing
+
+`route()` used to order a task's chain only by availability and an accepted
+proposal. It can now rank candidates by measured quality, latency and cost, and
+filter them by required capabilities — while staying explainable:
+
+```js
+const r = await route({
+  taskType: 'recon',
+  requirements: ['sessionResume'],          // hard capability filter
+  preferences: { quality: 0.6, cost: 0.2, latency: 0.2 },
+  adaptive: true,                            // reorder primary/fallbacks
+})
+// r.ranking: [{ agent, model, score, reasons: [{dimension, raw, weight, ...}] }]
+```
+
+- `src/capabilities.mjs` derives capabilities from signals that already exist:
+  `sessionResume` from each adapter's resume argv (`agy --conversation`,
+  `opencode -s`, `codex exec resume`; copilot has none), `github` where the CLI
+  has built-in GitHub access or works through PRs, `largeContext` from
+  `MODEL_REGISTRY` strengths (`1M ctx`). `web` is a reserved key, false
+  everywhere today.
+- Scoring is a weighted sum over quality (`qualityScore`, else `verifiedRate`,
+  else `successRate`), latency (`p95Ms`) and cost (`costUsdAvg`), normalized
+  within the eligible set. A dimension with no data is dropped and its weight
+  redistributed — an unmeasured pair is **not** ranked as bad.
+- `adaptive: false` (default) keeps today's order and still returns `ranking`
+  for transparency. Persistent chain changes remain a human-accepted proposal;
+  a candidate missing a required capability appears in `skipped` with
+  `missing_capabilities:<keys>`.
+- With no metrics at all, every score is 0 and the order is the static chain —
+  routing degrades to today's behaviour, never to a wrong pick.
+
+## Routing proposals
+
+`refreshProposals()` compares a task type's current primary CLI candidate
+against the other CLI candidates in its chain. It proposes promoting the
+candidate with the strictly better 95% Wilson score lower bound — its lower
+bound beats the primary's upper bound — once both have at least 10 samples.
+New proposals stay `pending`: nothing changes until a human accepts one at
+`#/approvals?tab=proposals`. Accepting one supersedes any other accepted
+proposal for the same task type, and a stored proposal whose chain no longer
+matches the delegation map (its chain hash changed) is marked `superseded`.
+After a rejection, no new proposal for that task type for 7 days. `route()`
+applies an accepted proposal to the chain and returns it as `appliedProposal`.
+
+## Learnings
+
+`learning_propose` records a short gotcha about an agent, model or task type as
+`pending`; a human approves or rejects it in the dashboard. Approved learnings
+that match a job are prepended, most specific first, to the prompt of a
+**root** turn only — at most 3, each up to 300 characters — as a
+`<hub-learnings>` advisory block; a reply turn continues a conversation that
+already has it. Text is sanitized on write and again on every read (control
+characters, backticks and `<hub-learnings>` tags stripped, whitespace
+collapsed) before it can reach another model's prompt.
+
