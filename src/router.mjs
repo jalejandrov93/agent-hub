@@ -4,6 +4,8 @@ import { readOverrides, overrideKey } from './overrides.mjs'
 import { acceptedOrderFor } from './proposals.mjs'
 import { fetchUsage } from './quota/codexbar.mjs'
 import { quotaFor, getProvider } from './quota/mapping.mjs'
+import { computeMetrics } from './metrics.mjs'
+import { rankCandidates, metricKey } from './routing/score.mjs'
 
 /**
  * The delegation map from the plan, expressed as ordered candidate chains.
@@ -166,11 +168,29 @@ function discoveryForChain(chain, env, includeCatalog) {
 }
 
 /**
- * route({taskType}) -> {primary, fallbacks, reason}. Filters out candidates
- * whose cached preflight is 'unavailable' or whose circuit breaker is open,
- * then returns the first survivor as primary and the rest as fallbacks.
+ * Metrics rows for routing. `computeFn` is injectable so tests can supply
+ * fixtures without touching the filesystem (see _computeMetrics in route()).
  */
-export async function route({ taskType, mode, includeCatalog = false, env = process.env }) {
+function readMetricsRows(env, computeFn) {
+  return (computeFn ?? computeMetrics)({ env })?.rows ?? []
+}
+
+/**
+ * route({taskType}) -> {primary, fallbacks, reason, ranking, ...}. Filters out
+ * candidates whose cached preflight is 'unavailable' or whose circuit breaker
+ * is open, filters by required capabilities, scores survivors by preferences,
+ * and optionally reorders primary/fallbacks when adaptive is true.
+ */
+export async function route({
+  taskType,
+  mode,
+  includeCatalog = false,
+  requirements = [],
+  preferences = {},
+  adaptive = false,
+  env = process.env,
+  _computeMetrics = computeMetrics,
+}) {
   const entry = DELEGATION_MAP[taskType]
   if (!entry) {
     throw new Error(`unknown task type: "${taskType}". Known types: ${Object.keys(DELEGATION_MAP).join(', ')}`)
@@ -185,12 +205,57 @@ export async function route({ taskType, mode, includeCatalog = false, env = proc
   const skipped = evaluated.filter((e) => !e.usable).map((e) => ({ agent: e.candidate.agent, model: e.candidate.model, reason: e.reason }))
   const discovery = discoveryForChain(chain, env, includeCatalog)
 
-  if (survivors.length === 0) {
-    const detail = skipped.map((s) => `${s.agent}:${s.model} (${s.reason})`).join(', ')
-    return { primary: null, fallbacks: [], skipped, discovery, reason: `every candidate for "${taskType}" is unavailable: ${detail} (${entry.why})`, appliedProposal }
+  const rows = readMetricsRows(env, _computeMetrics)
+  const metricsLookup = {}
+  for (const row of rows) {
+    const key = metricKey(row.agent, row.model)
+    if (!metricsLookup[key]) {
+      metricsLookup[key] = row
+    } else if (row.taskType === taskType && metricsLookup[key].taskType !== taskType) {
+      metricsLookup[key] = row
+    }
   }
 
-  const [primary, ...fallbacks] = survivors
+  const survivorsToRank = survivors.map((c) => (c.mode ? c : { ...c, mode: mode ?? 'read' }))
+  const { ranking, excluded } = rankCandidates({
+    candidates: survivorsToRank,
+    metrics: metricsLookup,
+    preferences,
+    requirements,
+  })
+
+  const excludedKeys = new Set(excluded.map((e) => `${e.agent}:${e.model}`))
+  const eligibleSurvivors = survivors.filter((c) => !excludedKeys.has(`${c.agent}:${c.model}`))
+  for (const item of excluded) {
+    skipped.push({
+      agent: item.agent,
+      model: item.model,
+      reason: 'missing_capabilities:' + item.missing.join(','),
+    })
+  }
+
+  if (eligibleSurvivors.length === 0) {
+    const detail = skipped.map((s) => `${s.agent}:${s.model} (${s.reason})`).join(', ')
+    return {
+      primary: null,
+      fallbacks: [],
+      skipped,
+      discovery,
+      ranking: [],
+      reason: `every candidate for "${taskType}" is unavailable: ${detail} (${entry.why})`,
+      appliedProposal,
+    }
+  }
+
+  let candidates
+  if (adaptive) {
+    const survivorMap = new Map(eligibleSurvivors.map((c) => [`${c.agent}:${c.model}`, c]))
+    candidates = ranking.map((r) => survivorMap.get(`${r.agent}:${r.model}`))
+  } else {
+    candidates = eligibleSurvivors
+  }
+
+  const [primary, ...fallbacks] = candidates
 
   const providers = new Set()
   const toAnnotate = [primary, ...fallbacks]
@@ -221,6 +286,7 @@ export async function route({ taskType, mode, includeCatalog = false, env = proc
     fallbacks: fallbacks.map(annotate),
     skipped,
     discovery,
+    ranking,
     reason: entry.why,
     appliedProposal,
   }
