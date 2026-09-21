@@ -95,8 +95,9 @@ test('non-agy candidate (e.g. opencode) -> resolveProfileFn is NEVER called and 
   }
 })
 
-test('default resolveProfileFn (do not inject it) with env without agys vars -> captured profile/profileStatus are null', async () => {
+test('default resolveProfileFn with env AGENT_HUB_AGYS=off -> captured profile/profileStatus are null', async () => {
   const { env, cleanup } = makeTempHome()
+  env.AGENT_HUB_AGYS = 'off'
   try {
     let capturedArgs = null
     const mockStartJob = async (args) => {

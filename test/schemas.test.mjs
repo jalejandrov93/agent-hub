@@ -3,6 +3,7 @@ import assert from 'node:assert/strict'
 import fs from 'node:fs'
 import path from 'node:path'
 import { fileURLToPath } from 'node:url'
+import os from 'node:os'
 import {
   TASK_TYPES,
   EVENT_KINDS,
@@ -27,7 +28,7 @@ import {
   JulesAccountsResponse,
 } from '../src/schemas.mjs'
 import { DELEGATION_MAP } from '../src/router.mjs'
-import { VALID_KINDS } from '../src/eventlog.mjs'
+import { VALID_KINDS, appendEvent } from '../src/eventlog.mjs'
 import { LEARNING_TEXT_MAX as CONFIG_LEARNING_TEXT_MAX } from '../src/config.mjs'
 
 const FIXTURES = path.join(path.dirname(fileURLToPath(import.meta.url)), 'fixtures', 'v2')
@@ -41,6 +42,28 @@ test('EVENT_KINDS matches the event log kinds, including proposal and learning k
   assert.deepEqual([...EVENT_KINDS].sort(), [...VALID_KINDS].sort())
   for (const kind of ['proposal.created', 'proposal.decided', 'learning.proposed', 'learning.decided']) {
     assert.ok(EVENT_KINDS.includes(kind), kind)
+  }
+})
+
+test('harness.wake and workflow.completed are declared in EVENT_KINDS and VALID_KINDS, and appendEvent accepts them without warning', () => {
+  assert.ok(EVENT_KINDS.includes('harness.wake'), 'EVENT_KINDS includes harness.wake')
+  assert.ok(EVENT_KINDS.includes('workflow.completed'), 'EVENT_KINDS includes workflow.completed')
+  assert.ok(VALID_KINDS.has('harness.wake'), 'VALID_KINDS has harness.wake')
+  assert.ok(VALID_KINDS.has('workflow.completed'), 'VALID_KINDS has workflow.completed')
+
+  const warnings = []
+  const origWarn = console.warn
+  console.warn = (...args) => warnings.push(args)
+  try {
+    const home = fs.mkdtempSync(path.join(os.tmpdir(), 'agent-hub-events-test-'))
+    const appendedWake = appendEvent({ kind: 'harness.wake' }, { env: { AGENT_HUB_HOME: home } })
+    const appendedWorkflow = appendEvent({ kind: 'workflow.completed' }, { env: { AGENT_HUB_HOME: home } })
+    assert.equal(appendedWake.kind, 'harness.wake')
+    assert.equal(appendedWorkflow.kind, 'workflow.completed')
+    assert.equal(warnings.length, 0)
+    fs.rmSync(home, { recursive: true, force: true })
+  } finally {
+    console.warn = origWarn
   }
 })
 

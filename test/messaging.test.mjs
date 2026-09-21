@@ -21,6 +21,52 @@ beforeEach(() => {
   resetDbInstances()
 })
 
+test('an inbox call without rootExecutionId fails', async () => {
+  const home = tmpHome()
+  const env = { AGENT_HUB_HOME: home }
+
+  const resMissing = await agentInboxTool({ to: 'codex', env })
+  assert.deepEqual(resMissing, { ok: false, error: 'rootExecutionId is required' })
+
+  const resNull = await agentInboxTool({ to: 'codex', rootExecutionId: null, env })
+  assert.deepEqual(resNull, { ok: false, error: 'rootExecutionId is required' })
+
+  const resEmpty = await agentInboxTool({ to: 'codex', rootExecutionId: '', env })
+  assert.deepEqual(resEmpty, { ok: false, error: 'rootExecutionId is required' })
+
+  const resWhitespace = await agentInboxTool({ to: 'codex', rootExecutionId: '   ', env })
+  assert.deepEqual(resWhitespace, { ok: false, error: 'rootExecutionId is required' })
+})
+
+test('explicit cross-root isolation: a message in root A is invisible to an inbox query in root B', async () => {
+  const home = tmpHome()
+  const env = { AGENT_HUB_HOME: home }
+
+  await agentSendMessageTool({
+    to: 'same-recipient',
+    text: 'message in root A',
+    rootExecutionId: 'root-alpha',
+    env,
+  })
+
+  const inboxB = await agentInboxTool({
+    to: 'same-recipient',
+    rootExecutionId: 'root-beta',
+    env,
+  })
+  assert.equal(inboxB.ok, true)
+  assert.deepEqual(inboxB.messages, [])
+
+  const inboxA = await agentInboxTool({
+    to: 'same-recipient',
+    rootExecutionId: 'root-alpha',
+    env,
+  })
+  assert.equal(inboxA.ok, true)
+  assert.equal(inboxA.messages.length, 1)
+  assert.equal(inboxA.messages[0].text, 'message in root A')
+})
+
 test('send -> inbox round-trip', async () => {
   const home = tmpHome()
   const env = { AGENT_HUB_HOME: home }

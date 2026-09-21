@@ -519,6 +519,13 @@ async function executeNode({
             timeoutS = timeoutS || 30
             const attemptDeadline = Date.now() + timeoutS * 1000
 
+            let parentExecutionId = null
+            const firstDepId = Array.isArray(node.dependsOn) && node.dependsOn.length > 0 ? node.dependsOn[0] : null
+            if (firstDepId) {
+              const depResult = nodeStates.get(firstDepId)?.result
+              parentExecutionId = depResult?.job?.jobId ?? depResult?.jobId ?? null
+            }
+
             const dispatchPromise = Promise.resolve().then(() =>
               dispatchFn({
                 task: finalTask,
@@ -533,6 +540,8 @@ async function executeNode({
                 attempt,
                 timeoutS,
                 env,
+                rootExecutionId: workflow.id,
+                parentExecutionId,
               })
             )
             const timeoutPromise = new Promise((_, reject) => {
@@ -627,6 +636,8 @@ async function executeNode({
                 maxRevisionAttempts: childMaxRevisionAttempts,
                 allowRevision: false,
                 execute: async (dispatchedTask) => {
+                  // Fanout child: parentExecutionId is null because the fanout node
+                  // itself produces no job (has no jobId).
                   const childRes = await dispatchFn({
                     task: dispatchedTask,
                     taskType: node.taskType,
@@ -639,6 +650,8 @@ async function executeNode({
                     step_id: childStepId,
                     attempt: 1,
                     env,
+                    rootExecutionId: workflow.id,
+                    parentExecutionId: null,
                   })
 
                   const childHandle = unwrapHandle(childRes) ?? pendingJobHandle(childRes)

@@ -41,6 +41,8 @@ export const EVENT_KINDS = [
   'proposal.decided',
   'learning.proposed',
   'learning.decided',
+  'harness.wake',
+  'workflow.completed',
 ]
 
 export const LEARNING_TEXT_MAX = 300
