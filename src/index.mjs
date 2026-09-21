@@ -390,9 +390,12 @@ export function buildServer() {
   register(
     'delegate',
     {
-      title: 'Delegate a task to an agent CLI',
+      title: 'Delegate a task to an agent CLI (raw escape hatch)',
       description:
-        'Start a job on agy/opencode/copilot/codex. Returns {jobId, status:"queued"} immediately and never waits; ' +
+        'RAW ESCAPE HATCH: runs exactly the agent and model you name, with no routing, no policy recovery, no circuit ' +
+        'breakers, no dispatch-key idempotency and no execution lineage. Most callers want dispatch(), which adds all of ' +
+        'those around the same task. Use delegate() only when you must pin one exact pair and handle failures yourself. ' +
+        'Returns {jobId, status:"queued"} immediately and never waits; ' +
         'poll with job_wait or job_status, read with job_result. Write mode requires cwd to be a secondary ' +
         '`git worktree add` checkout. Codex (model "default") has a limited plan quota and is only a LAST fallback, never a primary.',
       inputSchema: {
