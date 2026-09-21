@@ -13,6 +13,7 @@ import { adapterFor as defaultAdapterFor } from './adapters/index.mjs'
 import { cancelJob as defaultCancelJob } from './jobrunner.mjs'
 import { resolveHarness, normalizeWaitMode } from './harness/registry.mjs'
 import { resolveAgyProfile } from './providers/agys.mjs'
+import { getDb, reserveDispatchKey, releaseDispatchReservation } from './storage/index.mjs'
 
 
 /** Terminal job statuses: only these count as a real terminal outcome. */
@@ -119,6 +120,14 @@ export async function waitExecution(handleOrJobId, { timeoutS = 60, pollInterval
 
 /** Default window for deduplicating recent dispatches: 10 minutes */
 export const DISPATCH_WINDOW_MS = 10 * 60 * 1000
+
+/** How long a loser waits for the reservation holder's job to appear (ms) */
+export const DISPATCH_RESERVATION_WAIT_MS = 2000
+
+/** Poll interval while waiting for the holder's job (ms) */
+const DISPATCH_RESERVATION_POLL_MS = 25
+
+const sleep = (ms) => new Promise((resolve) => setTimeout(resolve, ms))
 
 /** In-flight map to deduplicate concurrent dispatches in this process */
 const inFlightDispatches = new Map()
@@ -309,6 +318,25 @@ export function findRecentJobByDispatchKey({
   }
 
   return null
+}
+
+/**
+ * Bounded wait for the job a reservation holder recorded as its executionId.
+ *
+ * The holder creates the job a few milliseconds after reserving, so a short
+ * poll is enough. A holder that died in that gap resolves to null and its key is
+ * reclaimed by the caller, which keeps a crashed dispatch from blocking the key
+ * for the whole dedup window.
+ */
+async function waitForJobByExecutionId({ executionId, env, listJobsFn, waitMs, pollMs, nowFn }) {
+  if (!executionId) return null
+  const deadline = nowFn() + waitMs
+  for (;;) {
+    const found = listJobsFn(env).find((j) => (j.executionId ?? j.execution_id) === executionId)
+    if (found) return found
+    if (nowFn() >= deadline) return null
+    await sleep(pollMs)
+  }
 }
 
 async function isCandidateUsable(candidate, { cwd, env, runPreflightFn, circuitBreakerOpenFn }) {
@@ -514,10 +542,56 @@ export async function dispatch({
 
   let reservationToken = null
   let reservationAdopted = false
+  // Store-backed idempotency (see step 0 inside the try). Declared here so the
+  // finally below can release the key when this dispatch never produced a job.
+  let dispatchReservationOwned = false
+  let jobProduced = false
 
   try {
     const execId = `exec_${crypto.randomBytes(6).toString('hex')}`
     const rootExecId = rootExecutionId ?? execId
+
+    // 0. Store-backed idempotency gate.
+    //    Steps 1 and 2 above deduplicate within ONE process and only once a job
+    //    exists, so two schedulers (or a restart) scanning at the same instant
+    //    both miss and both create a job. The reservation is taken first and is
+    //    the only gate that survives across processes: the winner records its
+    //    executionId, which is what a loser needs to find the job to share.
+    const storeCtx = getDb(env)
+    const reservation = reserveDispatchKey(storeCtx, { dispatchKey: key, jobId: execId })
+    dispatchReservationOwned = reservation.reserved
+    if (!reservation.reserved) {
+      const holderAgeMs = nowFn() - (Date.parse(reservation.existingCreatedAt ?? '') || 0)
+      const holderInWindow = holderAgeMs >= 0 && holderAgeMs < DISPATCH_WINDOW_MS
+      const sharedJob = holderInWindow
+        ? await waitForJobByExecutionId({
+            executionId: reservation.existingJobId,
+            env,
+            listJobsFn,
+            waitMs: DISPATCH_RESERVATION_WAIT_MS,
+            pollMs: DISPATCH_RESERVATION_POLL_MS,
+            nowFn,
+          })
+        : null
+      if (sharedJob && sharedJob.status !== 'failed' && sharedJob.status !== 'canceled') {
+        jobProduced = true
+        recentDispatches.set(key, { job: sharedJob, timestamp: nowFn() })
+        return withHandle(
+          {
+            job: sharedJob,
+            dispatchKey: key,
+            executionId: sharedJob.executionId ?? sharedJob.execution_id ?? null,
+            candidate: { agent: sharedJob.agent, model: sharedJob.model, mode: sharedJob.mode },
+          },
+          sharedJob
+        )
+      }
+      // The holder died between reserving and creating its job, its job failed,
+      // or the reservation outlived the dedup window: take the key over so this
+      // dispatch can proceed instead of sharing a corpse.
+      releaseDispatchReservation(storeCtx, key)
+      dispatchReservationOwned = reserveDispatchKey(storeCtx, { dispatchKey: key, jobId: execId }).reserved
+    }
 
     // 3. Candidate discovery & TOCTOU revalidation
     let primaryCandidate = null
@@ -600,6 +674,7 @@ export async function dispatch({
         const jobSessId = matched.job.remote?.sessionId ?? matched.job.sessionId
         if (jobSessId) matchedSessionId = jobSessId
         if (matched.job.status !== 'failed' && matched.job.status !== 'canceled') {
+          jobProduced = true
           recentDispatches.set(key, { job: matched.job, timestamp: nowFn() })
           return withHandle({
             job: matched.job,
@@ -627,6 +702,7 @@ export async function dispatch({
           harness: harnessProfile.id,
           waitMode: effectiveWaitMode,
         })
+        jobProduced = true
         recentDispatches.set(key, { job: adoptedJob, timestamp: nowFn() })
         return withHandle({
           job: adoptedJob,
@@ -791,6 +867,7 @@ export async function dispatch({
     const finalJob = execResult?.job ?? execResult
     const finalCandidate = execResult?.candidate ?? primaryCandidate
 
+    jobProduced = true
     recentDispatches.set(key, { job: finalJob, timestamp: nowFn() })
 
     const finalSessionId =
@@ -806,6 +883,13 @@ export async function dispatch({
     if (reservationToken && !reservationAdopted) {
       try {
         releaseWriteLockFn({ cwd, token: reservationToken, env })
+      } catch {}
+    }
+    // A dispatch that never produced a job must not keep its key: otherwise the
+    // failed attempt would block every retry for the whole dedup window.
+    if (dispatchReservationOwned && !jobProduced) {
+      try {
+        releaseDispatchReservation(getDb(env), key)
       } catch {}
     }
     inFlightDispatches.delete(key)
