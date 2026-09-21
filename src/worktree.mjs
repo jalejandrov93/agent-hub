@@ -394,6 +394,11 @@ export function releaseWriteLock({ cwd, token, jobId, env = process.env }) {
 }
 
 export function isWorktreeClean(cwd, { exec = execFileSync } = {}) {
+  // Fail closed: exec with cwd undefined inherits process.cwd(), which would
+  // silently report the cleanliness of whatever repo the hub runs from.
+  if (typeof cwd !== 'string' || cwd.length === 0) {
+    return { clean: false, reason: 'missing-cwd' }
+  }
   try {
     const output = exec('git', ['status', '--porcelain=v1'], { cwd, encoding: 'utf8' })
     const lines = output.split('\n').filter((line) => line.trim().length > 0)

@@ -10,7 +10,7 @@ target state for later slices); file:line refs ground what already exists.
   (local poll budget). They never share a timer.
 - Effective timeout: explicit wins (`src/timeouts.mjs` `resolveEffectiveTimeoutS`); else
   `clamp(adaptive_p95 * multiplier, min=static_default, max=capS)` where
-  adaptive only ever RAISES the static default (`src/timeouts.mjs` adaptive logic,
+  adaptive only ever RAISES the static default (`src/timeouts.mjs` `resolveEffectiveTimeoutS` adaptive branch,
   `src/config.mjs`; defaults `src/config.mjs`).
 - Local kill = `timeoutS + KILL_GRACE_S` (`src/jobrunner.mjs` `KILL_GRACE_S` usage,
   `src/config.mjs`); grace lets agy exit with partial output first.
@@ -28,14 +28,14 @@ target state for later slices); file:line refs ground what already exists.
 - **LOCAL CANCEL WINS.** `cancelJob` marks `canceled` BEFORE killing, so the
   racy `finishJob` no-ops and never resurrects the job (`src/jobrunner.mjs` `cancelJob` and `finishJob`); `updateResult` merges but never flips
   `canceled` -> terminal-other (`src/jobstore.mjs` `updateResult`). Local kill is
-  SIGTERM->SIGKILL over the whole process group (`src/process.mjs` `SIGTERM` ladder).
+  SIGINT->SIGTERM->SIGKILL over the whole process group (`src/process.mjs` `killProcessGroup`).
   Final state is `canceled`, no retry.
 - **REMOTE NO-GUARANTEE.** No `sessions/{id}:cancel` exists upstream; cancel
   marks the LOCAL record `canceled` and stops polling — the remote session
-  MAY keep running (`src/cloud/poller.mjs` cancel check, `src/index.mjs` cancel documentation).
+  MAY keep running (`src/cloud/poller.mjs` `pollUntilTerminal`, `src/index.mjs` `job_cancel`).
   `remote.sessionId/sessionUrl` MUST be preserved on the record for later
   `jules_check` reconciliation. Poller checks `canceled` before the clock so
-  a canceled job never spends quota (`src/cloud/poller.mjs` quota protection).
+  a canceled job never spends quota (`src/cloud/poller.mjs` `pollUntilTerminal` cancel-before-clock).
 
 ## 3. Retry / resume / fallback / escalation
 
@@ -43,7 +43,7 @@ target state for later slices); file:line refs ground what already exists.
   dispatch; each dimension is independent and bounded.
 - `retry`: same agent+model, fresh attempt id, per-attempt backoff (§1).
   Never retries `canceled`, `worktree_denied`, `read_mode_violation`, `auth`.
-- `resume`: same `sessionId` (local CLI conversation, `src/jobrunner.mjs:233`)
+- `resume`: same `sessionId` (local CLI conversation, `src/jobrunner.mjs` `startJob` `adapterArgs`)
   or same `remote.sessionId` (Jules `job_reply`); resumes do NOT consume a
   retry attempt.
 - `fallback`: router `primary + fallbacks[]` chain (`src/router.mjs` `primary + fallbacks`);
@@ -68,14 +68,14 @@ target state for later slices); file:line refs ground what already exists.
   a match re-adopts instead of creating. Startup re-adopts `running` remote
   jobs with keys and skips unkeyed ones without failing them
   (`src/cloud/runner.mjs` reconciliation); local orphans reconcile by pid, remotes
-  are never judged by pid (`src/jobstore.mjs` orphan check).
+  are never judged by pid (`src/jobstore.mjs` `reconcileOrphans`).
 
 ## 5. Read purity / write ownership
 
 - Read purity: snapshot AFTER gate+lock, diff at terminal transition; a
   modifying `read` job fails as `read_mode_violation` (output kept for
   inspection), non-git cwd = `unverifiable`, never a violation
-  (`src/jobrunner.mjs` snapshot diff,
+  (`src/jobrunner.mjs` `takeSnapshotFn` / `diffSnapshotsFn`,
   `src/readguard.mjs` `takeSnapshot`). `.env` / `JULES_API_KEY` never reach child
   CLIs (`src/sandbox.mjs` env filtering).
 - Write ownership: `mode:write` requires secondary `git worktree add`

@@ -26,6 +26,7 @@
  *   running -> canceled
  *   running -> waiting   (remote/local execution waits for interaction)
  *   waiting -> running   (interaction received, resume without re-dispatch)
+ *   waiting -> ready     (the wait expired with attempts left: re-queue to retry)
  *   waiting -> failed    (wait aborted or wait outcome failed)
  *   waiting -> canceled  (wait aborted by user)
  */
@@ -72,6 +73,9 @@ export const VALID_NODE_TRANSITIONS = Object.freeze({
   ]),
   [NODE_STATUS.WAITING]: Object.freeze([
     NODE_STATUS.RUNNING,
+    // A wait that ends without a result (local deadline expired) re-queues the
+    // node for another attempt; without this edge every retry throws.
+    NODE_STATUS.READY,
     NODE_STATUS.FAILED,
     NODE_STATUS.CANCELED,
   ]),
