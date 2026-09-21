@@ -1296,9 +1296,9 @@ export function markAgentMessageAck(ctx, id, at) {
  * the JSON fallback so it is identical without better-sqlite3.
  *
  * Known gap: there is no deleteLeaseByCwd helper. The leases table is keyed by
- * (job_id, owner) and has no cwd column; the worktree cwd only exists as the
- * lock file path. A cwd-keyed delete would need a schema change, so it is
- * intentionally not invented here.
+ * job_id alone (owner is a plain column, not part of the key) and has no cwd
+ * column; the worktree cwd only exists as the lock file path. A cwd-keyed
+ * delete would need a schema change, so it is intentionally not invented here.
  */
 export function reserveDispatchKey(ctx, options = {}) {
   if (!ctx) return { reserved: false, existingJobId: null, existingCreatedAt: null }
