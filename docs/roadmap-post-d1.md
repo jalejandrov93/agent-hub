@@ -1,665 +1,615 @@
 # Agent-Hub — Post-D1 Master Roadmap
 
-Status: active. Basis: `dev` at `8b2ca1c` (C2, C3, C4, dashboard fix merged)
-plus the D1 branch (`feat/d1-intelligence`, PR #15) and the in-progress D2
-routing branch (`feat/d2-adaptive-routing`).
-
-This document is written to be executed phase by phase in isolated worktrees,
-one work unit per commit, by independent agents. It is not a wish list.
-
-Conventions used below:
-
-- `DONE` / `PARTIAL` / `FOUNDATION_ONLY` / `MISSING` / `TECHNICAL_DEBT` are the
-  audit labels.
-- `[verified]` = confirmed by reading the code in this session.
-- `[lead]` = reported by a mapping agent with a file:line, not yet personally
-  confirmed. Treat as evidence to check before relying on it.
-- Phase names keep the plan's post-D1 numbering. Where an earlier roadmap used a
-  different number, the phase says so explicitly.
+Revision 2 — adjusted per reviewer feedback (see §0). Audit basis: `dev` at
+`8b2ca1c` plus D1 (PR #15) and the D2 routing branch (PR #17).
 
 ---
 
-## 1. Real state after D1
+## 0. What changed vs v1 (reviewer adjustments)
 
-### 1.1 Control plane
-
-| Feature | Status | Evidence | Note |
-|---|---|---|---|
-| A0 execution contract | `PARTIAL` | `docs/execution-contract.md` | Normative and largely implemented; doc drift below. |
-| A1 `dispatch()` | `DONE` | `src/dispatch.mjs` | Decide+execute, policy, idempotency key, remote reconciliation. |
-| A1 `delegate()` bypass | `TECHNICAL_DEBT` | `src/tools/jobs.mjs:38` `[lead]` | `delegateTool` is reported to call `startJob` directly, skipping breakers/idempotency. Verify before acting. |
-| A2 error taxonomy | `DONE` | `src/policy/taxonomy.mjs` | 7 classes. |
-| A3 policy registry | `DONE` | `src/policy/registry.mjs`, `executor.mjs` | retry/resume/fallback/escalation. |
-| A4 circuit breakers | `DONE` | `src/breakers.mjs` | Per class, immediate trip for billing/auth. |
-| A5 sandbox profiles | `PARTIAL` | `src/sandbox.mjs` `[verified]` | `isolated === isolated-home`; redacted secrets become the literal `'***'` instead of being unset `[verified]`. |
-| A6 worktree leases | `PARTIAL` | `src/worktree.mjs` | POSIX lock files are authoritative; the SQLite `leases` mirror is write-only `[lead]`. |
-| C0-real SQLite | `FOUNDATION_ONLY` | `src/storage/sqlite.mjs`, `src/jobstore.mjs` | Tables exist and are written, but `runs/` is still the read source of truth; `getJob`/`getLease` exported and unused `[lead]`. |
-| C0.5 event watcher | `PARTIAL` | `src/notify/*` | console/file/webhook work; `workflow.completed`, `subagent.start/stop` have no emitters `[verified for workflow.completed]`. |
-
-### 1.2 Jules
-
-All `DONE` per the audit, with two caveats:
-
-- Account failover happens only on HTTP 429; a 401/403 aborts instead of trying
-  the next configured key (`src/cloud/runner.mjs` `[lead]`).
-- There is no fallback from a remote (Jules) job to a local CLI when remote
-  quota is exhausted `[lead]`.
-
-### 1.3 Workflow engine, harness, evidence
-
-| Feature | Status | Evidence | Note |
-|---|---|---|---|
-| C1 DAG engine | `DONE` | `src/workflow/engine.mjs` | Waves, cycles, SQLite persistence, resume, leases. |
-| C1.1 hardening | `DONE` | `src/workflow/dsl.mjs`, `execution.mjs` | Safe DSL, handles, CAS claims. |
-| C1.2 supervisor link | `PARTIAL` | `src/workflow/resume.mjs` | Works for Jules waiting nodes; CLI harnesses are mapping-only. |
-| C2 artifacts | `PARTIAL` | `src/artifacts.mjs` `[verified]` | Path-safe store, `artifact://` refs, manifests, bounded inlining — on **delegate nodes only**. |
-| C3 verifier | `PARTIAL` | `src/verify.mjs` `[verified]` | argv/artifact/diff checks on delegate nodes only. |
-| C4 judge / revision | `PARTIAL` | `src/judge.mjs` `[verified]` | Verdicts + bounded revision loop, but the re-dispatch sends the **original prompt with no failing-check feedback** `[verified]`, and it is delegate-only. |
-| D1 intelligence | `DONE` | `src/metrics.mjs` `[verified]` | cost, verified, quality, revisions, retries. |
-| Harness profiles | `DONE` | `src/harness/*` | `generic | claude-code | opencode`, `waitMode`. All `supportsWake: false`. |
-| Node handoff / context | `MISSING` | `src/workflow/engine.mjs` `[verified]` | No structured summary/findings/decisions between nodes; only artifact string interpolation. |
-| Role abstraction | `MISSING` | `src/workflow/schema.mjs` `[verified]` | No role concept. |
-| `onSuccess`/`onFailure` | `MISSING (accepted, unread)` | `src/workflow/schema.mjs` `[verified]` | Schema fields the engine never consumes. |
-| fanout child evidence | `MISSING` | `src/workflow/engine.mjs` `[verified]` | fanout children run raw `dispatch` with no artifacts/verify/judge. |
-| `workflow.completed` event | `MISSING` | `src/notify/adapters.mjs:18` + engine `[verified]` | Documented as routable; the engine never emits it. |
-
-### 1.4 Routing, profiles, tests
-
-| Feature | Status | Evidence | Note |
-|---|---|---|---|
-| `DELEGATION_MAP` + `route()` | `DONE` | `src/router.mjs` | Availability/breaker/hold filtered; first survivor is primary. |
-| Wilson reorder proposals | `DONE` | `src/proposals.mjs` | Human-gated; success-rate only. |
-| Capabilities | `DONE (branch)` | `src/capabilities.mjs` (D2) | Added on the routing branch, not yet merged. |
-| Adaptive scoring | `DONE (branch)` | `src/routing/score.mjs` (D2) | Pure, explainable; `route()` wiring is the open work unit. |
-| Provider profiles | `FOUNDATION_ONLY` | `src/accounts.mjs` | Multi-account exists **for Jules only**; CLI providers rely on ambient host auth. |
-| Test suite | `DONE` | `package.json` | ~1071 node tests + 161 dashboard tests. |
-| Chaos / eval harness | `MISSING` | — | No fault injection, no benchmark corpus, no LLM-output eval. |
-| CI / issue & release automation | `MISSING` | — | No `.github/` at all. |
-| Readguard coverage | `PARTIAL` | `src/readguard.mjs` | `--ignored=no`: gitignored files (`.env`) are invisible; non-git cwd is `unverifiable`. |
+1. **Execution order now follows the reviewer's ranking**, not v1's. D2
+   (Provider Profiles) is sequenced **before** D3 (Adaptive Routing) because D3
+   wants to score `quota/profile` and profiles are not modelled for CLIs yet.
+   E1 moves late, after E2, because the Lifecycle Bridge consumes the
+   notification/event layer.
+2. **New micro-phase C0.1 — SQLite Authority Cleanup**, so the declared
+   invariant ("SQLite is coordination state; filesystem is content") stops being
+   ambiguous. Does not block C2b; makes the path explicit.
+3. **C2b handoff becomes a config, not a boolean**: `handoff: { required, schema }`
+   (plus the `handoff: true` shorthand). Roles may **require** a schema, so the
+   contract can be enforced per role.
+4. **C2b batch schedule corrected**: v1 listed C2b.1→C2b.4 inside one parallel
+   batch, which is wrong. Now split into batches (see §7).
+5. **D2 gains explicit profile provenance**: the adapter distinguishes
+   `profile selected | fallback | exhausted | unavailable` and **persists it on
+   the ExecutionHandle**, so D1 can measure quality/cost/latency **per profile**,
+   not just per provider. This is now an acceptance criterion, not a note.
+6. **C4b feedback policy frozen literally**: a bounded
+   `<agent-hub-revision>` block carrying the previous verdict, capped at
+   **max 3 findings × 300 chars** (same shape as learnings).
+7. **A core principle is elevated to the top of the document**:
+   *execution success ≠ task success ≠ verified success*.
 
 ---
 
-## 2. Technical debt (ranked)
+## 1. Core principles (elevated)
 
-1. **`quality_score` is dead.** The column and `JobRecord` field exist but no code
-   writes them; D1 computes `qualityScore` in metrics instead. Decide: either
-   delete the field or make the judge write a per-job score. `[verified]`
-2. **Delegate bypasses the control plane.** If `delegateTool` really calls
-   `startJob` directly, then breakers/idempotency/policy do not apply to the
-   most-used entry point. `[lead — verify first]`
-3. **SQLite is a mirror, not the authority.** `runs/` JSON is the read path, so
-   two processes can still disagree for a window, and the DAG/analytics queries
-   SQLite could answer cheaply are done by scanning directories. `[lead on getJob/getLease]`
-4. **Sandbox redaction is cosmetic.** Redacted env vars are set to `'***'` rather
-   than removed; a CLI that parses the value learns a placeholder, not that the
-   secret is absent. `[verified]`
-5. **Silent lease mirror.** SQLite lease writes are best-effort `catch {}`; the
-   mirror can drift from the authoritative lock file with no signal. `[lead]`
-6. **C4 revise without feedback.** The revision re-dispatch repeats the same
-   prompt, so a deterministic verification failure will usually repeat. `[verified]`
-7. **Events declared but never emitted.** `workflow.completed`,
-   `subagent.start/stop` (the hook path exists; the watcher routing for
-   `workflow.completed` does not). `[verified]`
-8. **Doc drift.** `docs/execution-contract.md` still claims SQLite is not a
-   runtime dependency / is a parallel layer; README's metrics paragraph predates
-   D1. `[verified]`
-9. **Known flaky/inert tests.** `test/worktree-lease.test.mjs` flakes under full
-   suite; `test/quota-codexbar.test.mjs` cancels 8. `[verified]`
-10. **No CI.** Every merge relies on a local run. `[verified]`
+These are the line between "CLI wrapper" and "agent execution platform".
+Everything below must preserve them.
+
+1. **Execution success ≠ task success ≠ verified success.** Job status,
+   `verification`, and `judge` are three different claims. Never collapse them.
+2. **SQLite is coordination state; the filesystem is content.** Artifacts and
+   large logs live on disk; rows, lineage and policy live in SQLite. (C0.1 makes
+   this true rather than aspirational.)
+3. **Human approval gates persistent change.** Runtime adaptation (routing,
+   revision) is per-call; changing the base chain/profiles stays a proposal a
+   human accepts.
+4. **Reuse, never re-implement.** No second workflow engine, artifact store,
+   verifier, judge, policy system, or ledger.
+
+---
+
+## 2. Real state after D1 (unchanged from v1, condensed)
+
+| Area | Status | Note |
+|---|---|---|
+| A0–A4 (contract, dispatch, taxonomy, policy, breakers) | `DONE`/`PARTIAL` | `delegate` may bypass `dispatch` `[lead]`. |
+| A5 sandbox | `PARTIAL` | `isolated === isolated-home`; secrets set to `'***'` instead of unset `[verified]`. |
+| A6 leases / C0-real | `PARTIAL` / `FOUNDATION_ONLY` | POSIX lock authoritative; SQLite a mirror; `runs/` is the read path `[lead]`. |
+| C0.5 events | `PARTIAL` | `workflow.completed`, `subagent.*` have no emitters `[verified]`. |
+| Jules | `DONE` | Failover only on 429 `[lead]`. |
+| C1/C1.1 | `DONE` | — |
+| C1.2 supervisor link | `PARTIAL` | Jules only; CLI harnesses mapping-only. |
+| C2 artifacts | `PARTIAL` | Delegate nodes only. |
+| C3 verifier | `PARTIAL` | Delegate nodes only. |
+| C4 judge | `PARTIAL` | Delegate only; **no failing-check feedback on revise** `[verified]`. |
+| D1 metrics | `DONE` | cost/verified/quality/revisions. |
+| D2 routing | `DONE (branch)` | PR #17; capabilities + explainable ranking. |
+| Harness profiles | `DONE` | `supportsWake:false` everywhere. |
+| Handoff / roles | `MISSING` | No structured context between nodes. |
+| Tests / CI / chaos | `PARTIAL` / `MISSING` / `MISSING` | No CI, no chaos, no eval. |
 
 ---
 
 ## 3. Target architecture
 
 ```
-                       MCP tools / dashboard
-                                |
-             +------------------+------------------+
-             |                                     |
-        route()/dispatch()                    workflow engine
-             |                                     |
-   requirements -> capabilities ->          nodes: delegate | fanout | fanin | notify
-   quality/latency/cost -> ranking               |
-   policy -> provider profile                    +--> Context & Handoff (new)
-             |                                    +--> Artifacts (C2, done)
-   ProviderProfileManager (new)                  +--> Verifier (C3, done)
-     |        |        |        |                 +--> Judge/revision (C4, done)
-   agy      opencode  copilot  jules             +--> Execution graph (F2, new)
-     |                                             |
-   AgysAdapter -> agys -> agy                  Journal/notes in SQLite
-                                                  |
-                                      Eval/Chaos harness (G)
-                                                  |
-                                       Hermes nested orchestrator (I)
+                    MCP tools / dashboard
+                             |
+          +------------------+------------------+
+          |                                     |
+    route()/dispatch()                    workflow engine
+          |                                     |
+ requirements -> capabilities ->         nodes: delegate|fanout|fanin|notify
+ quality/latency/cost -> ranking              |
+ policy -> provider profile                   +--> Context & Handoff (C2b)
+          |                                    +--> Artifacts (C2 done)
+ ProviderProfileManager (D2)                   +--> Verifier (C3/C3b)
+   |      |       |      |                     +--> Judge/revision (C4/C4b)
+  agy  opencode copilot jules                  +--> Execution graph (F2)
+   |                                             |
+ AgysAdapter -> agys -> agy                 SQLite: coordination + lineage
+                                                 |
+                                     Eval/Chaos harness (G)
+                                                 |
+                                     Hermes nested orchestrator (I)
+
+ SQLite = coordination/lineage/lifecycle ; filesystem = content/artifacts
 ```
-
-Two invariants to preserve:
-
-- **SQLite is coordination state; the filesystem is content.** Artifacts and big
-  logs stay on disk; row metadata, lineage and policy live in SQLite.
-- **Execution success != task success != verified success.** The three are
-  already distinct in code (job status, `verification`, `judge`); do not collapse
-  them.
 
 ---
 
-## 4. Phases
+## 4. Execution order (authoritative)
 
-### C2b — Context & Handoffs (completes C2)
+```
+1  C2b  Context & Handoffs
+2  E2   Notifications / Event Delivery        (fully parallel)
+3  C3b  Verifier completion
+4  C4b  Judge feedback loop
+5  D2   Provider Profiles / Identity
+6  D3   Adaptive Routing
+7  F2   Parent/Child Execution Graph
+8  H    Security Hardening
+9  F1   Planner / Decomposer
+10 G    Evaluation / Chaos / Reliability
+11 E1   Harness Lifecycle Bridge
+12 I    Hermes Nested Orchestration
+```
+
+Rationale for the reviewers' order: C3b/C4b are the natural consumers of C2b's
+handoffs; D3 must follow D2 (it scores profiles); F2 is cheap and pays off for
+debugging before the riskier phases; H's small wins land before the planner's
+larger surface; E1 lands after E2 because the bridge is a notification consumer.
+
+---
+
+## 5. C0.1 — SQLite Authority Cleanup (new micro-phase)
+
+### Objective
+Make "SQLite is coordination state; filesystem is content" true, without a
+big-bang migration.
+
+### Why now
+C2b adds SQLite tables and F2 reads lineage from SQLite; leaving `runs/` as the
+read authority means two sources of truth during exactly the phase that needs
+one.
+
+### Current state
+Jobs are dual-written (`createJob`/`updateResult` mirror into SQLite), but
+`readResult`/`listJobs` scan `runs/` `[lead]`; `getJob`/`getLease` are exported
+and unused `[lead]`.
+
+### Architecture
+```
+write: JSON + SQLite (unchanged, already dual)
+read (new): SQLite authoritative for coordination rows
+             filesystem authoritative for content (response.txt, artifacts)
+phase: flip behind a flag → dual-read compare (JSON vs SQLite) → cut over
+```
+
+### Tasks
+- C0.1.1 `readResultFromDb(jobId)` + comparison harness.
+- C0.1.2 Dual-read shadow mode: serve the JSON result, log divergences.
+- C0.1.3 Cut `listJobs`/`readResult` over behind `AGENT_HUB_STORE=sqlite`.
+- C0.1.4 Leave `result.json` as an artifact (still written, no longer the index).
+- C0.1.5 Fix the `docs/execution-contract.md` claims in the same PR.
+
+### Dependencies
+C0-real. Parallel to C2b; does not block it.
+
+### Acceptance criteria
+- Shadow mode reports zero divergence on the existing suite.
+- Cutting over changes no test observable except the intended ones.
+
+### Tests
+Divergence harness; migration test with two processes.
+
+### Risks
+A stale SQLite row serving old content → verify write ordering, keep JSON as a
+fallback read when the DB is unavailable.
+
+### Not in scope
+Removing the JSON files. They become artifacts, not the index.
+
+---
+
+## 6. Phases
+
+### C2b — Context & Handoffs
 
 #### Objective
-Give every node a structured, validated handoff for the next node, persisted in
-SQLite and referenced from artifacts, so a workflow stops being a chain of
-isolated prompts.
+Every node produces a **validated** structured handoff for the next node,
+persisted in SQLite and referenced from artifacts.
 
 #### Why now
-C2's artifacts exist but carry **content only**; the shipped example
-(`examples/software-pipeline.mjs`, research → implementation → review) passes
-none of research's conclusions to implementation. Without a handoff, F1 (planner)
-and I (Hermes) would both reinvent one.
+The system runs nodes but does not transmit understanding: `research → artifact →
+implementation` exists, `research → findings → implementation` does not. The
+shipped example forwards none of research's conclusions.
 
 #### Current state
-`src/artifacts.mjs` (`artifact://` refs, manifests) + `src/workflow/engine.mjs`
-(delegate nodes). No `summary/findings/decisions/constraints/changedFiles/
-openQuestions`. No roles.
+`src/artifacts.mjs` + engine; no `summary/findings/decisions/constraints/
+changedFiles/openQuestions`. No roles.
 
 #### Architecture
-Filesystem holds artifact bodies; SQLite holds an indexed handoff record.
-
 ```
-workflow_nodes(result) ──▶ handoff { summary, findings[], decisions[],
-                                     constraints[], changedFiles[],
-                                     openQuestions[], artifacts[] }
-                                      │
-                       SQLite: task_handoffs(workflow_id, step_id, ...)
-                       filesystem: runs/<wf>/<step>/artifacts/handoff.json
+node result ──▶ handoff { summary, findings[], decisions[], constraints[],
+                          changedFiles[], openQuestions[], artifacts[] }
+                        │
+          SQLite task_handoffs(workflow_id, step_id, ...) + task_context
+          filesystem runs/<wf>/<step>/artifacts/handoff.json
 ```
-
-The node result gains `handoff`; the resolver can read `steps.<id>.handoff.*` in
-the existing safe DSL.
+Node config (reviewer adjustment):
+```js
+handoff: true                                  // shorthand: not required, default shape
+handoff: { required: true, schema: 'ResearchHandoff' }
+handoff: { required: false }
+```
+A role may force a contract: `role: SECURITY_REVIEWER` +
+`handoff: { required: true, schema: 'SecurityReviewHandoff' }`.
 
 #### Files/modules expected to change
-- new `src/handoff.mjs` (schema + validate + normalize)
-- new `src/context.mjs` (SQLite-backed task context: notes/decisions/findings)
-- `src/storage/sqlite.mjs` (+ `task_handoffs`, `task_context` tables)
-- `src/workflow/schema.mjs` (node `role`, `handoff` expectations)
-- `src/workflow/engine.mjs` (produce/store handoff on node completion; surface it)
-- `src/workflow/resolver.mjs` (expose `handoff` in the condition scope)
-- docs
+new `src/handoff.mjs`, new `src/context.mjs`, `src/storage/sqlite.mjs`,
+`src/workflow/schema.mjs`, `src/workflow/engine.mjs`, `src/workflow/resolver.mjs`,
+docs.
 
 #### Tasks
-- C2b.1 Define `HandoffSchema` (zod) and `validateHandoff`; unknown keys are an
-  error, empty arrays are valid. Pure module + tests.
-- C2b.2 Persist handoffs: SQLite table + `writeHandoff`/`readHandoff`, dual-write
-  the JSON sibling under the node artifacts dir.
-- C2b.3 Engine: after a delegate node succeeds, persist `handoff` if the node
-  declared `handoff: true`; attach it to the node result and the `job.finished`
-  event.
-- C2b.4 Feed the upstream handoff into a downstream node's task (a bounded,
-  templated block) without reading the whole response.
-- C2b.5 Roles: `ROLES` registry (TRACE_ANALYST, SECURITY_REVIEWER, ARCHITECT,
-  IMPLEMENTER, TEST_ANALYST, ADVERSARIAL_REVIEWER) mapping role → required
-  capabilities (reuse D2 `capabilities`) + expected handoff shape + acceptance
-  hints. Roles are **validation contracts, not mega-prompts**.
+- C2b.1 `HandoffSchema` (zod) + `validateHandoff` + a small named-schema registry
+  (`ResearchHandoff`, `SecurityReviewHandoff`, `ImplementationHandoff`, …).
+  Pure module + tests. **This defines the contract; everything else depends on it.**
+- C2b.2 Persist handoffs: SQLite `task_handoffs` + `task_context`; JSON sibling
+  under the node artifacts dir.
+- C2b.3 Engine: honor `handoff: true | { required, schema }`; persist on
+  completion; `required: true` + invalid/missing handoff **fails the node**.
+- C2b.4 Inject the upstream handoff into a downstream node's task, bounded and
+  templated; expose `steps.<id>.handoff.*` in the safe DSL.
+- C2b.5 Roles registry (`TRACE_ANALYST`, `SECURITY_REVIEWER`, `ARCHITECT`,
+  `IMPLEMENTER`, `TEST_ANALYST`, `ADVERSARIAL_REVIEWER`) → required capabilities
+  (reuse D2 `capabilities`) + required handoff schema + acceptance hints.
+  Roles are **contracts, not mega-prompts**. Starts once C2b.1's contract exists
+  (it depends on the contract more than on the engine).
 
 #### Dependencies
-C2 (done), C4 (done), D2 capabilities (for roles).
+C2, C4, D2 capabilities (C2b.5).
 
 #### Acceptance criteria
-- A node declaring `handoff: true` produces a validated handoff; an invalid one
-  fails the node with a clear error, not a silent default.
-- A downstream node receives the upstream handoff summary/findings in its task.
+- `handoff: { required: true, schema: X }` with an invalid handoff fails the
+  node, not silently defaults.
+- `handoff: { required: false }` records whatever is present.
+- A downstream node's dispatched task contains the upstream summary/findings.
 - `steps.<id>.handoff` is usable in a `condition`.
-- Resuming a workflow restores handoffs from SQLite.
+- Resume restores handoffs from SQLite.
 
 #### Tests
-Unit (schema, persistence, resolver scope) + integration (two-node workflow where
-the second node's dispatched task contains the first's findings) + resume test.
+Schema/registry unit tests; persistence; two-node integration (second task
+contains the first's findings); required-schema failure; resume.
 
 #### Risks
-Handoffs can grow unbounded → cap size and truncate with a marker (same pattern
-as `resolveArtifactRefs`). Role sprawl → keep the registry small and data-only.
+Handoff growth → cap and truncate with a marker. Role sprawl → keep the registry
+small and data-only.
 
 #### Not in scope
-Model-based handoff summarization. Semantic (LLM) acceptance criteria.
+Model-based summarization. LLM-based acceptance criteria.
+
+---
+
+### E2 — Notifications / Event Delivery (parallel)
+
+#### Objective
+Policy-driven delivery from the watcher, which stays a **separate process**.
+
+#### Why now
+`workflow.completed` is routed but never emitted `[verified]`; `subagent.*` has
+no producer. This is a concrete bug plus a missing policy layer.
+
+#### Current state
+`src/notify/watch.mjs` + `adapters.mjs` (console/file/webhook) + dashboard SSE.
+
+#### Architecture
+`event → policy (kind × severity × channel) → adapters (dashboard | webhook |
+desktop | slack/discord | lifecycle bridge)`; watcher never becomes an in-process
+daemon.
+
+#### Tasks
+- E2.1 Emit `workflow.completed` from the engine (workflowId, status, counts).
+- E2.2 Emit or delete `subagent.start/stop`.
+- E2.3 `src/notify/policy.mjs` (kind → channels, severity, dedup window).
+- E2.4 Desktop + Slack/Discord adapters behind the never-throw contract.
+- E2.5 Policy surfaced in dashboard config.
+
+#### Dependencies
+None. Parallel from day one.
+
+#### Acceptance criteria
+- One workflow completion → exactly one `workflow.completed` + one configured
+  notification. A failing adapter never kills the watcher.
+
+#### Tests
+Emission tests; policy unit tests; adapter tests with a fake fetch.
+
+#### Risks
+Notification fatigue → dedup window and per-kind defaults.
+
+#### Not in scope
+Daemonizing the watcher.
 
 ---
 
 ### C3b — Verifier completion
 
 #### Objective
-Extend verification to every execution shape and to structured output.
+Verification for every execution shape and for structured output.
 
 #### Why now
-The verifier is delegate-only; a fanout of 8 children is currently unverified,
-and a node can declare a handoff (C2b) that nobody validates against a schema.
+The verifier is delegate-only; a fanout of 8 is unverified; a declared handoff
+schema is not validated against the produced handoff.
 
 #### Current state
-`src/verify.mjs`: argv / artifact / diff, delegate nodes only.
-
-#### Architecture
-Keep the check kinds; add a `schema` check kind and run the verifier from the
-fanout child path too.
-
-#### Files/modules expected to change
-`src/verify.mjs`, `src/workflow/engine.mjs` (fanout), `src/workflow/schema.mjs`.
+`src/verify.mjs`: argv/artifact/diff, delegate nodes only.
 
 #### Tasks
-- C3b.1 `schema` check: validate a declared artifact (or the handoff) against a
-  named zod schema from a small registry; report failing paths.
-- C3b.2 Run artifacts/verify/judge for fanout children (per-child step id, same
-  code path as a delegate node).
-- C3b.3 Per-node check sets already exist; add `requiredChecks` semantics so a
-  node can demand at least one check ran.
+- C3b.1 `schema` check kind: validate a declared artifact or the handoff against
+  a named schema from C2b's registry; report failing JSON paths.
+- C3b.2 Run artifacts/verify/judge on the fanout child path (per-child step id).
+- C3b.3 `requiredChecks` semantics (a node can demand at least one check ran).
 
 #### Dependencies
-C2b (handoff schema), C3.
+C2b (handoff schema registry), C3.
 
 #### Acceptance criteria
 - A fanout child with `verify` produces `verification.json` and a judge verdict.
-- A handoff failing its schema makes the node fail with the failing JSON paths.
+- A handoff failing its schema fails the node with the failing paths.
 
 #### Tests
-Fanout-with-verify integration; schema-check unit tests (valid/invalid/missing).
+Fanout-with-verify integration; schema-check unit tests.
 
 #### Risks
-Duplicated code between fanout and delegate → extract the "execute + evidence +
-verify + judge" core into one helper instead of copy-paste.
+Copy-paste between fanout and delegate → extract one
+"execute + evidence + verify + judge" core.
 
 #### Not in scope
-Agent-judged acceptance criteria (that is C4b/I).
+Agent-judged acceptance criteria (C4b/I).
 
 ---
 
 ### C4b — Judge feedback loop completion
 
 #### Objective
-Make a revision actually informative and wire the reserved hooks.
+Make a revision informative and wire the reserved hooks.
 
 #### Why now
-A deterministic verifier failure currently re-dispatches the identical prompt,
-so revision mostly wastes a run. `[verified]`
+A deterministic failure re-dispatches the identical prompt `[verified]`.
 
-#### Current state
-`src/judge.mjs` + engine revision loop; `onSuccess`/`onFailure` accepted by the
-schema and never read.
-
-#### Architecture
-The revision re-dispatch prepends a bounded `<hub-revision>` block built from the
-previous verdict (failed check names, reasons, and the truncated check output
-already captured by C3).
-
-#### Files/modules expected to change
-`src/judge.mjs` (or a small `revisionPrompt` helper), `src/workflow/engine.mjs`.
+#### Architecture (policy frozen per reviewer)
+```
+previous verdict ──▶ buildRevisionFeedback ──▶ <agent-hub-revision> block
+                                                prepended to the re-dispatch task
+```
+```
+<agent-hub-revision>
+Failed checks:
+- tests/auth.test.ts
+- response schema
+Findings:
+- expected 401, received 500
+Do not change unrelated files.
+</agent-hub-revision>
+```
+Hard cap: **max 3 findings × 300 chars** (same shape as learnings).
 
 #### Tasks
-- C4b.1 `buildRevisionFeedback(verdict)` → bounded markdown block.
-- C4b.2 Inject it into the task on a `needs_revision` re-dispatch only.
-- C4b.3 Consume `onSuccess`/`onFailure` as declarative directives (`skip`,
-  `fail`, `continue`) or remove them from the schema — do not leave them dead.
+- C4b.1 `buildRevisionFeedback(verdict)` → bounded block (max 3 × 300).
+- C4b.2 Inject on `needs_revision` re-dispatch only.
+- C4b.3 Consume `onSuccess`/`onFailure` as declarative directives (`skip|fail|
+  continue`) or remove them from the schema.
 
 #### Dependencies
-C3, C4, C2b (handoff).
+C3, C4, C2b.
 
 #### Acceptance criteria
-- A revision dispatch's task contains the failing check names from the previous
-  verdict.
-- A node with `onFailure: 'skip'` behaves accordingly, or the field is gone.
+- The revision task contains the previous failing check names, bounded.
+- `onFailure: 'skip'` behaves accordingly, or the field is gone.
 
 #### Tests
-Integration: fail → revise → the second dispatch task contains the verdict text.
+Integration: fail → revise → second task contains the verdict text and respects
+the cap.
 
 #### Risks
-Prompt bloat → hard cap like learnings (3 items, 300 chars each).
+Prompt bloat → the cap is a test, not a comment.
 
 #### Not in scope
 Unbounded self-correction.
 
 ---
 
-### D2 — Provider Profiles & Identity
-
-> The post-D1 plan's D2. Not to be confused with the routing phase, which was
-> the earlier roadmap's D2 and is tracked here as **D3**.
+### D2 — Provider Profiles / Identity
 
 #### Objective
-A provider/profile abstraction so agent-hub knows *which identity* is being
-used, its priority, quota, availability and fallback eligibility — without
-storing OAuth/keyring internals it does not own.
+Know *which identity* runs, with priority/quota/availability/fallback
+eligibility, without owning secrets agent-hub does not already own.
 
 #### Why now
-Jules already has multi-account; CLI providers have none. `agy` quota is the
-scarcest resource in practice and `agys` already manages its profiles. Routing
-(D3) and fallback both need to know "which account".
+`agy` quota is the scarcest resource in practice and `agys` already manages its
+profiles. Routing (D3) and fallback both need "which account".
 
 #### Current state
-`src/accounts.mjs` + `src/cloud/selectAccount.mjs` implement this for Jules only.
-`agy`/`opencode`/`copilot`/`codex` use ambient host auth. No `agys` reference in
-`src/` `[verified]`.
+Multi-account for Jules only; CLI providers use ambient host auth; no `agys`
+reference in `src/` `[verified]`.
 
 #### Architecture
-Do not reimplement `agys`. Wrap it.
-
 ```
-agent-hub ──▶ ProviderProfileManager ──▶ AgysAdapter ──▶ agys ──▶ agy
-                     │                                        (profile N)
-                     ├── jules:  existing accounts.mjs
-                     ├── opencode/codex/copilot: profile metadata only
-                     └── exposes { provider, profile, priority, quota,
-                                   availability, fallbackEligibility }
+agent-hub ─▶ ProviderProfileManager ─▶ AgysAdapter ─▶ agys ─▶ agy
+                   │
+                   ├── jules: existing accounts.mjs
+                   ├── opencode/codex/copilot: metadata + host-env selector only
+                   └── exposes { provider, profile, priority, quota,
+                                 availability, fallbackEligibility }
 ```
 
-Agent-hub stores **metadata and eligibility**, never provider secrets for CLIs
-it does not already own.
+**Profile provenance (new, explicit requirement):** the adapter distinguishes
+`profile selected | fallback | exhausted | unavailable` and **persists it on the
+ExecutionHandle** (and thus the job record), so D1 can measure quality/cost/
+latency per profile.
 
-#### Files/modules expected to change
-new `src/providers/profiles.mjs`, new `src/providers/agys.mjs`,
-`src/router.mjs` (consume profile availability), `src/preflight.mjs`,
-`dashboard` (profiles view).
+Fallback policy reuses A3, never a fork:
+- `quota`, `transport` → may change profile/account.
+- `auth`, `billing` → stop and escalate to a human.
+- read-retry vs write-retry vs session-resume vs fresh-process semantics must be
+  explicit; a write job is never silently re-run on another account in the same
+  worktree.
 
 #### Tasks
-- D2.1 `ProviderProfile` model + store (reuse the `accounts.mjs` shape); CLI
-  profiles are metadata only (label, priority, enabled, host env selector).
-- D2.2 `AgysAdapter`: detect `agys` on PATH, list profiles, select/run with a
-  profile; degrade to plain `agy` when absent. No secret handling.
-- D2.3 Classify fallback eligibility by error class: **only** `quota` and
-  `transport` may switch profile/account; `auth` and `billing` must stop and
-  escalate to a human (this is already the A3 policy — reuse it, do not fork it).
-- D2.4 Write-path safety on profile switch: never silently re-run a write job on
-  another account in the same worktree; define read-retry vs write-retry vs
-  session-resume vs fresh-process semantics explicitly.
+- D2.1 `ProviderProfile` model + store (reuse `accounts.mjs` shape; CLI profiles
+  are metadata only).
+- D2.2 `AgysAdapter`: detect `agys`, list/select profiles, degrade to plain `agy`
+  when absent. No secret handling.
+- D2.3 Profile-state machine (`selected/fallback/exhausted/unavailable`) +
+  persistence on the ExecutionHandle/job record.
+- D2.4 Class → action wiring on top of A3 (no new policy table).
+- D2.5 Write-path safety tests for profile switching.
 
 #### Dependencies
-A3 policy (done), A4 breakers (done), accounts (done), D1 (quality per profile).
+A3, A4, accounts, D1 (per-profile metrics).
 
 #### Acceptance criteria
-- `route()` can report the eligible profiles for a provider and never picks a
-  profile whose `auth`/`billing` is broken.
-- With `agys` absent, everything behaves exactly as today.
-- A `quota` failure moves to the next profile; an `auth` failure does not.
+- `route()` can report eligible profiles and never picks one whose `auth`/
+  `billing` is broken.
+- Without `agys`, behaviour is byte-for-byte today's.
+- A `quota` failure moves profile; an `auth` failure does not.
+- The job record carries the profile used and whether it was a fallback.
 
 #### Tests
-Adapter unit tests with a fake `agys` binary; policy tests for class → action;
-worktree-safety tests for write-profile-switch.
+Fake-`agys` adapter unit tests; policy class→action; worktree safety; per-profile
+metrics aggregation.
 
 #### Risks
-Coupling to an external CLI's interface → keep the adapter thin and behind a
-capability check. Secret leakage → the adapter must never print a credential.
+External CLI coupling → thin adapter behind a capability check. Secret leakage →
+never print credentials.
 
 #### Not in scope
-Managing `agy` OAuth. Container/credential mounts (that is H).
+Managing `agy` OAuth directly. Credential mounts (H).
 
 ---
 
 ### D3 — Adaptive Routing
 
-> In progress on `feat/d2-adaptive-routing` (the earlier roadmap called this D2).
-
 #### Objective
-`requirements → capabilities → quality history → latency → cost → quota/profile
-→ policy → candidate`, explainably, with human approval preserved for persistent
-chain changes.
+`requirements → capabilities → quality → latency → cost → quota/profile →
+policy → candidate`, explainably, human gate preserved.
 
 #### Why now
-D1 produced the signal; `route()` still ignores quality, cost and latency.
+D1 gives the signal; D2 gives the profile dimension. D3 closes the loop.
 
 #### Current state
-`src/capabilities.mjs` + `src/routing/score.mjs` landed (T1). `route()` wiring
-(T2) is the open work unit. `proposals.mjs` remains the human gate for the base
-chain.
-
-#### Architecture
-`route()` returns `ranking` (per-candidate score + per-dimension reasons) always,
-and reorders `primary`/`fallbacks` only when `adaptive: true`. The base chain
-stays the policy default; persistent reorder stays a human-accepted proposal.
-
-#### Files/modules expected to change
-`src/router.mjs`, `src/proposals.mjs` (optional: multi-dimension evidence),
-dashboard metrics/route surfaces.
+Capabilities + scoring + `route()` wiring landed (PR #17).
 
 #### Tasks
 - D3.1 (done) capabilities + scoring.
-- D3.2 (in progress) `route()` integration.
-- D3.3 Extend proposals to carry the multi-dimensional evidence (still
-  human-gated), so a proposal explains *why* beyond Wilson.
-- D3.4 Surface `ranking` reasons in the dashboard route/agents views.
+- D3.2 (done) `route()` requirements/preferences/adaptive + ranking.
+- D3.3 Feed the **profile** dimension from D2 into the ranking.
+- D3.4 Carry multi-dimension evidence into the human-gated proposals.
+- D3.5 Surface `ranking` reasons in the dashboard.
 
 #### Dependencies
-D1 (signal), D2 (profiles for the quota/profile stage).
+D1, D2 (profile dimension).
 
 #### Acceptance criteria
-- Ranked output is deterministic and every rank carries reasons.
-- Missing data degrades to the static chain, never to a wrong pick.
-- Persistent order changes still require a human.
+- Ranked output deterministic with reasons; missing data degrades to the static
+  chain; persistent order changes still need a human.
 
 #### Tests
-Existing router tests stay green; adaptive ordering, requirement filtering, and
-"no data" degradation.
+Existing router tests stay green; profile-aware ranking; minimum-sample guard
+(reuse `METRICS_MIN_SAMPLES`) so a dimension only influences the score with
+enough history.
 
 #### Risks
-Overfitting to a handful of samples → require a minimum sample count before a
-dimension influences the score (reuse `METRICS_MIN_SAMPLES`).
+Overfitting to few samples → minimum sample count per dimension.
 
 #### Not in scope
 Auto-accepting proposals.
 
 ---
 
-### E1 — Harness Lifecycle Bridge
+### F2 — Parent/Child Execution Graph
 
 #### Objective
-When the harness allows it, let a completed job continue the harness
-conversation (notification / wake / session resume) without coupling the
-execution engine to any host.
+A lineage view over the fields that already exist, plus the relation kind.
 
 #### Why now
-OpenCode ends its turn before an async delegation finishes; the user sees a
-result only on the next turn. `harness_origins` already maps `jobId → sessionId`
-but `supportsWake: false` everywhere. `[verified]`
+Cheap and it directly helps debug the class of bug already seen (a Jules node
+marked `succeeded` while the remote was still `queued`).
 
 #### Current state
-`src/harness/*` (profiles, waitMode, origin mapping). Nothing consumes
-`harness_origins`.
+`rootExecutionId`/`parentExecutionId`/`executionId`/`workflowId`/`stepId`/
+`attempt` persisted; no graph API.
 
 #### Architecture
-A `LifecycleBridge` interface on top of the existing profiles:
-
-```
-job.finished ──▶ notification policy (E2) ──▶ bridge.deliver(origin, summary)
-                                                   │
-                                     opencode.bridge (session resume)
-                                     claude-code.bridge (hook)
-                                     generic: no-op
-```
-
-The bridge is a **consumer** of events; the engine never depends on it.
-
-#### Files/modules expected to change
-new `src/harness/bridge.mjs`, `src/harness/opencode.mjs`,
-`src/harness/claude-code.mjs`, `src/notify/*`, `src/storage` (read
-`harness_origins`).
+`src/execution-graph.mjs` builds the tree from SQLite; read-only
+`GET /api/execution-graph` + an MCP tool.
 
 #### Tasks
-- E1.1 Define the bridge contract (`canWake(origin)`, `wake(origin, payload)`),
-  no-op by default.
-- E1.2 OpenCode bridge: research the current OpenCode session API and resume
-  path; implement behind a capability flag; never throw into the watcher.
-- E1.3 `supportsWake` becomes data-driven per harness version, still
-  default false.
-- E1.4 Record bridge outcomes as events for observability.
+- F2.1 Build the graph from SQLite `jobs` + `workflow_nodes`.
+- F2.2 Expose the API + MCP tool.
+- F2.3 Dashboard tree view.
+- F2.4 Lineage completeness assertions in dispatch/workflow tests.
 
 #### Dependencies
-E2 (event delivery), C1.2 origin mapping (done).
+C0-real, C0.1 (if SQLite becomes the read authority), C1.
 
 #### Acceptance criteria
-- With no bridge available, behaviour is byte-for-byte today's.
-- An OpenCode job completion can continue the originating session when the
-  installed OpenCode supports it, or silently no-ops when it does not.
+- Given a root, the API returns the full descendant tree with relation kinds; a
+  fanout's children hang off the fanout node.
 
 #### Tests
-Bridge contract unit tests; a fake-open-code integration test; "absent bridge is
-a no-op" test.
+Graph-building fixtures; API test; every dispatched job has a root.
 
 #### Risks
-Host-version coupling → version-gate and default off. Blocking the watcher →
-strict timeouts.
+Deep trees → depth limit/pagination; older records with gaps → mark `unknown`.
 
 #### Not in scope
-Implementing an OpenCode bridge before the API is verified.
+Cross-machine tracing.
 
 ---
 
-### E2 — Notifications / Event Delivery
+### H — Security Hardening
 
 #### Objective
-Turn the watcher into a policy-driven delivery layer while keeping it a separate
-process.
+Make isolation claims true, starting with the small wins.
 
 #### Why now
-`workflow.completed` is routed by the watcher but never emitted `[verified]` — a
-concrete bug. There is no producer for `subagent.start/stop` either.
-
-#### Current state
-`src/notify/watch.mjs` + `adapters.mjs` (console/file/webhook), SSE in the
-dashboard. Runs as `bin/agent-hub watch`.
-
-#### Architecture
-`event → policy (kinds × severity × channel) → adapters (dashboard | webhook |
-desktop | slack/discord | lifecycle bridge)`. The watcher process stays
-separate; it never becomes an MCP in-process daemon.
-
-#### Files/modules expected to change
-`src/workflow/engine.mjs` (emit `workflow.completed`),
-`src/hook.mjs` (subagent events), `src/notify/policy.mjs`, `src/notify/adapters.mjs`.
+`isolated === isolated-home` and secrets set to `'***'` are correctness-of-claim
+issues; the readguard misses gitignored files.
 
 #### Tasks
-- E2.1 Emit `workflow.completed` (workflowId, status, node counts).
-- E2.2 Emit or delete `subagent.start/stop` (they exist in `EVENT_KINDS`).
-- E2.3 Notification policy module (kind → channels, severity, dedup window).
-- E2.4 Desktop + Slack/Discord adapters behind the same never-throw contract.
-- E2.5 Policy surfaced in the dashboard config.
+- H.1 Unset redacted env vars instead of `'***'`.
+- H.2 Readguard: cover gitignored paths (opt-in, documented); treat non-git cwd
+  as a violation when read purity is required.
+- H.3 `isolated`: real HOME/cache/config isolation with an explicit mount
+  allowlist (no network policy yet).
+- H.4 `container`: design-only until the CLI compatibility matrix is verified.
+- H.5 Document the level matrix and residual risks.
 
 #### Dependencies
-None (can run in parallel with everything).
+A5.
 
 #### Acceptance criteria
-- Completing a workflow produces exactly one `workflow.completed` event and one
-  configured notification.
-- A failing adapter never kills the watcher.
+- A secret env var is **absent**, not `'***'`.
+- A read job editing a gitignored file is reported (opt-in).
+- The README states exactly what `isolated` does.
 
 #### Tests
-Event-emission tests for the engine; policy unit tests; adapter tests with a
-fake fetch.
+Env filtering; readguard ignored-file; opt-in live CLI smoke per level.
 
 #### Risks
-Notification fatigue → dedup window and per-kind defaults.
+Breaking CLI auth by over-isolating → keep `compatibility` default; verify each
+CLI before changing a default.
 
 #### Not in scope
-Making the watcher a daemon inside the MCP process.
+Claiming container-grade isolation before the matrix exists.
 
 ---
 
 ### F1 — Planner / Decomposer
 
 #### Objective
-Turn a complex intent into a **validated** `WorkflowPlan`; never run a planner for
-a simple task.
+Turn a complex intent into a **validated** `WorkflowPlan`; never plan a simple
+task.
 
 #### Why now
-Everything needed to execute a plan exists (DAG, roles coming in C2b, artifacts,
-verifier, judge). The missing piece is producing a plan and validating it.
-
-#### Current state
-`examples/software-pipeline.mjs` is a hand-written plan. No planner.
+After C2b, roles + handoffs make a plan executable with understanding; planning
+before that would produce plans the engine cannot honor.
 
 #### Architecture
 ```
-intent ──▶ complexity gate ──▶ planner (model) ──▶ WorkflowPlan (JSON)
-                                     │
-                            schema validation ──▶ policy validation ──▶ runWorkflow
+intent ─▶ complexity gate (decompose: true) ─▶ PLANNER role ─▶ WorkflowPlan JSON
+                                                  │
+                          WorkflowSchema + role/capability validation
+                                                  │
+                                          approval (first use) ─▶ runWorkflow
 ```
-
-The planner is a role (`PLANNER`) that emits a plan artifact; the plan is
-validated with the existing `WorkflowSchema` **plus** role/capability checks
-before any execution.
-
-#### Files/modules expected to change
-new `src/planner/plan.mjs` (plan schema + validation), new
-`src/planner/decompose.mjs` (dispatch the planner role), `src/workflow/schema.mjs`
-(reuse), `src/tools/*` (a `plan` tool or a `workflow_plan` entry point).
+`decompose: true` is explicit; there is **no heuristic guessing** and no
+"planner for every task".
 
 #### Tasks
-- F1.1 `WorkflowPlan` schema = `WorkflowSchema` + required `role` per node.
-- F1.2 Complexity gate (explicit `decompose: true`; never heuristic by default).
-- F1.3 `decompose()` dispatches the planner, validates the returned plan, and
-  fails closed on an invalid plan.
-- F1.4 Dry-run/approval: a plan can be reviewed before execution (human gate).
+- F1.1 `WorkflowPlan` = `WorkflowSchema` + required `role` per node.
+- F1.2 Explicit complexity gate (`decompose: true`).
+- F1.3 `decompose()` runs the planner, validates, fails closed on invalid output.
+- F1.4 Human approval gate before first execution.
 
 #### Dependencies
-C2b (roles), C1, D3 (routing the planner).
+C2b (roles/handoffs), C1, D3 (routing the planner).
 
 #### Acceptance criteria
-- An invalid plan never starts execution.
-- A one-step intent can still be a one-node plan (no forced decomposition).
+- An invalid plan never starts execution; a one-step intent stays one node.
 
 #### Tests
-Plan validation unit tests (cycles, unknown role, missing dep); a fake planner
-returning a valid and an invalid plan.
+Plan validation (cycles, unknown role, missing dep); fake planner valid/invalid.
 
 #### Risks
-Planner hallucinating node ids/roles → validate and repair-or-fail explicitly.
+Hallucinated node ids/roles → validate and fail, never repair silently.
 
 #### Not in scope
-Auto-executing a plan without an approval gate on first use.
-
----
-
-### F2 — Parent/Child Execution Graph
-
-#### Objective
-A first-class lineage view over the fields that already exist
-(`rootExecutionId`, `parentExecutionId`, `executionId`, `workflowId`, `stepId`,
-`attempt`) plus the relations planner/delegate/review/fanout/retry/resume/supervisor.
-
-#### Why now
-The fields exist and are persisted; there is no way to see the tree, which makes
-debugging multi-agent runs guesswork.
-
-#### Current state
-Fields in `JobRecord` and SQLite; `root_execution_id`/`parent_execution_id`
-populated by dispatch `[lead]`; `harness_origins` maps sessions. No graph API.
-
-#### Architecture
-`src/execution-graph.mjs`: build a tree from SQLite (authoritative for
-coordination), expose `GET /api/execution-graph` and an MCP tool. Read-only.
-
-#### Files/modules expected to change
-new `src/execution-graph.mjs`, `src/dashboard.mjs`, `src/tools/*`, dashboard view.
-
-#### Tasks
-- F2.1 Build the graph from SQLite `jobs` (+ `workflow_nodes`).
-- F2.2 Expose `/api/execution-graph` and `execution_graph` MCP tool.
-- F2.3 Dashboard tree view (root → planner/research/implementation/review).
-- F2.4 Assert lineage completeness in dispatch/workflow tests.
-
-#### Dependencies
-C0-real (fields), C1, F1 (planner nodes).
-
-#### Acceptance criteria
-- Given a root execution, the API returns its full descendant tree with the
-  relation kind on each edge.
-- A fanout's children hang off the fanout node.
-
-#### Tests
-Graph-building unit tests from fixtures; API test; a lineage test asserting every
-dispatched job has a root.
-
-#### Risks
-Deep trees → paginate/limit depth. Lineage gaps from older records → tolerate and
-mark `unknown`.
-
-#### Not in scope
-Distributed tracing across machines.
+Auto-executing without approval on first use.
 
 ---
 
@@ -668,320 +618,265 @@ Distributed tracing across machines.
 #### Objective
 Replace "N tests pass" with "known behaviour under failure modes".
 
-#### Why now
-There is no fault-injection or eval harness `[verified]`. Reliability claims are
-currently unverifiable.
-
-#### Current state
-~1071 node tests + 161 dashboard tests; some deterministic retry/kill tests; no
-chaos, no corpus, no benchmarks.
-
-#### Architecture
-Two harnesses:
-1. **Eval harness** (`bench/`): a corpus of N workflows × task types × agents,
-   measuring execution success, verified success, quality, latency, cost,
-   duplicate executions, false auto-replies, recovery.
-2. **Chaos harness** (`test/chaos/`): injected faults — kill scheduler, kill
-   worker, network failure, provider unavailable, Jules API failure, SQLite
-   contention, expired lease, duplicate dispatch, workflow crash, partial
-   fan-out.
-
-#### Files/modules expected to change
-new `bench/`, new `test/chaos/`, `package.json` scripts, maybe
-`src/testkit` fault hooks.
-
 #### Tasks
-- G.1 Define the metric set and the corpus format.
-- G.2 A deterministic offline corpus (mock CLIs) so eval is quota-free.
-- G.3 Chaos scenarios, each asserting a specific invariant (no duplicate
-  execution, lease reclamation, resume correctness).
-- G.4 A weekly/opt-in live variant (`AGENT_HUB_LIVE=1`).
-- G.5 Report output (markdown/JSON) committed as evidence.
+- G.1 Metric set + corpus format.
+- G.2 Deterministic offline corpus (mock CLIs, quota-free).
+- G.3 Chaos scenarios, one invariant each: kill scheduler, kill worker, network
+  failure, provider unavailable, Jules API failure, SQLite contention, expired
+  lease, duplicate dispatch, workflow crash, partial fan-out.
+- G.4 Opt-in live variant (`AGENT_HUB_LIVE=1`).
+- G.5 Report committed as evidence.
 
 #### Dependencies
-D1 (metrics), C0-real, C1, D2/D3 (for provider-fallback scenarios).
+D1, C0-real/C0.1, C1, D2 (provider fallback scenarios).
 
 #### Acceptance criteria
-- Each chaos scenario fails the suite when its invariant is broken.
-- The eval report is reproducible from the corpus alone (no network).
+- Each chaos scenario fails when its invariant breaks; the eval report is
+  reproducible offline.
 
 #### Tests
-The harness itself, plus one scenario per failure mode listed above.
+The harness itself + one scenario per failure mode.
 
 #### Risks
-Flaky chaos tests → seed determinism and explicit timeouts (the existing
-worktree-lease flake is a warning).
+Flaky chaos → seeded determinism; the existing worktree-lease flake is the
+warning.
 
 #### Not in scope
-Load/performance benchmarking at scale.
+Load/scale benchmarking.
 
 ---
 
-### H — Security Hardening
+### E1 — Harness Lifecycle Bridge
 
 #### Objective
-Make isolation a real property with named levels, and stop claiming more than is
-true.
+When the harness allows it, continue the host conversation on completion —
+without coupling the engine to any host.
 
-#### Why now
-`isolated === isolated-home` and secrets are replaced by `'***'` rather than
-unset `[verified]`; the readguard does not see gitignored files. These are
-correctness-of-claim issues.
-
-#### Current state
-`src/sandbox.mjs` (compatibility default), `src/readguard.mjs`
-(`--ignored=no`).
+#### Why now (after E2)
+The bridge consumes the event/notification layer; building it before E2 means
+inventing that layer twice.
 
 #### Architecture
-`compatibility → isolated-home → isolated → container`, each level documented
-with exactly what it does and does not protect. Nothing is renamed "sandbox" until
-it isolates.
-
-#### Files/modules expected to change
-`src/sandbox.mjs`, `src/readguard.mjs`, `src/jobrunner.mjs`, `src/config.mjs`,
-docs.
+```
+job.finished ─▶ notification policy (E2) ─▶ bridge.deliver(origin, summary)
+                                                 │
+                                   opencode.bridge (session resume)
+                                   claude-code.bridge (hook)
+                                   generic: no-op
+```
+The bridge consumes events; the engine never depends on it.
 
 #### Tasks
-- H.1 Unset redacted env vars instead of setting `'***'`.
-- H.2 Readguard: cover gitignored paths (configurable) and treat a non-git cwd
-  as a violation when read purity is required.
-- H.3 `isolated`: real HOME/cache/config isolation with an explicit allowlist of
-  what is mounted; no network policy yet.
-- H.4 `container`: design-only until the CLI compatibility matrix is verified.
-- H.5 Document the level matrix and the exact residual risks.
+- E1.1 Bridge contract (`canWake(origin)`, `wake(origin, payload)`), no-op default.
+- E1.2 OpenCode bridge behind a capability flag (research the current session API
+  first; do not implement until verified).
+- E1.3 `supportsWake` becomes data-driven per harness version (default false).
+- E1.4 Record bridge outcomes as events.
 
 #### Dependencies
-A5 (done). Independent of the rest.
+E2, C1.2 origin mapping.
 
 #### Acceptance criteria
-- A secret env var is absent from the child environment, not `'***'`.
-- A read job that edits a gitignored file is reported (opt-in, documented).
-- The README states exactly what `isolated` does.
+- No bridge → byte-for-byte today. A completion can continue the originating
+  session when supported, else no-op.
 
 #### Tests
-Env-filtering tests; readguard tests for ignored files; a CLI smoke matrix per
-level (opt-in live).
+Contract unit tests; fake-open-code integration; absent-bridge no-op.
 
 #### Risks
-Breaking CLI auth by over-isolating → keep `compatibility` default and verify each
-CLI before changing a default.
+Host-version coupling → version gate, default off. Blocking the watcher → strict
+timeouts.
 
 #### Not in scope
-Claiming container-grade isolation before the compatibility matrix exists.
+Implementing the bridge before the API is verified.
 
 ---
 
 ### I — Hermes Nested Orchestration
 
 #### Objective
-Hermes as a **nested orchestrator** on top of agent-hub's execution fabric, not
-another worker.
+Hermes as a **nested orchestrator** over agent-hub's execution fabric.
 
 #### Why now
-Only after C2b/C3b/C4b/D2/D3/E1/E2/F1/F2/G exist does agent-hub expose the stable
-surface a nested orchestrator needs.
-
-#### Current state
-No Hermes reference in `src/` `[verified]`. The execution backend contract
-(create/observe/interact/result) exists implicitly across `dispatch`, the Jules
-runner and the workflow engine.
+Only after F1/F2/G/E1 does agent-hub expose a stable surface.
 
 #### Architecture
-A documented `ExecutionBackend` contract that Hermes can target
-(`workflow`, `dispatch`, `artifact`, `verifier`, `judge`, `profiles`, `harness`).
-Hermes owns planning; agent-hub owns execution and evidence. **No second workflow
-engine.**
-
-#### Files/modules expected to change
-new `docs/execution-backend-contract.md`, `src/index.mjs` (a stable entry point),
-possibly `src/tools/*` additions. Mostly contract + glue.
+A frozen `ExecutionBackend` contract (`workflow`, `dispatch`, `artifact`,
+`verifier`, `judge`, `profiles`, `harness`). **Hermes owns planning; agent-hub
+owns execution and evidence.** No second workflow engine.
 
 #### Tasks
-- I.1 Write the `ExecutionBackend` contract (what a nested orchestrator may
-  call, and what it must never bypass).
-- I.2 Expose a single `execute_plan` entry point that accepts a validated plan.
+- I.1 Write `docs/execution-backend-contract.md`.
+- I.2 Expose one `execute_plan` entry point accepting a validated plan.
 - I.3 Conformance test: the example plan runs through the public surface only.
-- I.4 Integration with Hermes behind an opt-in flag.
+- I.4 Hermes integration behind an opt-in flag.
 
 #### Dependencies
 F1, F2, G, E1.
 
 #### Acceptance criteria
-- A plan can be executed end-to-end through the documented public surface with no
-  access to internals.
-- Hermes integration changes no execution-engine code.
+- A plan executes end-to-end through the documented surface with no internals
+  access; Hermes integration changes no engine code.
 
 #### Tests
-Contract conformance tests; a fake nested orchestrator driver.
+Contract conformance; fake nested orchestrator driver.
 
 #### Risks
-Interface churn → freeze the contract before wiring Hermes.
+Interface churn → freeze before wiring.
 
 #### Not in scope
-Reimplementing planning or workflow execution inside Hermes.
+Reimplementing planning or execution in Hermes.
 
 ---
 
-## 5. Dependency graph (corrected)
+## 7. Batches (corrected dependencies)
 
 ```
-C2 (artifacts) DONE
-C3 (verifier)  DONE
-C4 (judge)     DONE
-D1 (metrics)   DONE
-        │
-        ├──▶ C2b Context & Handoffs ──▶ C3b Verifier completion
-        │                                   │
-        │                                   ▼
-        │                              C4b Judge feedback
-        │
-        ├──▶ D2 Provider Profiles ──▶ D3 Adaptive Routing (T1 done, T2 in progress)
-        │                                   │
-        │                                   ▼
-        │                              E1 Harness Lifecycle Bridge
-        │
-        ├──▶ E2 Notifications (independent; fixes workflow.completed)
-        │
-        └──▶ C2b ──▶ F1 Planner ──▶ F2 Execution Graph
-                                        │
-                                        ▼
-                                     G Eval/Chaos
-                                        │
-                                        ▼
-                                     H Security Hardening
-                                        │
-                                        ▼
-                                  I Hermes nested orchestration
+Batch 1 (parallel, no cross-deps):
+  C2b.1  Handoff schema + registry          (defines the contract)
+  E2.1   workflow.completed emitter
+  C4b.1  buildRevisionFeedback
+  H.1    unset redacted env
+  G.0    deflake worktree-lease + isolate quota-codexbar tests
+
+Batch 2:
+  C2b.5  Roles registry (needs C2b.1's contract, not the engine)
+  E2.2   subagent events emit-or-delete
+  E2.3   notification policy
+  C0.1.1 SQLite dual-read comparison harness
+
+Batch 3:
+  C2b.2  SQLite task_handoffs/task_context (needs C2b.1)
+
+Batch 4:
+  C2b.3  Engine honors handoff config (needs C2b.2)
+
+Batch 5:
+  C2b.4  Inject upstream handoff into downstream task (needs C2b.3)
+
+then: C3b (needs C2b) → C4b.2/3 (needs C4/C3) → D2 → D3 → F2 → H.2-5 → F1 → G → E1 → I
 ```
 
-Notes vs the original sketch: E2 does **not** depend on D2/D3 (it is a concrete
-bug plus a policy module), so it can run in parallel from day one; F1/F2 only
-need C2b, not D2/D3; G and H are parallelizable once C2b/F1 exist for the eval
-corpus.
+Each batch is one or more work units; every task keeps its own commit.
 
 ---
 
-## 6. Priority
+## 8. Priority table (reviewer's order)
 
-| Phase | Dependencies | Value | Complexity | Risk | Priority | Why this rank |
+| # | Phase | Dependencies | Value | Complexity | Risk | Why this rank |
 |---|---|---|---|---|---|---|
-| C2b Context & Handoffs | C2/C4 done | High — makes multi-node workflows actually work; the shipped example passes nothing forward | Medium | Low (SQLite + filesystem) | **1** | Highest value per risk; unblocks F1, F2, I |
-| E2 Notifications | none | Medium — fixes a real dead event; visibility | Low | Very low | **2** | Small, concrete, parallelizable |
-| D3 Adaptive Routing | D1, D2 | High — turns D1 into decisions | Medium | Medium (routing regressions) | **3** | In progress; needs D2 for the profile stage |
-| C3b Verifier completion | C2b | Medium — closes fanout blind spot | Low | Low | **4** | Small once C2b lands |
-| C4b Judge feedback | C3, C4 | Medium — makes revision useful | Low | Low | **5** | Cheap, high behavioural payoff |
-| D2 Provider Profiles | A3/A4, accounts | High — `agy` quota is the real bottleneck; `agys` exists | High | High (external CLI, auth) | **6** | High value but needs the `agys` spike first |
-| F2 Execution Graph | C0, C1 | Medium — debuggability | Low | Low | **7** | Cheap, read-only |
-| H Security Hardening | A5 | Medium — correctness of claims, secrets | Medium | Medium (can break CLIs) | **8** | Start with H.1/H.2 (tiny), defer H.3/H.4 |
-| F1 Planner | C2b | High — the "complex intent" story | High | Medium | **9** | Needs roles from C2b |
-| G Eval/Chaos | C0/C1/D1 | High — turns tests into known behaviour | High | Medium (flake) | **10** | Important but not blocking; run offline corpus first |
-| I Hermes | F1/F2/G/E1 | High long-term | Very high | High | **11** | Only after the surface is stable |
+| 1 | C2b Context & Handoffs | C2/C4 done | High | Medium | Low | Missing half of C2; unblocks F1/F2/I; no external deps |
+| 2 | E2 Notifications | none | Medium | Low | Very low | Fixes a real dead event; parallelizable |
+| 3 | C3b Verifier completion | C2b | Medium | Low | Low | Closes the fanout blind spot + validates handoffs |
+| 4 | C4b Judge feedback | C3/C4 | Medium | Low | Low | Makes revision useful instead of repeated |
+| 5 | D2 Provider Profiles | A3/A4/accounts | High | High | High | `agy` quota is the real bottleneck; `agys` exists |
+| 6 | D3 Adaptive Routing | D1, D2 | High | Medium | Medium | Consumes profiles; must follow D2 |
+| 7 | F2 Execution Graph | C0/C1 | Medium | Low | Low | Cheap; debugging payoff before riskier phases |
+| 8 | H Security Hardening | A5 | Medium | Medium | Medium | H.1/H.2 tiny; H.3/H.4 later |
+| 9 | F1 Planner | C2b | High | High | Medium | Needs roles from C2b |
+| 10 | G Eval/Chaos | C0/C1/D1 | High | High | Medium | Offline corpus first |
+| 11 | E1 Harness Lifecycle | E2, C1.2 | Medium | Medium | Medium | Consumes E2; host-version coupling |
+| 12 | I Hermes | F1/F2/G/E1 | High long-term | Very high | High | Needs a stable surface |
 
 ---
 
-## 7. Migrations
+## 9. Dependency graph (corrected)
 
-- **SQLite** (`C2b`): `CREATE TABLE IF NOT EXISTS task_handoffs`,
-  `task_context`. Additive; no `ALTER` on existing tables needed.
-- **SQLite** (`C0-real` hardening): moving the read path to SQLite is a
-  behaviour change — do it behind a flag with a dual-read comparison, never as a
-  big-bang.
-- **`quality_score`**: decide before adding more consumers. Either delete it or
-  have C4b write it. Do not leave three quality concepts.
-- **`onSuccess`/`onFailure`**: either consume (C4b) or remove from the schema.
-- **Sandbox** (`H`): changing the default away from `compatibility` is a
-  breaking change for existing installs — new defaults only behind a version
-  bump and a documented matrix.
-- **`docs/execution-contract.md`**: correct the SQLite statements in the same PR
-  as the first storage change that touches them.
+```
+C2/C3/C4/D1  DONE
+      │
+      ├─▶ C2b ──┬─▶ C3b ──▶ C4b
+      │         └─▶ F1 ──▶ F2? (F2 only needs C0/C1)
+      │
+      ├─▶ C0.1 (SQLite authority) ──▶ F2
+      │
+      ├─▶ D2 ──▶ D3
+      │
+      ├─▶ E2 ──▶ E1
+      │
+      └─▶ H (independent)
 
----
-
-## 8. What NOT to build (already exists)
-
-- Another workflow engine. `src/workflow/*` is it.
-- Another artifact store. `src/artifacts.mjs` is it.
-- Another verifier/judge. `src/verify.mjs` / `src/judge.mjs` are it.
-- Another policy/breaker system. `src/policy/*` / `src/breakers.mjs` are it.
-- An event bus daemon inside the MCP process. The separate `watch` process stays.
-- A second quality metric alongside D1's `qualityScore`.
-- A `ledger.json` as source of truth. SQLite is the coordination store.
-- Re-implementing `agys` profile management inside agent-hub.
-- A new auth mechanism for CLIs. They keep their own auth.
+G needs C0/C1/D1 (+D2 for provider-fallback scenarios)
+I needs F1 + F2 + G + E1
+```
 
 ---
 
-## 9. External ideas we considered and rejected (or narrowed)
+## 10. Migrations
 
-- **AISW / AgentsRoom dashboards** — their multi-pane "rooms" assume they own the
-  process lifecycle. agent-hub's dashboard observes a separate watcher and MCP;
-  adopting the room model would mean a daemon. **Rejected**; only the idea of a
-  lineage tree survived, as F2.
-- **ZCode / Agent Orchestrator static pipelines** — a YAML pipeline runner
-  duplicates the DAG engine. **Rejected**; the useful part (declarative plans) is
-  F1, built on the existing engine.
-- **Gentle-Shell planner** — the concept (planner → validated plan → execution) is
-  adopted as F1, but its prompt-centric planner is **narrowed**: the plan must
-  validate against the existing `WorkflowSchema` and roles, not free-form prose.
-- **`agys`** — adopted as an **adapter**, not a rewrite (D2).
-- **Hermes** — adopted as a **nested orchestrator** over the public surface, not
-  as another worker or engine (I).
-- **Generic vector memory / RAG over past runs** — **deferred, not rejected**:
-  D1's metrics + C2b handoffs give structured memory first; vector recall should
-  only be added if structured recall proves insufficient.
+- **SQLite (C2b)**: additive `CREATE TABLE IF NOT EXISTS task_handoffs`,
+  `task_context`.
+- **SQLite (C0.1)**: read-path cutover behind a flag with dual-read comparison.
+- **`quality_score`**: decide (delete or have C4b write it) before more consumers.
+- **`onSuccess`/`onFailure`**: consume in C4b or remove from the schema.
+- **Sandbox (H)**: no default change without a version bump + verified matrix.
+- **`docs/execution-contract.md`**: fix SQLite claims in the same PR as the first
+  storage change.
 
 ---
 
-## 10. Recommendation
+## 11. What NOT to build
+
+Another workflow engine, artifact store, verifier, judge, policy/breaker system,
+event daemon, quality metric, `ledger.json`, `agys` reimplementation, or CLI auth
+mechanism. SQLite is coordination; the filesystem is content.
+
+---
+
+## 12. External ideas — adopted / narrowed / rejected
+
+- **Gentle-Shell planner** → adopted as F1, narrowed: plans must validate against
+  `WorkflowSchema` + roles.
+- **AISW / AgentsRoom** → rejected (they assume owning the process lifecycle);
+  only the lineage idea survived as F2.
+- **ZCode / Agent Orchestrator** → rejected as a YAML pipeline runner
+  (duplicates the DAG engine); the useful part is F1.
+- **`agys`** → adopted as an adapter (D2), never reimplemented.
+- **Hermes** → adopted as nested orchestrator (I).
+- **Vector/RAG memory over past runs** → deferred, not rejected: C2b handoffs +
+  D1 metrics give structured memory first.
+
+---
+
+## 13. Recommendation
 
 ```
 NEXT RECOMMENDED PHASE:
-C2b — Context & Handoffs (completes C2)
+C2b — Context & Handoffs
 ```
 
 ```
 WHY:
 1. It is the missing half of C2: nodes emit artifacts but pass no structured
-   context, and the shipped example (research -> implementation -> review)
-   currently forwards none of research's conclusions.
-2. Everything it needs already exists (artifacts C2, judge C4, capabilities D2):
-   no new external dependency, no CLI risk.
-3. It unblocks the two phases with the highest long-term value, F1 (planner) and
-   I (Hermes), which both need a handoff/role contract that must exist once.
-4. It is purely additive in SQLite + filesystem, so it is low-risk and reviewable
-   in small work units.
-5. It is the phase that turns "workflow engine that runs nodes" into "workflow
-   engine that carries understanding between nodes".
+   context, and the shipped example forwards none of research's conclusions.
+2. It needs no external dependency (SQLite + filesystem) and no CLI risk.
+3. It unblocks F1 (planner) and I (Hermes), which both need a handoff/role
+   contract that must exist once.
+4. It is the foundation C3b/C4b consume next (schema-validated handoffs, and a
+   bounded revision feedback block).
+5. It is what turns "nodes that run" into "nodes that understand".
 ```
 
 ```
-FIRST IMPLEMENTATION BATCH (parallel tracks):
-- C2b.1  Handoff schema + validateHandoff (pure module, tests)          [independent]
-- C2b.2  SQLite task_handoffs/task_context + read/write (storage)       [depends on C2b.1]
-- C2b.3  Engine: produce/persist handoff on node completion             [depends on C2b.2]
-- C2b.4  Inject upstream handoff into a downstream node's task          [depends on C2b.3]
-- E2.1   Emit workflow.completed from the engine                        [independent, tiny]
-- C4b.1  buildRevisionFeedback + inject on needs_revision               [independent of C2b]
-- H.1    Unset redacted env vars instead of setting '***'               [independent, tiny]
-- G.0    Deflake worktree-lease + isolate quota-codexbar tests          [independent]
+FIRST IMPLEMENTATION BATCH (parallel):
+- C2b.1  Handoff schema + named-schema registry (pure, defines the contract)
+- E2.1   Emit workflow.completed from the engine
+- C4b.1  buildRevisionFeedback (max 3 findings x 300 chars)
+- H.1    Unset redacted env vars instead of setting '***'
+- G.0    Deflake worktree-lease + isolate the quota-codexbar tests
 ```
+Then Batch 2 for C2b.5 roles, E2.2/E2.3 and C0.1.1, and Batch 3 for C2b.2.
 
 ---
 
-## Appendix A — Verification status of audit leads
+## Appendix A — Audit leads not personally re-verified
 
-Leads reported by the mapping agents that were **not** personally re-verified in
-this session and must be checked before being treated as fact:
+`delegate` bypassing `dispatch`; SQLite lease mirror write-only / `getLease`
+uncalled; `getJob` exported and unused; quota never deprioritizing an exhausted
+provider; Jules failover only on 429; `modelsArgv` throwing for `jules`.
 
-- `src/tools/jobs.mjs:38` — `delegateTool` bypassing `dispatch`.
-- `src/worktree.mjs` — SQLite lease mirror being write-only / `getLease` uncalled.
-- `src/storage/sqlite.mjs` — `getJob` exported and unused.
-- `src/router.mjs:202` — quota never deprioritizing an exhausted provider.
-- `src/cloud/runner.mjs` — Jules failover only on 429, not 401/403.
-- `src/adapters/index.mjs:36` — `modelsArgv` throwing for `jules`.
-
-Confirmed by direct inspection in this session: `isolated === isolated-home`
-and `'***'` redaction; `workflow.completed` has no emitter; C4 has no
-feedback injection; fanout children bypass artifacts/verify/judge;
-`onSuccess`/`onFailure` are schema-only; no context/handoff; no roles;
-`quality_score` unused; no CI; readguard uses `--ignored=no`.
+Confirmed by direct inspection: `isolated === isolated-home` and `'***'`
+redaction; no `workflow.completed` emitter; C4 has no feedback injection; fanout
+children bypass artifacts/verify/judge; `onSuccess`/`onFailure` schema-only; no
+context/handoff; no roles; `quality_score` unused; no CI; readguard
+`--ignored=no`.
