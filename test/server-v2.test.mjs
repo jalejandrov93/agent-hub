@@ -48,7 +48,7 @@ test('annotations include idempotentHint where specified', async () => {
   try {
     const { tools } = await client.listTools()
     const byName = Object.fromEntries(tools.map((t) => [t.name, t]))
-    for (const name of ['agents_status', 'route', 'job_status', 'job_wait', 'job_result', 'agents_metrics', 'learning_propose']) {
+    for (const name of ['agents_status', 'route', 'job_status', 'job_wait', 'job_result', 'agents_metrics', 'execution_graph', 'learning_propose']) {
       assert.equal(byName[name].annotations?.idempotentHint, true, `${name} should have idempotentHint`)
     }
   } finally {
@@ -76,6 +76,20 @@ test('agents_metrics on an empty home returns structuredContent with rows []', a
     const parsed = MetricsResponse.safeParse(result.structuredContent)
     assert.ok(parsed.success, parsed.success ? '' : JSON.stringify(parsed.error.issues))
     assert.deepEqual(result.structuredContent.rows, [])
+  } finally {
+    await close()
+  }
+})
+
+test('execution_graph is registered and returns an empty graph on an empty home', async () => {
+  const { client, close } = await connect()
+  try {
+    const { tools } = await client.listTools()
+    assert.ok(tools.some((t) => t.name === 'execution_graph'), 'execution_graph must be registered as an MCP tool')
+    const result = await client.callTool({ name: 'execution_graph', arguments: {} })
+    assert.ok(result.structuredContent)
+    assert.deepEqual(result.structuredContent.roots, [])
+    assert.deepEqual(result.structuredContent.edges, [])
   } finally {
     await close()
   }

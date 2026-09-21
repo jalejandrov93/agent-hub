@@ -15,7 +15,7 @@ import { julesDelegateTool, julesSourcesTool, julesCheckTool, julesSessionsTool,
 import { computeAttention } from './cloud/check.mjs'
 import { agentsQuotaTool } from './tools/agents.mjs'
 import { resumeRemoteJobs } from './cloud/runner.mjs'
-import { metricsTool } from './tools/insights.mjs'
+import { metricsTool, executionGraphTool } from './tools/insights.mjs'
 import { learningProposeTool } from './tools/learnings.mjs'
 import { scheduleStartupDiscovery, scheduleQuotaWarmup } from './startup.mjs'
 import { dispatch } from './dispatch.mjs'
@@ -655,6 +655,22 @@ export function buildServer() {
       annotations: { readOnlyHint: true, idempotentHint: true },
     },
     guard(({ groupBy }) => metricsTool({ groupBy }))
+  )
+
+  register(
+    'execution_graph',
+    {
+      title: 'Execution graph',
+      description:
+        'Read-only lineage of agent executions: roots, nodes (id, agent, model, status, workflow_id, step_id, attempt, parent, root) ' +
+        'and parent->child edges derived from rootExecutionId/parentExecutionId/executionId. The relation label is best-effort ' +
+        '(retry when attempt > 1, resume when the session matches the parent, else delegate). Pass rootExecutionId to get one subtree.',
+      inputSchema: {
+        rootExecutionId: z.string().min(1).optional().describe('Return only the subtree rooted at this execution id.'),
+      },
+      annotations: { readOnlyHint: true, idempotentHint: true },
+    },
+    guard(({ rootExecutionId }) => executionGraphTool({ rootExecutionId: rootExecutionId ?? null }))
   )
 
   register(

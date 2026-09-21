@@ -37,6 +37,7 @@ test('the server boots over stdio and exposes the full tool set', async () => {
         'agents_status',
         'delegate',
         'dispatch',
+        'execution_graph',
         'job_cancel',
         'job_reply',
         'job_result',
