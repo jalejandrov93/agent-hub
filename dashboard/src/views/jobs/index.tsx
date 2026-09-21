@@ -17,7 +17,7 @@ import { formatDuration, formatModel } from "@/lib/format"
 import { useCancelJobMutation, useStateQuery } from "@/lib/queries"
 import type { Job } from "@/lib/types"
 import { ElapsedCell } from "./ElapsedCell"
-import { JobDetailSheet } from "./JobDetailSheet"
+import { JobDetailModal } from "./JobDetailModal"
 
 const PAGE_HEADER = {
   title: "Running jobs",
@@ -185,7 +185,7 @@ export function JobsView() {
       ) : null}
 
       {selected ? (
-        <JobDetailSheet
+        <JobDetailModal
           job={selected}
           open={Boolean(selected)}
           onOpenChange={(open) => {
