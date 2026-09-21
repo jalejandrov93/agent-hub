@@ -42,6 +42,8 @@ src/
   overrides.mjs        manual per-pair hold / breaker-reset overrides
   startup.mjs          non-blocking startup discovery scheduler
   router.mjs           delegation map + availability filtering, applies accepted proposals
+  capabilities.mjs     per agent/model capabilities derived from adapter + registry signals
+  routing/score.mjs    preference-weighted, explainable candidate ranking
   worktree.mjs         write-mode gate (secondary git worktree) + single-writer lock
   metrics.mjs          job-history aggregation (success rate, p50/p95, tokens) per agent/model/mode/taskType
   timeouts.mjs         effective timeout: explicit > adaptive (p95 x 1.5) > static default
@@ -626,6 +628,39 @@ implementation -> verification -> judge -> accepted
 - The verdict is `{ verdict, reason, revision, maxRevisionAttempts, required,
   failed }`, written to `artifacts/judge.json` next to `verification.json`, and
   carried on the node result and on `job.finished`/`job.failed`.
+
+### Adaptive routing (`src/capabilities.mjs`, `src/routing/score.mjs`)
+
+`route()` used to order a task's chain only by availability and an accepted
+proposal. It can now rank candidates by measured quality, latency and cost, and
+filter them by required capabilities — while staying explainable:
+
+```js
+const r = await route({
+  taskType: 'recon',
+  requirements: ['sessionResume'],          // hard capability filter
+  preferences: { quality: 0.6, cost: 0.2, latency: 0.2 },
+  adaptive: true,                            // reorder primary/fallbacks
+})
+// r.ranking: [{ agent, model, score, reasons: [{dimension, raw, weight, ...}] }]
+```
+
+- `src/capabilities.mjs` derives capabilities from signals that already exist:
+  `sessionResume` from each adapter's resume argv (`agy --conversation`,
+  `opencode -s`, `codex exec resume`; copilot has none), `github` where the CLI
+  has built-in GitHub access or works through PRs, `largeContext` from
+  `MODEL_REGISTRY` strengths (`1M ctx`). `web` is a reserved key, false
+  everywhere today.
+- Scoring is a weighted sum over quality (`qualityScore`, else `verifiedRate`,
+  else `successRate`), latency (`p95Ms`) and cost (`costUsdAvg`), normalized
+  within the eligible set. A dimension with no data is dropped and its weight
+  redistributed — an unmeasured pair is **not** ranked as bad.
+- `adaptive: false` (default) keeps today's order and still returns `ranking`
+  for transparency. Persistent chain changes remain a human-accepted proposal;
+  a candidate missing a required capability appears in `skipped` with
+  `missing_capabilities:<keys>`.
+- With no metrics at all, every score is 0 and the order is the static chain —
+  routing degrades to today's behaviour, never to a wrong pick.
 
 ### Harness profiles (`src/harness/`)
 

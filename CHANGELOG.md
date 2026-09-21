@@ -16,6 +16,12 @@ and this project adheres to [Semantic Versioning](https://semver.org/).
 
 ### Added
 
+- Adaptive routing (`src/capabilities.mjs`, `src/routing/score.mjs`): `route()`
+  accepts `requirements` (hard capability filter), `preferences` and `adaptive`,
+  and always returns an explainable `ranking` with per-dimension reasons built
+  from D1's quality/latency/cost. Capabilities are derived from existing signals
+  (adapter resume argv, the delegation map, `MODEL_REGISTRY` strengths); missing
+  metrics are "no data", never 0, so routing degrades to the static chain.
 - Workflow judge and revision loop (`src/judge.mjs`): a delegate node can set
   `maxRevisionAttempts` and the engine turns the verifier verdict into
   `accepted | needs_revision | rejected | blocked` — `needs_revision`

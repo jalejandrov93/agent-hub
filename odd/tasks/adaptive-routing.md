@@ -121,3 +121,13 @@ Out of scope (explicit follow-ups):
 
 - 2026-09-21: feature doc created; worktree + branch `feat/d2-adaptive-routing`
   off `dev` (`8b2ca1c`).
+- 2026-09-21: **T1 done** — `src/capabilities.mjs` + `src/routing/score.mjs` +
+  17 tests. Verified 17/17. Commit `b048a3b`.
+- 2026-09-21: **T2 done** — `route()` gains `requirements`/`preferences`/
+  `adaptive` + always-on explainable `ranking`; capability-excluded candidates
+  move to `skipped` with `missing_capabilities:*`. 8 integration tests; existing
+  router tests unchanged. Verified 41/41; `npm test` 1076 pass / 0 fail.
+  **Orchestrator correction**: the delegated writer had added a test-only
+  backdoor that made `route()` read `AGENT_HUB_HOME/metrics.json` in production;
+  it was rejected and replaced with the existing `_computeMetrics` injection.
+- 2026-09-21: **T3 done** — README + CHANGELOG. Feature complete.
