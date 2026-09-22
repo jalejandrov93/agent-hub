@@ -1,4 +1,6 @@
 import * as React from "react"
+import { DiffStatsSummary } from "@/components/DiffStatsSummary"
+import { DiffStatsTable } from "@/components/DiffStatsTable"
 import { StatusBadge } from "@/components/StatusBadge"
 import { Badge } from "@/components/ui/badge"
 import { Separator } from "@/components/ui/separator"
@@ -12,6 +14,7 @@ import {
 import { formatModel } from "@/lib/format"
 import type { Job } from "@/lib/types"
 import { JobResultPanel } from "./JobResultPanel"
+import { useJobDiffStatsQuery } from "./useJobDiffStats"
 
 function DetailRow({ label, children }: { label: string; children: React.ReactNode }) {
   return (
@@ -31,6 +34,10 @@ export function JobDetailModal({
   open: boolean
   onOpenChange: (open: boolean) => void
 }) {
+  const isWrite = job.mode === "write"
+  const diffStatsQuery = useJobDiffStatsQuery(job.jobId, isWrite && open)
+  const diffStats = diffStatsQuery.data?.diffStats ?? null
+
   return (
     <Dialog open={open} onOpenChange={onOpenChange}>
       <DialogContent className="max-h-[85vh] overflow-y-auto sm:max-w-lg">
@@ -55,6 +62,19 @@ export function JobDetailModal({
           <DetailRow label="Learnings">{job.learningIds?.length ?? 0}</DetailRow>
           <DetailRow label="PID">{job.pid ?? "—"}</DetailRow>
         </div>
+
+        {isWrite && diffStats ? (
+          <>
+            <Separator />
+            <div className="flex flex-col gap-2">
+              <div className="flex items-center justify-between">
+                <h3 className="text-sm font-medium">Changes</h3>
+                <DiffStatsSummary stats={diffStats} />
+              </div>
+              <DiffStatsTable files={diffStats.files} truncated={diffStats.truncated} />
+            </div>
+          </>
+        ) : null}
 
         <Separator />
 

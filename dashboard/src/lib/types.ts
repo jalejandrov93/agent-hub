@@ -42,6 +42,10 @@ import type {
   AgysSnapshotResponse,
   AgysProfile,
   AgysBucket,
+  DiffStats,
+  DiffFileEntry,
+  ChangedFilesMismatch,
+  DiffStatsResponse,
 } from "@shared"
 
 export type AgentRow = z.infer<typeof AgentStatusRow>
@@ -66,6 +70,12 @@ export type AgysSnapshotResponseT = z.infer<typeof AgysSnapshotResponse>
 export type AgysProfileT = z.infer<typeof AgysProfile>
 export type AgysBucketT = z.infer<typeof AgysBucket>
 export type AgysModeInput = { mode: "off" | "profile" | "auto"; profile?: string | null }
+
+/** Diff stats (src/diffstats.mjs's output shape) — live for a running write job, persisted for a terminal one. */
+export type DiffStatsT = z.infer<typeof DiffStats>
+export type DiffFileEntryT = z.infer<typeof DiffFileEntry>
+export type ChangedFilesMismatchT = z.infer<typeof ChangedFilesMismatch>
+export type DiffStatsResponseT = z.infer<typeof DiffStatsResponse>
 
 /**
  * Cloud view types, inferred from the shared server contracts (@shared ==

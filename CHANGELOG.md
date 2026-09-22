@@ -6,6 +6,14 @@ and this project adheres to [Semantic Versioning](https://semver.org/).
 
 ## [Unreleased]
 
+### Added
+
+- Diff stats for write-mode jobs: a GitHub-style `+X −Y · N files` summary and
+  per-file table, live on Running Jobs and persisted (survives worktree
+  deletion) on History. Measured from `git diff --numstat` against the
+  baseline HEAD captured at job start plus untracked files, read-only and
+  bounded by timeouts. New `GET /api/jobs/:id/diff-stats` endpoint.
+
 ### Fixed
 
 - agy jobs whose turn ended while the model was still "waiting" on a command

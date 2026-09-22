@@ -104,6 +104,48 @@ export const RemoteInfo = z
   })
   .passthrough()
 
+/** One entry in a computed DiffStats.files list. */
+export const DiffFileEntry = z
+  .object({
+    path: z.string(),
+    additions: z.number().int().nonnegative().nullable(),
+    deletions: z.number().int().nonnegative().nullable(),
+    binary: z.boolean(),
+  })
+  .passthrough()
+
+/** Informational comparison between a handoff's declared changedFiles and the measured diff (src/diffstats.mjs). */
+export const ChangedFilesMismatch = z
+  .object({
+    matches: z.boolean(),
+    onlyDeclared: z.array(z.string()),
+    onlyMeasured: z.array(z.string()),
+  })
+  .passthrough()
+
+/**
+ * computeDiffStats' output shape (src/diffstats.mjs): a write-mode job's
+ * measured change against its recorded `diffBase`. Every numeric field is
+ * null and `error` is set when the underlying git call failed — a stats
+ * failure degrades gracefully and never fails the job it was computed for.
+ */
+export const DiffStats = z
+  .object({
+    baseCommit: z.string().nullable(),
+    additions: z.number().int().nonnegative().nullable(),
+    deletions: z.number().int().nonnegative().nullable(),
+    filesChanged: z.number().int().nonnegative().nullable(),
+    files: z.array(DiffFileEntry),
+    truncated: z.boolean(),
+    computedAt: z.string(),
+    error: z.string().nullable().optional(),
+    changedFilesMismatch: ChangedFilesMismatch.nullable().optional(),
+  })
+  .passthrough()
+
+/** GET /api/jobs/:id/diff-stats response — live for a running write job, persisted for a terminal one. */
+export const DiffStatsResponse = z.object({ diffStats: DiffStats.nullable() }).passthrough()
+
 export const JobRecord = z
   .object({
     jobId: z.string(),
@@ -155,6 +197,11 @@ export const JobRecord = z
     profile: z.string().nullable().optional(),
     profileStatus: z.string().nullable().optional(),
     noChanges: z.boolean().optional(),
+    // job-diff-stats: baseline HEAD captured at start for a write-mode job in
+    // a git work tree (null/absent otherwise — never an error), and the
+    // final measured snapshot persisted at terminal status.
+    diffBase: z.string().nullable().optional(),
+    diffStats: DiffStats.nullable().optional(),
   })
   .passthrough()
 

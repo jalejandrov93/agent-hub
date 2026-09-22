@@ -55,6 +55,7 @@ describe("JobsView", () => {
     vi.mocked(api.getState).mockResolvedValue(stateWith([makeJob()]))
     vi.mocked(api.cancelJob).mockResolvedValue({})
     vi.mocked(api.fetchJson).mockResolvedValue(RESULT_RESPONSE)
+    vi.mocked(api.getJobDiffStats).mockResolvedValue({ diffStats: null })
   })
 
   it("renders only queued and running jobs", async () => {
@@ -129,6 +130,32 @@ describe("JobsView", () => {
     expect(screen.getByText("tail line")).toBeTruthy()
   })
 
+  it("shows diff stats and the per-file table in the detail dialog for a write-mode job", async () => {
+    vi.mocked(api.getState).mockResolvedValue(
+      stateWith([makeJob({ jobId: "job-1", title: "running-task", mode: "write" })])
+    )
+    vi.mocked(api.getJobDiffStats).mockResolvedValue({
+      diffStats: {
+        baseCommit: "abc123",
+        additions: 4,
+        deletions: 1,
+        filesChanged: 1,
+        files: [{ path: "src/a.ts", additions: 4, deletions: 1, binary: false }],
+        truncated: false,
+        computedAt: "2020-01-01T00:00:00.000Z",
+        error: null,
+      },
+    })
+
+    renderView()
+
+    fireEvent.click(await screen.findByText("running-task"))
+
+    const dialog = await screen.findByRole("dialog")
+    expect(within(dialog).getByText("+4")).toBeTruthy()
+    expect(within(dialog).getByText("src/a.ts")).toBeTruthy()
+  })
+
   it("opens the job detail dialog on row click and closes it", async () => {
     renderView()
 
@@ -176,6 +203,41 @@ describe("JobsView", () => {
 
     await screen.findByText("running-task")
     expect(screen.queryByText("Awaiting feedback")).toBeNull()
+  })
+
+  it("shows live diff stats for a running write-mode job, and nothing for a read-mode job", async () => {
+    vi.mocked(api.getState).mockResolvedValue(
+      stateWith([
+        makeJob({ jobId: "j-write", title: "write-task", mode: "write" }),
+        makeJob({ jobId: "j-read", title: "read-task", mode: "read" }),
+      ])
+    )
+    vi.mocked(api.getJobDiffStats).mockImplementation((jobId: string) =>
+      Promise.resolve({
+        diffStats:
+          jobId === "j-write"
+            ? {
+                baseCommit: "abc123",
+                additions: 7,
+                deletions: 2,
+                filesChanged: 3,
+                files: [],
+                truncated: false,
+                computedAt: "2020-01-01T00:00:00.000Z",
+                error: null,
+              }
+            : null,
+      })
+    )
+
+    renderView()
+
+    await screen.findByText("write-task")
+    expect(await screen.findByText("+7")).toBeTruthy()
+    expect(screen.getByText(/3 files$/)).toBeTruthy()
+
+    // A read-mode job never even calls the diff-stats endpoint.
+    expect(api.getJobDiffStats).not.toHaveBeenCalledWith("j-read")
   })
 
   it("renders the normal status badge for an ordinary job", async () => {

@@ -28,6 +28,7 @@ import {
   WorkGraphResponse,
   McpToolsResponse,
   AgysSnapshotResponse,
+  DiffStatsResponse,
 } from "@shared"
 import type {
   StateResponseT,
@@ -56,6 +57,7 @@ import type {
   WorkGraphResponseT,
   McpToolsResponseT,
   ExecutionGraphResponseT,
+  DiffStatsResponseT,
 } from "./types"
 
 
@@ -194,6 +196,10 @@ export function clearOverride(agent: string, model: string): Promise<unknown> {
 
 export function cancelJob(jobId: string): Promise<unknown> {
   return fetchJson(z.unknown(), `/api/jobs/${encodeURIComponent(jobId)}/cancel`, writeInit("POST"))
+}
+
+export function getJobDiffStats(jobId: string): Promise<DiffStatsResponseT> {
+  return fetchJson(DiffStatsResponse, `/api/jobs/${encodeURIComponent(jobId)}/diff-stats`)
 }
 
 export function getAccounts(): Promise<CloudAccountsResponseT> {

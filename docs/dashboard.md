@@ -34,8 +34,8 @@ routes, so a link can open the exact filtered view:
 |---|---|---|
 | Monitor | `#/overview` | What needs attention: unhealthy agents, open breakers, failures in the last 24h, unresolved CLIs, recent activity |
 | Monitor | `#/agents?filter=all\|unhealthy\|held\|breaker&q=` | Agents grouped by CLI; filter, free-text search, row menu, detail panel |
-| Monitor | `#/jobs` | Running and queued jobs with live elapsed time, job profile badge, and Cancel |
-| Monitor | `#/history?status=&agent=&q=` | Terminal jobs; `status=failed\|succeeded\|canceled`, agent filter, free-text search, error detail, job profile badge, reply chains |
+| Monitor | `#/jobs` | Running and queued jobs with live elapsed time, job profile badge, diff stats, and Cancel |
+| Monitor | `#/history?status=&agent=&q=` | Terminal jobs; `status=failed\|succeeded\|canceled`, agent filter, free-text search, error detail, job profile badge, diff stats, reply chains |
 | Monitor | `#/providers` | agys multi-account profiles, quotas, active mode toggle (`off`\|`profile`\|`auto`), and profile selector |
 | Monitor | `#/graph` | Visual execution graph lineage DAG: roots, attempts, and delegate/retry/resume edges |
 | Monitor | `#/metrics?taskType=` | Success-rate chart and per-pair table; `taskType` filters the rows |
@@ -55,6 +55,20 @@ adds Revalidate all and Rediscover CLIs. Ping, Reset breaker and Cancel job
 ask for confirmation first. The theme follows the system by default and can
 be set to light or dark. `preflight` events (`phase: discovery|agent|ping`)
 stream over the same SSE feed as job events.
+
+**Diff stats.** A write-mode job in a git work tree shows a GitHub-style
+`+X −Y · N files` summary (Running Jobs polls it live every 5s; History reads
+the persisted snapshot, so it survives worktree deletion) plus a per-file
+table in the job detail view. Read-mode and non-git jobs show nothing — no
+baseline was ever captured, and that is never an error. The measured file
+list is capped at 200 entries (`truncated: true` when more changed); the
+`+X −Y · N files` totals always reflect the true count. Additions/deletions
+come from `git diff --numstat` against the baseline HEAD captured at job
+start (so a commit the agent makes during the run is still measured) plus
+untracked files counted as additions; a binary file is reported as
+`binary: true` with 0 lines either way. When an implementation handoff
+declares `changedFiles` for the same workflow/step, an informational
+`changedFilesMismatch` is attached — it never blocks or fails anything.
 
 The UI is a React 19 + TypeScript + Vite + Tailwind v4 app in the `dashboard/`
 workspace, using shadcn/ui components on Base UI, with TanStack Router (hash
@@ -82,6 +96,7 @@ read-only from there — see Install for the build step.
 | `/events` | GET | — | SSE stream of `events.jsonl` |
 | `/api/jobs/:id/cancel` | POST | — | Cancels a running job |
 | `/api/jobs/:id/result` | GET | — | Same payload as `job_result`; `?maxLines=&tailLines=` |
+| `/api/jobs/:id/diff-stats` | GET | — | `{diffStats}`: the persisted snapshot for a terminal job, or a short-TTL-cached live computation for a running write-mode job; `null` for a read-mode or no-baseline job |
 | `/api/agents/refresh` | POST | `{agent?, model?, ping?}` | No body = all pairs, L0-L2. `ping:true` runs L3 for exactly one agent+model. |
 | `/api/discovery/refresh` | POST | — | Forces a fresh discovery pass, ignoring the TTL |
 | `/api/overrides` | POST | `{agent, model, hold?, breakerReset?:true}` | Sets a manual hold and/or clears breaker history |

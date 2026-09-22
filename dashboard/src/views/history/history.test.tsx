@@ -73,6 +73,19 @@ const MOCK_JOBS: Job[] = [
     costUsd: null,
     createdAt: "2026-09-15T01:00:00.000Z",
     updatedAt: "2026-09-15T01:01:00.000Z",
+    diffStats: {
+      baseCommit: "abc123",
+      additions: 9,
+      deletions: 4,
+      filesChanged: 2,
+      files: [
+        { path: "src/a.ts", additions: 6, deletions: 2, binary: false },
+        { path: "src/b.ts", additions: 3, deletions: 2, binary: false },
+      ],
+      truncated: false,
+      computedAt: "2026-09-15T01:01:00.000Z",
+      error: null,
+    },
   },
   {
     jobId: "job-running-1",
@@ -318,6 +331,43 @@ describe("HistoryView", () => {
       await waitFor(() => {
         const search = router.state.location.search as HistorySearchT
         expect(search.q).toBe("job-parent-001")
+      })
+    })
+  })
+
+  describe("diff stats", () => {
+    it("shows the persisted +X -Y · N files summary in the list for a write-mode job with diffStats", async () => {
+      renderHistoryView()
+
+      await waitFor(() => {
+        expect(screen.getByText("canceled-task")).toBeTruthy()
+      })
+      expect(screen.getByText("+9")).toBeTruthy()
+      expect(screen.getByText(/2 files$/)).toBeTruthy()
+    })
+
+    it("shows nothing in the Changes column for a job without diffStats", async () => {
+      renderHistoryView()
+
+      await waitFor(() => {
+        expect(screen.getByText("succeeded-task")).toBeTruthy()
+      })
+      // Only canceled-task has a persisted diffStats snapshot — exactly one
+      // "+N" summary should render across every row in the table.
+      expect(screen.getAllByText(/^\+\d+$/)).toHaveLength(1)
+    })
+
+    it("shows the per-file table in the Sheet detail for a job with diffStats", async () => {
+      renderHistoryView()
+
+      await waitFor(() => {
+        expect(screen.getByText("canceled-task")).toBeTruthy()
+      })
+      fireEvent.click(screen.getByText("canceled-task"))
+
+      await waitFor(() => {
+        expect(screen.getByText("src/a.ts")).toBeTruthy()
+        expect(screen.getByText("src/b.ts")).toBeTruthy()
       })
     })
   })
