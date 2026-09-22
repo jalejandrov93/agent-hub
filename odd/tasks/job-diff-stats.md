@@ -97,7 +97,10 @@ triggers: jobrunner, jobstore, schemas, dashboard server and UI).
 
 ## Progress / next step
 
-- Next: none — C1, C2, C3 all done. Feature complete on branch
-  `feat/job-diff-stats`; no push/PR performed (writer scope).
-- Queued after this feature (separate): D — hub-side verification for agy
-  jobs (agy never runs tests) + keep `incomplete` detection.
+- C1–C3 done. Parent spot check: `npm test` 1495/1495.
+- RDD: medium (22 files, 1770 lines); candidate consent relayed, user chose
+  "skip this time" -> declined (`declined_this_candidate`). Off-path tier
+  medium: writer self-verification + parent spot check.
+- Delivery: single PR to main, merged at the user's request.
+- Next: none for this feature. Queued (separate): D — hub-side verification
+  for agy jobs (agy never runs tests) + keep `incomplete` detection.
