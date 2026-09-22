@@ -12,6 +12,7 @@ import { takeSnapshot as defaultTakeSnapshot, diffSnapshots as defaultDiffSnapsh
 import { startRemoteJob as defaultStartRemoteJob } from './cloud/runner.mjs'
 import { resolveAgyCommand, profileFromEnv, resolveAgyProfileSync as defaultResolveAgyProfileSync, recordQuotaExhaustion as defaultRecordQuotaExhaustion } from './providers/agys.mjs'
 import { modelGroupFor } from './providers/profiles.mjs'
+import { captureDiffBase as defaultCaptureDiffBase } from './diffstats.mjs'
 
 // jobId -> { pgid, leaseToken, heartbeatTimer, leaseTtlMs } for jobs still
 // running in THIS process. Used by cancelJob for an immediate kill; the
@@ -137,6 +138,8 @@ export function startJob({
   // record and events, never gates/locks/routes — see harness/registry.mjs).
   harness = null,
   waitMode = null,
+  // job-diff-stats: injectable so tests never shell out to a real git binary.
+  captureDiffBaseFn = defaultCaptureDiffBase,
 }) {
   // Resolved BEFORE anything else — including learnings/timeout/createJob —
   // because a remote adapter (Jules) edits a branch on GitHub via its own
@@ -277,6 +280,18 @@ export function startJob({
       }
       leaseToken = lock.token
     }
+  }
+
+  // job-diff-stats: baseline HEAD, captured synchronously before the CLI
+  // spawns so a later `git diff --numstat <base>` also sees any commit the
+  // agent itself makes during the run. Only for write mode, and only when
+  // cwd is actually a git work tree with at least one commit — every other
+  // case (read mode, non-git cwd, no commits yet) silently stays null, per
+  // this feature's "no baseline -> no stats, no error" contract.
+  let diffBase = null
+  if (mode === 'write') {
+    diffBase = captureDiffBaseFn({ cwd, env })
+    if (diffBase) updateResult(job.jobId, { diffBase }, env)
   }
 
   const adapterArgs = { model, prompt: effectiveTask, cwd, mode, title, variant: effectiveVariant, timeoutS: effectiveTimeoutS, sessionId, env }
