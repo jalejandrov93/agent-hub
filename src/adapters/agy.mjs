@@ -4,16 +4,40 @@ export const id = 'agy'
 export const cmd = 'agy'
 
 /**
+ * D1 (agy-hub-verification): agy 1.2.8's `run_command` auto-detaches a slow
+ * command into a background task and its own `-p` idle-exit kills it while
+ * still reporting SUCCESS (upstream google-antigravity/antigravity-cli
+ * #1044, #1076 -- no flag to disable). The hub therefore never lets agy run
+ * tests, builds, dev servers or installs itself; it writes the code (and a
+ * RED test, unexecuted) and the hub runs verification afterwards in the
+ * foreground (see src/verify.mjs, docs/verification.md). This text is fixed
+ * and hub-owned -- never interpolated with per-call prose -- and is injected
+ * at exactly one place: buildArgv below, for agy only.
+ */
+export const AGY_GUARD_BLOCK =
+  'Hub instructions (do not deviate): Do not run tests, builds, dev servers, package installs, ' +
+  'or any other long-running command yourself -- your CLI silently kills and abandons such commands ' +
+  'while still reporting success. Write the code and its tests only: a RED test is written, never ' +
+  'executed. The hub runs verification itself, in the foreground, after this job ends.'
+
+/**
  * Argv only, never a shell — the prompt is one argv element. agy 1.2.1's
  * --mode only accepts 'plan' or 'accept-edits' (not 'read'/'write'), so the
  * hub's own read/write mode is mapped here, not passed through verbatim.
  * --output-format stream-json (not the legacy single-line 'json') is what
  * lets parseResult/classifyError see partial text_delta output even when a
  * turn is abandoned by agy's own --print-timeout.
+ *
+ * `guard` (default true) prepends AGY_GUARD_BLOCK to the prompt. The only
+ * sanctioned opt-out (`guard: false`) is an internal, non-user-visible flag
+ * for a read-only probe that never asks agy to write or run anything (e.g.
+ * preflight.mjs's pingAgent) -- every real job (delegate/dispatch/workflow),
+ * which all reach this function through jobrunner.mjs's startJob, gets it.
  */
-export function buildArgv({ model, prompt, cwd, mode = 'read', sessionId, timeoutS }) {
+export function buildArgv({ model, prompt, cwd, mode = 'read', sessionId, timeoutS, guard = true }) {
   const agyMode = mode === 'write' ? 'accept-edits' : 'plan'
-  const args = ['-p', prompt, '--output-format', 'stream-json', '--model', model, '--mode', agyMode, '--add-dir', cwd, '--dangerously-skip-permissions']
+  const effectivePrompt = guard === false ? prompt : `${AGY_GUARD_BLOCK}\n\n${prompt}`
+  const args = ['-p', effectivePrompt, '--output-format', 'stream-json', '--model', model, '--mode', agyMode, '--add-dir', cwd, '--dangerously-skip-permissions']
   if (timeoutS) args.push('--print-timeout', `${timeoutS}s`)
   if (sessionId) args.push('--conversation', sessionId)
   return args

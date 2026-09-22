@@ -6,6 +6,7 @@ import os from 'node:os'
 import { EventEmitter } from 'node:events'
 import { fileURLToPath } from 'node:url'
 import { adapterFor } from '../src/adapters/index.mjs'
+import { AGY_GUARD_BLOCK } from '../src/adapters/agy.mjs'
 
 const AGY_QUOTA_FIXTURE = fs.readFileSync(
   path.join(path.dirname(fileURLToPath(import.meta.url)), 'fixtures', 'agy', 'stream-quota-error.jsonl'),
@@ -67,7 +68,10 @@ test('startJob wraps agy in agys when AGENT_HUB_AGYS_PROFILE is set', async () =
   // The -low suffix becomes an explicit --effort so agys does not inject its own.
   assert.ok(captured[0].args.includes('gemini-3.8-flash'))
   assert.deepEqual(captured[0].args.slice(captured[0].args.indexOf('--effort'), captured[0].args.indexOf('--effort') + 2), ['--effort', 'low'])
-  assert.ok(captured[0].args.includes('say hello'))
+  // D1: a real agy job's prompt carries the hub-owned guard block prepended
+  // to the original task text (coexistence with the agys profile wrapping).
+  const promptArg = captured[0].args[captured[0].args.indexOf('-p') + 1]
+  assert.equal(promptArg, `${AGY_GUARD_BLOCK}\n\nsay hello`)
 
   const record = jobstore.readResult(job.jobId)
   assert.equal(record.profile, 'work')

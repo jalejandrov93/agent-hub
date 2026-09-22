@@ -205,6 +205,12 @@ test('pingAgent (L3) runs the real argv and classifies a successful PONG as read
   const entry = await pingAgent({ agent: 'agy', model: 'gemini-3.8-flash-low', cwd: '/tmp', commandRunner: runner })
   assert.equal(entry.status, 'ready')
   assert.equal(entry.ladderLevel, 'L3')
+
+  // D1: the agy prompt guard is opted out for a read-only probe -- the ping
+  // must travel the exact same path as a real job except for this one
+  // explicit internal flag (see pingAgent's own "SAME path" comment).
+  const promptArg = runner.calls[0].args[runner.calls[0].args.indexOf('-p') + 1]
+  assert.equal(promptArg, 'Reply exactly: PONG', 'a preflight ping must never carry the agy prompt guard block')
 })
 
 test('pingAgent (L3) marks unavailable when the CLI reports CANCELED', async () => {
