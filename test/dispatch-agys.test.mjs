@@ -257,6 +257,32 @@ test('the memo: dispatch retry re-running agy candidate calls resolveProfileFn a
   }
 })
 
+test('dispatch asks resolveProfileFn to reserve:true for its auto pick (T2 burst spreading, same rationale as jobrunner)', async () => {
+  const { env, cleanup } = makeTempHome()
+  try {
+    const mockStartJob = async () => ({ job: { jobId: 'j-reserve', status: 'queued' }, done: Promise.resolve() })
+    let receivedReserve = 'NOT_CALLED'
+    const fakeResolveProfile = async ({ reserve }) => {
+      receivedReserve = reserve
+      return { profile: 'work', status: 'selected' }
+    }
+
+    await dispatch({
+      task: 'test-dispatch-reserve',
+      taskType: 'recon',
+      cwd: '/tmp/test-dispatch-reserve',
+      env,
+      startJobFn: mockStartJob,
+      resolveProfileFn: fakeResolveProfile,
+      ...fakeRoute({ agent: 'agy', model: 'gemini-3.8-flash' }),
+    })
+
+    assert.equal(receivedReserve, true)
+  } finally {
+    cleanup()
+  }
+})
+
 test('the memo: dispatch fallback re-running agy candidate calls resolveProfileFn at most once', async () => {
   const { env, cleanup } = makeTempHome()
   try {

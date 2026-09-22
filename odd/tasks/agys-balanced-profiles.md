@@ -40,7 +40,7 @@ T4 additionally touches: src/router.mjs (codex fallback ordering in `triage`/`me
 ## Tasks
 
 - [x] T1 Explicit `profile` input on `delegate` and `dispatch` (validate against agys list, `profileStatus: 'pinned'`, error on unknown). Route: delegated writer (2+ non-trivial files).
-- [ ] T2 Load-aware quota rotation in profile selection (in-flight penalty + least-recently-assigned tie-break; cache only the quota snapshot). Route: delegated writer.
+- [x] T2 Load-aware quota rotation in profile selection (in-flight penalty + least-recently-assigned tie-break; cache only the quota snapshot). Route: delegated writer.
 - [ ] T3 CHANGELOG + tool docs; full `npm test`.
 - [ ] T4 (added 2026-09-22, user-approved) Quota-gated codex routing: gate codex (agent 'codex', model 'default', last fallback in `triage`/`mechanical-edit` per src/config.mjs tier 'limited') on its own plan quota from CodexBar (src/quota/codexbar.mjs + src/quota/mapping.mjs). Pure, unit-tested rule, e.g. `src/routing/codex-gate.mjs`:
   - remaining = 100 - usedPercent of the most-constrained window (primary, and secondary if present).
@@ -74,8 +74,17 @@ T4 additionally touches: src/router.mjs (codex fallback ordering in `triage`/`me
   - `delegate`/`dispatch` MCP tool schemas (src/index.mjs) gained an optional `profile` string input with the documented description; wired through to the tool handlers.
   - Design note: mode 'off' + explicit profile -> explicit profile is authoritative (dispatch's pinned branch never consults `getAgysMode`), covered by an explicit test.
   - Full `npm test`: 1404/1404 pass.
+  - Commit: `d99fd48` feat(agys): accept an explicit profile on delegate and dispatch.
+
+- T2 done (2026-09-22). Route: delegated writer (this agent), TDD RED->GREEN observed per behaviour.
+  - `src/providers/profiles.mjs`: added `LOAD_PENALTY = 0.15` (each in-flight job costs 15 percentage points of headroom) and a pure `scoreProfile(remainingQuota, inFlight, loadPenalty)`; `selectProfile` gained `inFlightByProfile`/`lastAssignedByProfile` params (both default `{}`, so any caller that omits them keeps byte-identical pre-T2 ordering) and now sorts by score (falling back to least-recently-assigned, then priority, then name on a near-tie within 1e-9) — RED: `SyntaxError: ... does not provide an export named 'scoreProfile'`; GREEN: test/providers-agys.test.mjs 58/58, including the 0.85/0.30/0.29 break-even math from the design doc (A keeps winning through 3 in-flight jobs, loses to B at the 4th).
+  - `src/providers/agys.mjs`: added `computeAgyLoadContext` (job-store-derived `inFlightByProfile`/`lastAssignedByProfile`, scoped to one model group; running/queued only; folds in-process reservations) and `reserveAgyLoadSlot`/`resetAgyLoadReservations`/`AGY_LOAD_RESERVATION_TTL_MS` (10s) for the same-tick burst race. `resolveAgyProfileSync` and `resolveAgyProfile` (async) both now cache ONLY the agys list+quota snapshot (60s TTL, unchanged) and recompute the pick — including load context — on every call; both gained `listJobsFn`/`reservations`/`reserve` params, `reserve` defaulting to **false** (a pick-only/informational caller like router.mjs must never reserve, or it would bias the next real selection) — RED: new export errors then a failing burst-spread assertion (`1 !== 2`); GREEN: test/providers-agys.test.mjs 64/64.
+  - `src/jobrunner.mjs` (`startJob`) and `src/dispatch.mjs` (`dispatch`'s per-group memo resolution) now pass `reserve: true` to the auto-pick resolver call — RED: `receivedReserve === undefined`; GREEN: test/jobrunner-agys.test.mjs 14/14 (incl. a real, unmocked 3-calls-3-profiles test) and test/dispatch-agys.test.mjs 15/15.
+  - `router.mjs` untouched: its informational `_resolveAgyProfileSync` call keeps the `reserve: false` default, so annotation-only lookups never bias a later real pick.
+  - Design decisions / deviations from the doc: (1) reservation is opt-in per call (`reserve` flag) rather than automatic inside the resolver, specifically to protect router.mjs's annotation-only call from polluting shared state — the doc's wording ("small in-process reservation map... released on terminal state or after a short TTL") is satisfied via TTL-only expiry (10s), no explicit release-on-terminal wiring, since createJob() persists synchronously and the job-store count takes over almost immediately. (2) LOAD_PENALTY kept at the suggested 0.15. (3) `listJobsFn`/`reservations` are injectable on both resolvers to keep tests off the real `~/.local/share/agent-hub` state (this machine has real, live job history — several pre-existing tests that pass `model` without `AGENT_HUB_HOME` needed an explicit `listJobsFn: () => []` to stay isolated; documented inline at each call site).
+  - Full `npm test`: 1419/1419 pass (was 1404 after T1; +15).
   - Commit: (recorded after this commit is created).
 
 ## Next step
 
-T2 (load-aware quota rotation) via one delegated writer, then T3, then T4 (user-approved 2026-09-22).
+T3 (CHANGELOG + docs) via one delegated writer, then T4 (user-approved 2026-09-22).

@@ -209,7 +209,10 @@ export function startJob({
       effectiveProfile = profile
       effectiveProfileStatus = profileStatus ?? 'selected'
     } else {
-      const resolved = resolveAgyProfileSyncFn({ env, model })
+      // reserve:true — this pick is actually about to start a job, so it must
+      // reserve a same-tick load slot (T2 burst spreading); an
+      // informational-only caller (e.g. router.mjs's annotation) must not.
+      const resolved = resolveAgyProfileSyncFn({ env, model, reserve: true })
       effectiveProfile = resolved?.profile ?? null
       effectiveProfileStatus = effectiveProfile ? (resolved?.status ?? 'selected') : null
     }

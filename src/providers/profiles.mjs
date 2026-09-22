@@ -222,6 +222,46 @@ export function profileStateFor({ profile, quotaEntry = null, errorClass = null,
   return 'fallback'
 }
 
+// Each in-flight job on a profile costs 0.15 (15 percentage points) of its
+// remaining-quota headroom in the load-aware score. Chosen so that a burst of
+// same-quota jobs spreads across accounts immediately (a single in-flight job
+// is already enough to flip a tie), while a profile with meaningfully more
+// quota (e.g. +0.5 headroom) still wins several jobs in a row before a
+// similar-quota idle profile becomes more attractive — see the T2 tests in
+// test/providers-agys.test.mjs for the exact break-even math.
+export const LOAD_PENALTY = 0.15
+
+/**
+ * Pure load-aware score for one profile: its remaining quota headroom (0..1)
+ * minus a penalty per in-flight job it is already juggling in the same model
+ * group. Returns null (never a number) when remainingQuota is null/unknown,
+ * so the caller's sort keeps sorting "unknown quota" profiles last exactly
+ * like plain remainingQuota did before load-awareness existed.
+ */
+export function scoreProfile(remainingQuota, inFlight = 0, loadPenalty = LOAD_PENALTY) {
+  if (remainingQuota == null) return null
+  const safeInFlight = Number.isFinite(inFlight) ? inFlight : 0
+  return remainingQuota - loadPenalty * safeInFlight
+}
+
+// Two scores this close are treated as an exact tie (floating-point rounding
+// noise from quota fraction math), not a real ranking difference.
+const SCORE_TIE_EPSILON = 1e-9
+
+/**
+ * Ascending "least-recently-assigned" comparator: a profile with no recorded
+ * assignment (never used for this model group) sorts as the OLDEST possible
+ * assignment, so it wins a tie over any profile that was assigned at all.
+ */
+function byLastAssigned(a, b, lastAssignedByProfile) {
+  const rawA = lastAssignedByProfile?.[a.normalized.name]
+  const rawB = lastAssignedByProfile?.[b.normalized.name]
+  const ta = typeof rawA === 'number' && Number.isFinite(rawA) ? rawA : -Infinity
+  const tb = typeof rawB === 'number' && Number.isFinite(rawB) ? rawB : -Infinity
+  if (ta === tb) return 0
+  return ta - tb
+}
+
 function lastUsedRank(profile, usage) {
   const rawTs = usage?.lastUsedAt ?? profile?.lastUsedAt
   const parsed = rawTs ? Date.parse(rawTs) : NaN
@@ -249,12 +289,26 @@ function usageCount(usage) {
  * If viable candidates exist, dead profiles are never selected.
  *
  * When `model` is given, selection ignores `policy` and instead picks the
- * viable profile with the most remaining quota in that model's group
- * (headroom = min remainingFraction across the group's windows, read from
- * each profile's `.quotaEntry`), tie-broken by priority then name. A profile
- * with no readable quota data sorts after every profile with known headroom.
+ * viable profile with the highest load-aware SCORE for that model's group:
+ * `score = remainingQuota - LOAD_PENALTY * inFlight` (see scoreProfile()).
+ * `inFlightByProfile` (profileName -> count of jobs currently running/queued
+ * on it, already scoped to this model's group by the caller) and
+ * `lastAssignedByProfile` (profileName -> most recent assignment timestamp
+ * in that group) default to {}, which reduces the score to plain
+ * remainingQuota and the tie-break to priority-then-name — byte-identical to
+ * selectProfile()'s pre-T2 behaviour for any caller that does not pass them.
+ * Two scores within SCORE_TIE_EPSILON tie-break by least-recently-assigned,
+ * then priority, then name. A profile with no readable quota data (null
+ * score) sorts after every profile with a known score, regardless of load.
  */
-export function selectProfile({ profiles = [], policy = 'priority', usageByProfile = {}, model = null }) {
+export function selectProfile({
+  profiles = [],
+  policy = 'priority',
+  usageByProfile = {},
+  model = null,
+  inFlightByProfile = {},
+  lastAssignedByProfile = {},
+}) {
   if (!Array.isArray(profiles) || profiles.length === 0) return null
   if (!POLICIES.includes(policy)) throw new Error(`invalid policy: ${policy}`)
 
@@ -263,12 +317,16 @@ export function selectProfile({ profiles = [], policy = 'priority', usageByProfi
     const state = p?.state ?? profileStateFor({ profile: norm, quotaEntry: p?.quotaEntry ?? null, model })
     const usage = usageByProfile[norm.name] ?? usageByProfile[p?.id] ?? null
     const remainingQuota = model != null ? remainingQuotaForModel(p?.quotaEntry ?? null, model) : null
+    const inFlight = inFlightByProfile?.[norm.name] ?? 0
+    const score = model != null ? scoreProfile(remainingQuota, inFlight) : null
     return {
       profile: p,
       normalized: norm,
       state,
       usage,
       remainingQuota,
+      inFlight,
+      score,
     }
   })
 
@@ -278,14 +336,17 @@ export function selectProfile({ profiles = [], policy = 'priority', usageByProfi
 
   const sorted = pool.slice()
   if (model != null) {
-    // Quota-aware selection: most remaining headroom in the job's model
-    // group wins; unknown headroom (no quotaEntry / no data for that group)
-    // sorts last, priority then name break ties.
+    // Load-aware selection: highest score (remaining headroom minus in-flight
+    // penalty) in the job's model group wins; unknown headroom (null score)
+    // sorts last; a near-tie breaks by least-recently-assigned, then
+    // priority, then name.
     sorted.sort((a, b) => {
-      if (a.remainingQuota == null && b.remainingQuota == null) return byPriority(a, b) || byName(a, b)
-      if (a.remainingQuota == null) return 1
-      if (b.remainingQuota == null) return -1
-      return b.remainingQuota - a.remainingQuota || byPriority(a, b) || byName(a, b)
+      if (a.score == null && b.score == null) return byLastAssigned(a, b, lastAssignedByProfile) || byPriority(a, b) || byName(a, b)
+      if (a.score == null) return 1
+      if (b.score == null) return -1
+      const diff = b.score - a.score
+      if (Math.abs(diff) < SCORE_TIE_EPSILON) return byLastAssigned(a, b, lastAssignedByProfile) || byPriority(a, b) || byName(a, b)
+      return diff
     })
   } else if (policy === 'least_used') {
     sorted.sort(

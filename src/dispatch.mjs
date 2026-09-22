@@ -850,7 +850,10 @@ export async function dispatch({
           const memoKey = `${candidate.agent}:${modelGroupFor(candidate.model) ?? 'unknown'}`
           if (!profileMemo.has(memoKey)) {
             try {
-              const res = await resolveProfileFn({ env, model: candidate.model })
+              // reserve:true — this pick is actually about to start a job, so
+              // it must reserve a same-tick load slot (T2 burst spreading);
+              // see the matching comment in jobrunner.mjs's startJob.
+              const res = await resolveProfileFn({ env, model: candidate.model, reserve: true })
               if (res && typeof res === 'object') {
                 const p = typeof res.profile === 'string' && res.profile.trim() !== '' ? res.profile.trim() : null
                 const s = typeof (res.profileStatus ?? res.status) === 'string' && (res.profileStatus ?? res.status).trim() !== ''
