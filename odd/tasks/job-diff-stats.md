@@ -64,9 +64,15 @@ see how much work a job did or is doing.
   (test/diffstats.test.mjs) and `AssertionError: undefined !== '<sha>'`
   (test/jobrunner-diffstats.test.mjs). GREEN: 13/13 (diffstats.test.mjs) +
   3/3 (jobrunner-diffstats.test.mjs); full `npm test` 1475/1475 pass.
-- [ ] C2 — Persist final snapshot on terminal job status; expose live and
+- [x] C2 — Persist final snapshot on terminal job status; expose live and
   final stats through the dashboard API (shared zod contract); changedFiles
   mismatch flag. Tests.
+  Commit: `6cb1152`. RED: `assert.ok(finalRecord.diffStats)` failing
+  (undefined) on finishJob/cancelJob persistence tests, `TypeError:
+  getJobDiffStats is not a function`, and the dashboard route tests all
+  404ing. GREEN: 11/11 (jobrunner-diffstats.test.mjs), 4/4
+  (dashboard-diffstats.test.mjs), 21/21 (diffstats.test.mjs); full
+  `npm test` 1495/1495 pass.
 - [ ] C3 — Dashboard UI: `+X −Y · N files` on job rows/cards, per-file
   table in job detail. Tests + typecheck + build. Docs section.
 
@@ -83,6 +89,6 @@ triggers: jobrunner, jobstore, schemas, dashboard server and UI).
 
 ## Progress / next step
 
-- Next: C2.
+- Next: C3.
 - Queued after this feature (separate): D — hub-side verification for agy
   jobs (agy never runs tests) + keep `incomplete` detection.
