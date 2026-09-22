@@ -3,13 +3,15 @@ import assert from 'node:assert/strict'
 import fs from 'node:fs'
 import path from 'node:path'
 import { fileURLToPath } from 'node:url'
-import { buildArgv, parseResult, classifyError, listModels } from '../../src/adapters/agy.mjs'
+import { buildArgv, parseResult, classifyError, listModels, AGY_GUARD_BLOCK } from '../../src/adapters/agy.mjs'
 
 const FIXTURES = path.join(path.dirname(fileURLToPath(import.meta.url)), '..', 'fixtures', 'agy')
 const read = (name) => fs.readFileSync(path.join(FIXTURES, name), 'utf8')
 
 test('buildArgv maps read mode to --mode plan, with stream-json output (agy only accepts plan|accept-edits)', () => {
-  const argv = buildArgv({ model: 'gemini-3.8-flash-low', prompt: 'Reply exactly: PONG', cwd: '/repo', mode: 'read' })
+  // guard:false isolates this test from the D1 prompt-guard prefix (tested
+  // separately below) so it keeps verifying only the flag mapping.
+  const argv = buildArgv({ model: 'gemini-3.8-flash-low', prompt: 'Reply exactly: PONG', cwd: '/repo', mode: 'read', guard: false })
   assert.deepEqual(argv, [
     '-p',
     'Reply exactly: PONG',
@@ -23,6 +25,27 @@ test('buildArgv maps read mode to --mode plan, with stream-json output (agy only
     '/repo',
     '--dangerously-skip-permissions',
   ])
+})
+
+test('buildArgv prepends the hub-owned AGY_GUARD_BLOCK to the prompt by default (D1: agy must never run tests/builds/servers itself)', () => {
+  const argv = buildArgv({ model: 'gemini-3.8-flash-low', prompt: 'Implement the feature', cwd: '/repo', mode: 'write' })
+  const promptArg = argv[argv.indexOf('-p') + 1]
+  assert.ok(promptArg.startsWith(AGY_GUARD_BLOCK), 'guard block must be prepended')
+  assert.ok(promptArg.endsWith('Implement the feature'), 'the original task text must still be present, unaltered')
+  assert.notEqual(promptArg, 'Implement the feature')
+})
+
+test('buildArgv omits the guard block when guard:false is passed (internal opt-out for read-only probes, e.g. preflight pings)', () => {
+  const argv = buildArgv({ model: 'gemini-3.8-flash-low', prompt: 'Reply exactly: PONG', cwd: '/repo', mode: 'read', guard: false })
+  const promptArg = argv[argv.indexOf('-p') + 1]
+  assert.equal(promptArg, 'Reply exactly: PONG')
+})
+
+test('AGY_GUARD_BLOCK is a fixed, hub-owned text (no prose drift): forbids tests/builds/servers, allows writing a RED test', () => {
+  assert.match(AGY_GUARD_BLOCK, /do not run/i)
+  assert.match(AGY_GUARD_BLOCK, /test/i)
+  assert.match(AGY_GUARD_BLOCK, /build/i)
+  assert.match(AGY_GUARD_BLOCK, /server/i)
 })
 
 test('buildArgv maps write mode to --mode accept-edits', () => {

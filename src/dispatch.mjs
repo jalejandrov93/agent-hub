@@ -11,6 +11,7 @@ import { resolveEffectiveTimeoutS } from './timeouts.mjs'
 import { ADAPTIVE_TIMEOUT } from './config.mjs'
 import { classifyError } from './policy/taxonomy.mjs'
 import { adapterFor as defaultAdapterFor } from './adapters/index.mjs'
+import { normalizeVerifyCheck } from './verify.mjs'
 import { cancelJob as defaultCancelJob } from './jobrunner.mjs'
 import { resolveHarness, normalizeWaitMode } from './harness/registry.mjs'
 import { resolveAgyProfile, listAgysProfiles, isAgysAvailable } from './providers/agys.mjs'
@@ -406,6 +407,12 @@ export async function dispatch({
   // mode 'off' (see the pinned-profile branch below, which never consults
   // resolveProfileFn/getAgysMode).
   profile: pinnedProfile = null,
+  // D2 (agy-hub-verification): optional hub-run verification checks, same
+  // shapes as src/verify.mjs's normalizeVerifyCheck. Validated below before
+  // any route/breaker/reservation state changes ("fails fast before
+  // dispatch"), then forwarded to startJobFn untouched — jobrunner.mjs's
+  // startJob does the canonical normalization and persists it on the record.
+  verify = null,
   listAgysProfilesFn = listAgysProfiles,
   isAgysAvailableFn = isAgysAvailable,
   createJobFn = createJob,
@@ -425,6 +432,12 @@ export async function dispatch({
   cancelJobFn = defaultCancelJob,
   ...restDeps
 } = {}) {
+  // D2: reject an invalid verify check before any state (breaker checks,
+  // reservation, dedup cache) is touched.
+  if (Array.isArray(verify) && verify.length > 0) {
+    verify.forEach(normalizeVerifyCheck)
+  }
+
   const profileMemo = new Map()
   const resolvedWorkflowId = workflowId ?? restDeps.workflowId ?? restDeps.workflow_id ?? null
   const key = dispatchKey ?? computeDispatchKey({ task, cwd, taskType, workflowStep, workflowId: resolvedWorkflowId })
@@ -893,6 +906,7 @@ export async function dispatch({
           resumed: activeCtx.resumed,
           env,
           ...restDeps,
+          verify,
           profile,
           profileStatus,
           // Resolved contract always wins over caller extras.

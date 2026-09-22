@@ -7,7 +7,8 @@ import {
   VERIFY_CHECK_KINDS,
   normalizeVerifyCheck,
   normalizeVerifyConfig,
-  runVerification
+  runVerification,
+  runJobVerification
 } from '../src/verify.mjs'
 import { writeArtifact } from '../src/artifacts.mjs'
 
@@ -612,5 +613,135 @@ test('runVerification: schema check cases (a) valid passes, (b) invalid fails wi
     schema: 'BaseHandoff',
     errors: []
   })
+})
+
+// D2 (agy-hub-verification): delegate/dispatch's job-level verification.
+// runJobVerification is the ONLY caller-facing entry point for that use
+// case; it reuses normalizeVerifyCheck for validation and the same argv
+// execution primitive runVerification's argv branch uses (never a second
+// verifier), but shapes each result as {name, ok, exitCode, durationMs,
+// outputTail} — the job-record shape delegate/dispatch/job_result expose.
+
+test('runJobVerification: returns null for no checks (undefined, null, or empty array)', async () => {
+  assert.equal(await runJobVerification({ checks: undefined }), null)
+  assert.equal(await runJobVerification({ checks: null }), null)
+  assert.equal(await runJobVerification({ checks: [] }), null)
+})
+
+test('runJobVerification: validates checks via normalizeVerifyCheck and throws fast on an invalid one, before running anything', async () => {
+  let ran = false
+  const fakeRunCommand = async () => {
+    ran = true
+    return { stdout: '', stderr: '', code: 0, timedOut: false }
+  }
+  await assert.rejects(
+    () =>
+      runJobVerification({
+        checks: [
+          { name: 'ok', argv: ['npm', 'test'] },
+          { name: 'bad', argv: [] }
+        ],
+        cwd: '/repo',
+        runCommandFn: fakeRunCommand
+      }),
+    /argv must be a non-empty array of non-empty strings/
+  )
+  assert.equal(ran, false, 'no check may run once any check in the batch is invalid')
+})
+
+test('runJobVerification: runs argv checks in the job cwd by default, records ok/exitCode/durationMs/outputTail, and ok is the AND of every check', async () => {
+  const calls = []
+  const fakeRunCommand = async (cmd, args, options) => {
+    calls.push({ cmd, args, options })
+    if (cmd === 'npm') return { stdout: 'all tests passed\n', stderr: '', code: 0, timedOut: false }
+    return { stdout: '', stderr: 'lint failed on 2 files\n', code: 1, timedOut: false }
+  }
+
+  const result = await runJobVerification({
+    checks: [
+      { name: 'tests', argv: ['npm', 'test'] },
+      { name: 'lint', argv: ['eslint', '.'] }
+    ],
+    cwd: '/job/cwd',
+    runCommandFn: fakeRunCommand
+  })
+
+  assert.equal(result.ok, false)
+  assert.equal(result.checks.length, 2)
+
+  assert.equal(result.checks[0].name, 'tests')
+  assert.equal(result.checks[0].ok, true)
+  assert.equal(result.checks[0].exitCode, 0)
+  assert.equal(typeof result.checks[0].durationMs, 'number')
+  assert.ok(result.checks[0].durationMs >= 0)
+  assert.match(result.checks[0].outputTail, /all tests passed/)
+
+  assert.equal(result.checks[1].name, 'lint')
+  assert.equal(result.checks[1].ok, false)
+  assert.equal(result.checks[1].exitCode, 1)
+  assert.match(result.checks[1].outputTail, /lint failed/)
+
+  // job cwd is the default when a check has no explicit cwd of its own.
+  assert.equal(calls[0].options.cwd, '/job/cwd')
+  assert.equal(calls[1].options.cwd, '/job/cwd')
+})
+
+test('runJobVerification: a per-check cwd overrides the job cwd default', async () => {
+  const calls = []
+  const fakeRunCommand = async (cmd, args, options) => {
+    calls.push(options)
+    return { stdout: '', stderr: '', code: 0, timedOut: false }
+  }
+  await runJobVerification({
+    checks: [{ name: 'tests', argv: ['npm', 'test'], cwd: '/other/dir' }],
+    cwd: '/job/cwd',
+    runCommandFn: fakeRunCommand
+  })
+  assert.equal(calls[0].cwd, '/other/dir')
+})
+
+test('runJobVerification: a timed-out check is not ok and never a shell (argv passed through untouched)', async () => {
+  const calls = []
+  const fakeRunCommand = async (cmd, args, options) => {
+    calls.push({ cmd, args, options })
+    return { stdout: '', stderr: '', code: null, timedOut: true }
+  }
+  const result = await runJobVerification({
+    checks: [{ name: 'slow', argv: ['sleep', '999'] }],
+    cwd: '/job/cwd',
+    runCommandFn: fakeRunCommand
+  })
+  assert.equal(result.ok, false)
+  assert.equal(result.checks[0].ok, false)
+  assert.equal(result.checks[0].exitCode, null)
+  assert.equal(calls[0].cmd, 'sleep')
+  assert.deepEqual(calls[0].args, ['999'])
+})
+
+test('runJobVerification: outputTail is bounded and keeps the END of long output (failures usually surface at the tail)', async () => {
+  const longOutput = 'x'.repeat(10_000) + 'THE_REAL_FAILURE_REASON'
+  const fakeRunCommand = async () => ({ stdout: longOutput, stderr: '', code: 1, timedOut: false })
+  const result = await runJobVerification({
+    checks: [{ name: 'tests', argv: ['npm', 'test'] }],
+    cwd: '/job/cwd',
+    runCommandFn: fakeRunCommand
+  })
+  assert.ok(result.checks[0].outputTail.length < longOutput.length)
+  assert.match(result.checks[0].outputTail, /THE_REAL_FAILURE_REASON$/)
+})
+
+test('runJobVerification: a non-argv check (artifact) still runs via the shared runVerification path and shapes into {ok, exitCode:null, durationMs:null, outputTail:null}', async () => {
+  const env = makeTempEnv()
+  writeArtifact({ workflowId: 'wf-job', stepId: 'step-1', name: 'output.json', content: '{}' }, env)
+
+  const result = await runJobVerification({
+    checks: [{ name: 'evidence', artifact: 'output.json' }],
+    cwd: '/job/cwd',
+    workflowId: 'wf-job',
+    stepId: 'step-1',
+    env
+  })
+  assert.equal(result.ok, true)
+  assert.deepEqual(result.checks[0], { name: 'evidence', ok: true, exitCode: null, durationMs: null, outputTail: null })
 })
 

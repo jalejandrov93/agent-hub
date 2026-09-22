@@ -146,6 +146,55 @@ export const DiffStats = z
 /** GET /api/jobs/:id/diff-stats response — live for a running write job, persisted for a terminal one. */
 export const DiffStatsResponse = z.object({ diffStats: DiffStats.nullable() }).passthrough()
 
+/**
+ * D2 (agy-hub-verification): input shape for delegate/dispatch's optional
+ * `verify` array — mirrors src/verify.mjs's normalizeVerifyCheck (argv kind
+ * at minimum; artifact/diff/schema also accepted). The MCP tool validates
+ * against this shape, then normalizeVerifyCheck validates again (fails fast,
+ * before the job is ever created) so the two never drift.
+ */
+export const VerifyCheckInput = z
+  .object({
+    name: z.string().min(1),
+    argv: z.array(z.string().min(1)).min(1).optional(),
+    expectExitCode: z.number().int().optional(),
+    cwd: z.string().optional(),
+    timeoutS: z.number().int().positive().optional(),
+    artifact: z.string().optional(),
+    from: z.string().optional(),
+    forbid: z.array(z.string().min(1)).min(1).optional(),
+    base: z.string().optional(),
+    schema: z.string().optional(),
+  })
+  .passthrough()
+
+/** One check result inside Verification.checks — runJobVerification's output shape (src/verify.mjs). */
+export const VerificationCheckResult = z
+  .object({
+    name: z.string(),
+    ok: z.boolean(),
+    exitCode: z.number().int().nullable(),
+    durationMs: nullableNumber,
+    outputTail: nullableString,
+  })
+  .passthrough()
+
+/**
+ * Hub-run verification for a delegate/dispatch job, recorded on the job
+ * record once it reaches `succeeded` (docs/verification.md). A job that ends
+ * `incomplete`/`failed`/`canceled` with `verify` checks configured still
+ * gets this field, with `ok: null` and `skipped: true` — verification never
+ * ran, and that is recorded, not silently dropped.
+ */
+export const Verification = z
+  .object({
+    ok: z.boolean().nullable(),
+    checks: z.array(VerificationCheckResult),
+    skipped: z.boolean().optional(),
+    reason: nullableString,
+  })
+  .passthrough()
+
 export const JobRecord = z
   .object({
     jobId: z.string(),
@@ -202,6 +251,9 @@ export const JobRecord = z
     // final measured snapshot persisted at terminal status.
     diffBase: z.string().nullable().optional(),
     diffStats: DiffStats.nullable().optional(),
+    // D2 (agy-hub-verification): hub-run verification result, present only
+    // when the job/dispatch call was given a `verify` array.
+    verification: Verification.nullable().optional(),
   })
   .passthrough()
 
@@ -286,6 +338,9 @@ export const HubEvent = z
     waitMode: nullableString,
     profile: nullableString,
     profileStatus: nullableString,
+    // D2: the job.finished event carries the overall pass/fail only (the
+    // full checks array stays on the job record, not the append-only log).
+    verificationOk: z.boolean().nullable().optional(),
   })
   .passthrough()
 
@@ -555,6 +610,7 @@ export const JobResultResponse = z
     sessionId: nullableString,
     status: z.string(),
     errorKind: nullableString,
+    verification: Verification.nullable().optional(),
   })
   .passthrough()
 

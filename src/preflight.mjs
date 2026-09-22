@@ -335,7 +335,11 @@ export async function pingAgent({ agent, model, cwd, env = process.env, commandR
   const key = cacheKey(agent, model)
   const startedAt = Date.now()
   const timeoutS = resolveTimeoutS(agent, model)
-  const adapterArgs = { model, prompt: PING_PROMPT, cwd, mode: agent === 'copilot' ? 'read' : 'plan' }
+  // D1: guard:false -- a ping only asks for a literal "PONG" reply and never
+  // asks agy to write or run anything, so the hub-owned agy prompt guard
+  // (see src/adapters/agy.mjs's buildArgv) would be pure noise here. Harmless
+  // for every other adapter (buildArgv ignores an unknown option).
+  const adapterArgs = { model, prompt: PING_PROMPT, cwd, mode: agent === 'copilot' ? 'read' : 'plan', guard: false }
   const argv = adapter.buildArgv(adapterArgs)
   // The ping must travel the SAME path as a real job or it stops proving
   // anything. opencode v2 takes its prompt on stdin (E3/E4) and resolves its

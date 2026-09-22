@@ -25,6 +25,49 @@ function DetailRow({ label, children }: { label: string; children: React.ReactNo
   )
 }
 
+/**
+ * D2 (agy-hub-verification): the hub-run `verify` result once a job
+ * succeeds (docs/verification.md) — never rendered for a job that was never
+ * given a `verify` array. Status is text + Badge, never color-only.
+ */
+function VerificationSection({ verification }: { verification: Job["verification"] }) {
+  if (!verification) return null
+
+  const overallLabel = verification.skipped ? "Skipped" : verification.ok ? "Passed" : "Failed"
+  const overallVariant = verification.skipped ? "secondary" : verification.ok ? "outline" : "destructive"
+
+  return (
+    <>
+      <Separator />
+      <div className="flex flex-col gap-2">
+        <div className="flex items-center justify-between">
+          <h3 className="text-sm font-medium">Verification</h3>
+          <Badge variant={overallVariant}>{overallLabel}</Badge>
+        </div>
+        {verification.skipped ? (
+          <p className="text-xs text-muted-foreground">{verification.reason ?? "Verification was skipped."}</p>
+        ) : (
+          <div className="flex flex-col gap-2">
+            {verification.checks.map((check) => (
+              <div key={check.name} className="flex flex-col gap-1 rounded-md border p-2 text-xs">
+                <div className="flex items-center justify-between gap-2">
+                  <span className="font-mono">{check.name}</span>
+                  <Badge variant={check.ok ? "outline" : "destructive"}>{check.ok ? "ok" : "failed"}</Badge>
+                </div>
+                {!check.ok && check.outputTail ? (
+                  <pre className="max-h-32 overflow-auto rounded-md border bg-muted p-2 font-mono text-xs whitespace-pre-wrap">
+                    {check.outputTail}
+                  </pre>
+                ) : null}
+              </div>
+            ))}
+          </div>
+        )}
+      </div>
+    </>
+  )
+}
+
 export function JobDetailModal({
   job,
   open,
@@ -75,6 +118,8 @@ export function JobDetailModal({
             </div>
           </>
         ) : null}
+
+        <VerificationSection verification={job.verification} />
 
         <Separator />
 

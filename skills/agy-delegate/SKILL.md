@@ -29,6 +29,16 @@ read mode after the fact — it diffs the git-visible worktree before and after 
 the job with `errorKind:'read_mode_violation'` — so run agy read/plan turns in a disposable git
 worktree. (opencode's plan agent did respect read mode in testing.)
 
+**Never ask agy to run tests/builds/dev servers itself.** Its CLI auto-detaches a slow
+`run_command` into a background task and its own idle-exit kills it while still reporting
+`SUCCESS` — the work is silently lost. Through the MCP path, agent-hub already prepends a fixed
+guard to every agy prompt saying so (write code and an unexecuted RED test only); pass your
+verification commands as `verify` on `delegate`/`dispatch` instead and let the hub run them in
+the foreground once the job succeeds — see `~/.claude/skills/multi-agent-orchestrator/SKILL.md`'s
+"Verification" section and this repo's `docs/verification.md`. The `agy-run.sh` no-MCP fallback
+below calls `agy` directly and does **not** get that guard — restate the same instruction in
+`--task` yourself when using it.
+
 ## No-MCP fallback
 
 If `agent-hub` is not registered in this session, use the wrapper script directly:

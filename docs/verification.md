@@ -1,5 +1,58 @@
 # Verification
 
+## Hub-run verification for delegate/dispatch
+
+agy CLI 1.2.8's `run_command` auto-detaches a slow command (tests, builds, dev servers, package
+installs) into a background task, and its own `-p` idle-exit kills that task while still
+reporting `status:"SUCCESS"` — the work is silently lost, not just slow (upstream
+google-antigravity/antigravity-cli #1044, #1076; no flag to disable). Prompt instructions alone
+cannot prevent this, because the CLI's own idle-exit — not the model — decides to kill the task.
+So the hub never asks agy (or any agent) to run its own verification: `src/adapters/agy.mjs`'s
+`buildArgv` prepends a fixed, hub-owned instruction block to every agy prompt (unless
+`guard:false`, reserved for a read-only probe like `preflight.mjs`'s ping) telling it to write
+code and tests only — a RED test is written, never executed — and that the hub verifies
+afterwards. The existing `incomplete` errorKind (the background-kill marker, see
+`src/adapters/agy.mjs`'s `classifyError`) stays as the safety net for whatever slips through.
+
+`delegate`/`dispatch` accept an optional `verify` array — the same check shapes
+`normalizeVerifyCheck` above accepts (`argv` at minimum; `artifact`/`diff`/`schema` also work when
+the job carries a `workflow_id`/`step_id`):
+
+```js
+delegate({
+  agent: 'agy',
+  model: 'gemini-3.8-flash-medium',
+  task: 'Implement the feature with a RED test.',
+  cwd: '/path/to/worktree',
+  mode: 'write',
+  verify: [
+    { name: 'tests', argv: ['npm', 'test'] },
+    { name: 'typecheck', argv: ['npm', 'run', 'typecheck'] },
+  ],
+})
+```
+
+- Invalid input (e.g. an empty `argv`) is rejected synchronously by `normalizeVerifyCheck`
+  **before** the job is ever created — a bad `verify` never reaches routing, breaker checks,
+  reservation, or `startJob`.
+- Once (and only once) the job reaches `succeeded`, the hub runs each check in the foreground —
+  bounded timeouts via `src/process.mjs`'s `runCommand`, never a shell, never in the background —
+  in the job's own `cwd` by default (a check's own `cwd` still wins). This happens inside
+  `finishJob`, before `startJob` releases the write lock (and before its lease heartbeat stops),
+  so a write job's lock covers the whole verification run.
+- A job that ends `incomplete`, `failed`, or `canceled` never runs its checks: the job record gets
+  `verification: { ok: null, checks: [], skipped: true, reason }` instead, so a caller can tell
+  "never ran" apart from "ran and failed."
+- A failing check **never** changes the job's own `status` (it stays `succeeded`) and never trips
+  a circuit breaker — verification is a separate signal, not a job outcome.
+- The result — `{ ok, checks: [{ name, ok, exitCode, durationMs, outputTail }] }` — is recorded as
+  `verification` on the job record, and surfaced through `job_status`/`job_result`, the
+  `job.finished` event (`verificationOk`, the overall boolean only — the full checks array stays
+  on the record), and the dashboard's job detail view.
+- Reused, not reimplemented: `runJobVerification` (`src/verify.mjs`) shares `normalizeVerifyCheck`
+  and the same argv-execution primitive as the workflow-node verifier below (`runVerification`) —
+  there is exactly one place that spawns a verification command.
+
 ## Evidence artifacts
 
 Execution success is not task success, and an opaque `response.txt` is not
