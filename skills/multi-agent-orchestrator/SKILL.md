@@ -58,18 +58,25 @@ agents_status → route → delegate → job_wait / job_status → job_result �
    per agent/model/mode/taskType beat a guess.
    
    **IMPORTANT**: Before delegating, check `agents_quota` (or the `quota` annotation on `route`'s returned agents). If a chosen agent is exhausted, TELL THE USER with the reset time instead of delegating to it. agent-hub does not skip exhausted agents automatically — the human decides whether to switch agents, wait, or upgrade.
-3. `delegate({agent, model, task, cwd, mode?, timeoutS?, title?, variant?, taskType?})` — `agent` is
-   `'agy'|'opencode'|'copilot'`. Returns `{jobId, status:'queued'}` immediately. `task` must
-   name the output shape and a line budget (see Prompt-shaping below). `mode:'write'` requires
-   `cwd` to be a secondary `git worktree add` checkout or an allowlisted path. `variant` is
-   opencode's reasoning effort (minimal/low/medium/high/max); ignored by agy/copilot. Muse Spark
-   1.3 defaults to `high` from the model registry when `variant` is omitted. Pass the same
-   `taskType` you gave `route` — it feeds metrics, adaptive timeouts and learnings.
+3. `delegate({agent, model, task, cwd, mode?, timeoutS?, title?, variant?, taskType?, verify?})` —
+   `agent` is `'agy'|'opencode'|'copilot'`. Returns `{jobId, status:'queued'}` immediately. `task`
+   must name the output shape and a line budget (see Prompt-shaping below). `mode:'write'`
+   requires `cwd` to be a secondary `git worktree add` checkout or an allowlisted path. `variant`
+   is opencode's reasoning effort (minimal/low/medium/high/max); ignored by agy/copilot. Muse
+   Spark 1.3 defaults to `high` from the model registry when `variant` is omitted. Pass the same
+   `taskType` you gave `route` — it feeds metrics, adaptive timeouts and learnings. **Never ask
+   the agent to run tests/builds/dev servers itself** (agy in particular: its CLI silently kills
+   and abandons a slow `run_command` while still reporting success — the hub's own prompt guard
+   already tells it not to). Pass `verify: [{name, argv, expectExitCode?, cwd?, timeoutS?}]`
+   instead: the hub runs those checks in the foreground, in `cwd` by default, once the job
+   succeeds, and records `verification` on the job (see "Verification" below and
+   `../../docs/verification.md`).
 4. `job_wait({jobId, timeoutS<=60})` to block until terminal, or `job_status({jobId})` to poll
    without blocking. Both return `{status, errorKind, error, ...}`.
 5. `job_result({jobId, maxLines?})` — head of the response (default 20 lines) plus
-   `{truncated, fullPath, tokens, costUsd, sessionId}`. Read `fullPath` only if the head is
-   insufficient — do not default to pulling the whole file into context.
+   `{truncated, fullPath, tokens, costUsd, sessionId, verification}`. Read `fullPath` only if the
+   head is insufficient — do not default to pulling the whole file into context. `verification` is
+   `null` unless `verify` was given; see "Verification" below.
 6. `job_reply({jobId, message, mode?, timeoutS?, title?, taskType?})` — optional: start a new turn in a
    **terminal** agy/opencode job's conversation, resuming its recorded `sessionId`. `mode` and
    `taskType` default to the parent job's (so metrics and adaptive timeouts keep grouping the
@@ -125,6 +132,30 @@ negotiated, and step 4's corrections land in the same worktree/branch as step 3,
 starting cold every time. (The manual version of this workflow re-pastes the corrected plan as a
 brand-new message instead of resuming a real session — `job_reply` is strictly better: the model
 keeps the actual prior turns, not a human's paraphrase of them.)
+
+## Verification
+
+agy's CLI auto-detaches a slow `run_command` (test/build/dev-server) into a background task and
+its own idle-exit then kills it while still reporting `SUCCESS` — the model's work is lost, not
+just slow. The hub's `buildArgv` prepends a fixed guard to every agy prompt telling it to write
+code and an unexecuted RED test only; asking any agent to "run the tests and report the output" in
+the `task` string fights that guard and wastes the call. Pass verification commands to
+`delegate`/`dispatch` via `verify` instead:
+
+```
+delegate({..., mode:'write', verify:[
+  {name:'tests', argv:['npm','test']},
+  {name:'typecheck', argv:['npm','run','typecheck']},
+]})
+```
+
+The hub runs each check in the foreground, in the job `cwd` by default (bounded timeouts, never a
+shell), only after the job reaches `succeeded`. A job that ends `incomplete`/`failed`/`canceled`
+never runs them — `job_result`/`job_status` still report `verification:{ok:null, skipped:true,
+reason}` so you can tell "never ran" apart from "ran and failed." A failing check never flips the
+job's own `status` or trips a circuit breaker: read `verification.ok` and `verification.checks[]`
+(`{name, ok, exitCode, durationMs, outputTail}`) explicitly — don't infer pass/fail from `status`
+alone. Full shape and the `argv`/`artifact`/`diff`/`schema` check kinds: `../../docs/verification.md`.
 
 ## Break-even rule
 
@@ -197,17 +228,18 @@ across dozens of real delegated tasks in this codebase:
 Repo: <absolute worktree path> (branch <name>). App/package: <target>.
 Read first: <AGENTS.md/CLAUDE.md path(s) with the load-bearing rules — see the agy.md gotcha:
   a raw CLI call does not auto-load this repo's rules, restate them>.
-Rules: 1) same behavior as <baseline>, except what the framework forces; 2) TDD — failing test
-  first; 3) do not touch: <explicit denylist for this task — a different task or a generated
-  file>; 4) no commit, no push; 5) do not start a dev server (one may already be running); 6) <any
-  other repo-specific rule that would otherwise only live in CLAUDE.md/AGENTS.md>.
-Required verification before you report done (paste the summarized output):
-  <exact test command>
-  <exact type-check command>
-  <exact lint command>
-  <any project-specific check, e.g. base-path:check>
-Delivery: files touched, new tests (what failed before), verification output. Max <N> lines.
+Rules: 1) same behavior as <baseline>, except what the framework forces; 2) TDD — write a failing
+  test first, but do not run it yourself (the hub verifies after); 3) do not touch: <explicit
+  denylist for this task — a different task or a generated file>; 4) no commit, no push; 5) do not
+  start a dev server (one may already be running); 6) <any other repo-specific rule that would
+  otherwise only live in CLAUDE.md/AGENTS.md>.
+Delivery: files touched, new tests added. Max <N> lines.
 ```
+
+Do **not** add "run the tests/type-check/lint and paste the output" to the header — an agy job
+that tries measurably loses the work (see "Verification" above). Pass those same commands as
+`verify` on the `delegate`/`dispatch` call instead; the hub runs them itself once the job
+succeeds and records the result, no re-derivation needed per task.
 
 The "do not touch" list is what keeps two parallel worktrees/tasks from fighting over the same
 file (see Parallel work below) — it is policy the hub does not enforce, so it only works if every

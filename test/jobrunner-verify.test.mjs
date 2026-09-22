@@ -4,6 +4,14 @@ import fs from 'node:fs'
 import path from 'node:path'
 import os from 'node:os'
 import { EventEmitter } from 'node:events'
+import { fileURLToPath } from 'node:url'
+import { adapterFor } from '../src/adapters/index.mjs'
+import { AGY_GUARD_BLOCK } from '../src/adapters/agy.mjs'
+
+const AGY_BACKGROUND_YIELD_FIXTURE = fs.readFileSync(
+  path.join(path.dirname(fileURLToPath(import.meta.url)), 'fixtures', 'agy', 'stream-background-yield.jsonl'),
+  'utf8'
+)
 
 // D2 (agy-hub-verification): hub-side verification for delegate/dispatch.
 // After a job reaches 'succeeded', the hub runs the caller's `verify` argv
@@ -305,4 +313,74 @@ test('cancelJob records verification as skipped (with reason) for a canceled job
   assert.equal(finalRecord.verification.ok, null)
   assert.equal(finalRecord.verification.skipped, true)
   assert.match(finalRecord.verification.reason, /cancel/i)
+})
+
+// D3 (agy-hub-verification): regression proving the D1 agy prompt guard and
+// the pre-existing 'incomplete' (background-kill) detection coexist -- the
+// guard only prepends to the PROMPT (an argv element sent to agy), while
+// incomplete detection reads the CHILD's STDOUT (adapter.classifyError);
+// they are orthogonal, and this exercises both through one real job using
+// the real agy adapter (not the noopAdapter fake), together with a `verify`
+// array to prove D2's skip-on-incomplete logic still applies too.
+test('a real agy job carries the D1 guard in its prompt AND still gets detected as incomplete on the background-kill marker, with configured verify skipped', async (t) => {
+  const home = tmpHome()
+  t.after(() => fs.rmSync(home, { recursive: true, force: true }))
+  const { startJob, jobstore } = await freshModules(home)
+
+  const child = fakeChild()
+  let capturedArgs = null
+  const spawn = (cmd, args) => {
+    capturedArgs = args
+    return child
+  }
+  let resolveExit
+  const exitPromise = new Promise((resolve) => {
+    resolveExit = resolve
+  })
+  const runWithTimeout = () => ({ pgid: child.pid, exitPromise })
+
+  let verifyRan = false
+  const runCommandFn = async () => {
+    verifyRan = true
+    return { stdout: '', stderr: '', code: 0, timedOut: false }
+  }
+
+  const { job, done } = startJob({
+    agent: 'agy',
+    model: 'gemini-3.8-flash-low',
+    task: 'Implement the feature',
+    cwd: '/job/cwd',
+    mode: 'write',
+    allowlist: ['/job/cwd'],
+    adapterFor,
+    spawn,
+    runWithTimeout,
+    runCommandFn,
+    verify: [{ name: 'tests', argv: ['npm', 'test'] }],
+  })
+
+  // D1: the real agy adapter's buildArgv prepended the guard to the prompt
+  // BEFORE the job ever spawned.
+  const promptArg = capturedArgs[capturedArgs.indexOf('-p') + 1]
+  assert.ok(promptArg.startsWith(AGY_GUARD_BLOCK))
+  assert.ok(promptArg.endsWith('Implement the feature'))
+
+  // Simulate the real background-kill stdout finishJob will read.
+  const { appendStdout } = jobstore
+  appendStdout(job.jobId, AGY_BACKGROUND_YIELD_FIXTURE, process.env)
+
+  resolveExit({ code: 0, timedOut: false })
+  await done
+
+  // The pre-existing incomplete detection still fires despite the guarded prompt.
+  const finalRecord = jobstore.readResult(job.jobId)
+  assert.equal(finalRecord.status, 'failed')
+  assert.equal(finalRecord.errorKind, 'incomplete')
+
+  // D2: verify was configured but the job never reached 'succeeded', so it
+  // must be recorded as skipped, never actually run.
+  assert.equal(verifyRan, false)
+  assert.equal(finalRecord.verification.ok, null)
+  assert.equal(finalRecord.verification.skipped, true)
+  assert.match(finalRecord.verification.reason, /incomplete/)
 })
