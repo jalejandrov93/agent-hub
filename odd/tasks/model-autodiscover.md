@@ -1,0 +1,88 @@
+# Feature: model-autodiscover
+
+Branch: `feat/router-agy-mechanical-and-model-autodiscover`
+Engram mirror: `odd/model-autodiscover/tasks` (project `agent-hub`)
+
+## Objective
+
+When agent CLIs ship new models, surface them as human-reviewed routing
+proposals instead of leaving `DELEGATION_MAP` silently stale. Also route
+`mechanical-edit` to agy before the paid deepseek candidate.
+
+## Problem / why
+
+- `discovery.mjs` already stores each CLI's model catalog in `discovery.json`,
+  but nothing diffs that catalog against `DELEGATION_MAP` / `MODEL_REGISTRY`.
+- `proposals.mjs` can only reorder pairs that already exist in a static chain:
+  `acceptedOrderFor` maps `toOrder` back onto existing chain steps, so a new
+  model can never enter routing through the proposal flow.
+
+## Scope
+
+- Detect catalog models absent from `DELEGATION_MAP` and `MODEL_REGISTRY`.
+- Detect version bumps of models already used in chains (same family, higher
+  version, same effort suffix, e.g. `gemini-3.8-flash-low` -> `gemini-3.9-flash-low`).
+- Emit `add_candidate` proposals for version bumps, one per chain that uses
+  the older family model; accepted candidates are appended at the TAIL of the
+  chain, never first. Promotion only through existing metric-based reorder
+  proposals.
+- Models with no family match are listed as "unmapped" (no taskType can be
+  inferred safely), not proposed.
+- Dashboard renders `add_candidate` proposals distinctly.
+
+## Constraints
+
+- Never auto-insert or auto-promote an unevaluated model.
+- Skip catalogs that are not authoritative: copilot (only `auto` is reliable)
+  and codex (no real listing).
+- Existing reorder proposals keep working; `chainHash` staleness semantics
+  must stay correct once a chain has accepted additions (hash the effective
+  chain).
+- `pruneCacheForMap` must treat accepted added candidates as reachable.
+- Strict TDD: RED before implementation, then GREEN, then REFACTOR.
+- Planning heuristic ~400 authored changed lines per task (advisory only).
+
+## TDD
+
+- Mode: enabled (source: session configuration, "Strict TDD Mode: enabled").
+- Runner: `npm test` (`node --test` over `test/**/*.test.mjs`, excluding
+  `test/live`); dashboard workspace uses its own test script.
+
+## Tasks
+
+- [x] T1 — agy `gemini-3.8-flash-medium` (write) first in `mechanical-edit`,
+  before deepseek. Route: inline (1 src file + 1 test + 2 doc rows).
+  Evidence: RED observed (chain[0] was opencode/deepseek), GREEN `npm test`
+  1440/1440. Commit `a445ecf`. RDD assess: medium, `under_budget` (pending in slice).
+- [x] T2 — Pure gap detection: `computeModelGaps({ discovery, map, registry })`
+  returning `{ versionBumps: [{agent, fromModel, toModel, taskTypes}], unmapped:
+  [{agent, model}] }`, with family/version/effort parsing. Tests in
+  `test/discovery.test.mjs` (or a new `test/model-gaps.test.mjs`).
+  Evidence: RED observed (`ERR_MODULE_NOT_FOUND src/model-gaps.mjs`), GREEN
+  `node --test test/model-gaps.test.mjs` 10/10, full `npm test` 1450/1450.
+  Commit `404726a`.
+- [ ] T3 — `add_candidate` proposals: schema (`src/schemas.mjs`), creation in
+  `refreshProposals` from `discovery.json`, dedupe/cooldown, effective-chain
+  splice at tail in `route()`, `chainHash` on effective chain, and
+  `pruneCacheForMap` reachability. Tests in `test/proposals.test.mjs` and
+  `test/router.test.mjs`.
+- [ ] T4 — Dashboard: render `add_candidate` proposals (new pair + tail
+  position + "newer version of X"), accept copy, and list unmapped models.
+  Tests in the dashboard workspace. Docs: `docs/routing.md` section.
+
+Route declaration: T2–T4 delegated to one writer (preparation trigger: 4+
+files across discovery, proposals, router, schemas, dashboard).
+
+## Acceptance criteria
+
+- A catalog containing `gemini-3.9-flash-low` while `recon` uses
+  `gemini-3.8-flash-low` yields a pending `add_candidate` proposal for `recon`.
+- Accepting it makes `route({taskType:'recon'})` include the new model as the
+  last candidate; the primary is unchanged.
+- Rejecting it suppresses re-creation during the existing cooldown.
+- copilot/codex catalogs never produce proposals.
+- `npm test` and dashboard tests pass.
+
+## Progress / next step
+
+- Next: T3.
