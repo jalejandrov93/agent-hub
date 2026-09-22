@@ -11,6 +11,7 @@ import * as defaultJulesClient from '../cloud/jules/client.mjs'
 import * as defaultJulesAdapter from '../cloud/jules/adapter.mjs'
 import { getDb, listAgentMessages, markAgentMessageDelivered } from '../storage/index.mjs'
 import { listAgysProfilesSync } from '../providers/agys.mjs'
+import { normalizeVerifyCheck } from '../verify.mjs'
 
 /** Reject a caller-supplied taskType that is not one of schemas.mjs TASK_TYPES. */
 function assertTaskType(taskType) {
@@ -32,6 +33,9 @@ function jobStatusView(result) {
     error: result.error ?? null,
     createdAt: result.createdAt,
     updatedAt: result.updatedAt,
+    // D2 (agy-hub-verification): hub-run verification result, present only
+    // when the job was given a `verify` array (docs/verification.md).
+    verification: result.verification ?? null,
   }
 }
 
@@ -67,11 +71,19 @@ export function delegateTool({
   variant,
   taskType,
   profile = null,
+  // D2 (agy-hub-verification): optional hub-run verification checks
+  // (docs/verification.md). Validated here before startJobFn is ever
+  // called ("fails fast before dispatch"); startJob does the canonical
+  // normalization and persists it on the job record.
+  verify = null,
   startJobFn = defaultStartJob,
   listAgysProfilesFn = listAgysProfilesSync,
   env = process.env,
 }) {
   assertTaskType(taskType)
+  if (Array.isArray(verify) && verify.length > 0) {
+    verify.forEach(normalizeVerifyCheck)
+  }
 
   // An explicit per-call profile overrides auto selection AND a global pin
   // (AGENT_HUB_AGYS_PROFILE / mode file): it is explicit per call, so it is
@@ -101,6 +113,7 @@ export function delegateTool({
     allowlist: WRITE_ALLOWLIST,
     profile: effectiveProfile,
     profileStatus: effectiveProfileStatus,
+    verify,
   })
   return { jobId: job.jobId, status: job.status, errorKind: job.errorKind ?? null }
 }
@@ -383,6 +396,7 @@ export function jobResultTool({ jobId, maxLines = 20, tailLines = 10 }) {
     sessionId: result.sessionId ?? null,
     status: result.status,
     errorKind: result.errorKind ?? null,
+    verification: result.verification ?? null,
   }
 }
 

@@ -342,6 +342,57 @@ test('automatic fallback to next candidate when first candidate fails fast', asy
   assert.equal(res.job.jobId, 'job-succeeded-fallback')
 })
 
+// D2 (agy-hub-verification): dispatch() accepts an optional `verify` array
+// and forwards it to startJobFn untouched (jobrunner.mjs's startJob does the
+// canonical normalization/storage). Invalid input must fail fast, before
+// routing/breaker/reservation state changes, so startJobFn is never called.
+
+test('dispatch rejects an invalid verify check before ever calling startJobFn (fail fast, before dispatch)', async () => {
+  let called = false
+  const mockStartJob = async () => {
+    called = true
+    return { job: { jobId: 'never', status: 'queued' }, done: Promise.resolve() }
+  }
+
+  await assert.rejects(
+    () =>
+      dispatch({
+        task: 'test-verify-invalid',
+        cwd: '/tmp/test-verify',
+        routeFn: async () => ({ primary: { agent: 'opencode', model: 'opencode/muse-spark-1.3-contributor-free' }, fallbacks: [] }),
+        circuitBreakerOpenFn: () => false,
+        runPreflightFn: async () => ({ status: 'ready' }),
+        startJobFn: mockStartJob,
+        verify: [{ name: 'bad', argv: [] }],
+      }),
+    /argv must be a non-empty array of non-empty strings/
+  )
+  assert.equal(called, false)
+})
+
+test('dispatch forwards a valid verify array to startJobFn', async () => {
+  let receivedVerify = null
+  const mockStartJob = async (args) => {
+    receivedVerify = args.verify
+    return {
+      job: { jobId: 'job-verify-1', agent: args.agent, model: args.model, status: 'queued', createdAt: new Date().toISOString(), dispatchKey: args.dispatchKey },
+      done: Promise.resolve(),
+    }
+  }
+
+  await dispatch({
+    task: 'test-verify-forward',
+    cwd: '/tmp/test-verify',
+    routeFn: async () => ({ primary: { agent: 'opencode', model: 'opencode/muse-spark-1.3-contributor-free' }, fallbacks: [] }),
+    circuitBreakerOpenFn: () => false,
+    runPreflightFn: async () => ({ status: 'ready' }),
+    startJobFn: mockStartJob,
+    verify: [{ name: 'tests', argv: ['npm', 'test'] }],
+  })
+
+  assert.deepEqual(receivedVerify, [{ name: 'tests', argv: ['npm', 'test'] }])
+})
+
 test('reserves write lock when mode is write and passes reservationToken to startJob', async () => {
   let acquireLockCalled = false
   let passedReservationToken = null

@@ -71,6 +71,34 @@ export function normalizeVerifyCheck(check) {
   throw new Error('unknown verify check kind for "' + name + '"')
 }
 
+/** Keeps the END of `text`, bounded to `max` chars — a failure's reason is
+ *  usually the last thing printed, not the first. */
+function tailOf(text, max = 4000) {
+  const s = String(text ?? '')
+  return s.length > max ? s.slice(-max) : s
+}
+
+/**
+ * Runs one normalized argv check exactly once via `runCommandFn` (the same
+ * process.mjs-backed primitive every caller of this module uses — never a
+ * shell, always bounded by timeoutMs). Shared by runVerification's argv
+ * branch and runJobVerification below so there is exactly one place that
+ * spawns a verification command.
+ */
+async function execArgvCheck(check, { cwd, env, runCommandFn, timeoutS }) {
+  const startedAt = Date.now()
+  const res = await runCommandFn(check.argv[0], check.argv.slice(1), {
+    cwd: check.cwd ?? cwd,
+    env,
+    timeoutMs: (check.timeoutS ?? timeoutS) * 1000
+  })
+  return {
+    res,
+    durationMs: Date.now() - startedAt,
+    passed: !res.timedOut && res.code === check.expectExitCode
+  }
+}
+
 export function normalizeVerifyConfig(node) {
   const raw = node?.verify
   if (raw === undefined || raw === null) {
@@ -120,12 +148,7 @@ export async function runVerification({
 
   for (const check of config.checks) {
     if (check.kind === 'argv') {
-      const res = await runner(check.argv[0], check.argv.slice(1), {
-        cwd: check.cwd ?? cwd,
-        env,
-        timeoutMs: (check.timeoutS ?? timeoutS) * 1000
-      })
-      const passed = !res.timedOut && res.code === check.expectExitCode
+      const { res, passed } = await execArgvCheck(check, { cwd, env, runCommandFn: runner, timeoutS })
       const detail = {
         exitCode: res.code,
         timedOut: !!res.timedOut,
@@ -181,5 +204,66 @@ export async function runVerification({
     checks: results,
     startedAt,
     finishedAt
+  }
+}
+
+/**
+ * D2 (agy-hub-verification): job-level verification for delegate/dispatch.
+ * Unlike runVerification (a workflow node's `verify`, keyed to a
+ * workflowId/stepId artifact context), this is the entry point a hub job
+ * (any agent, not just agy) uses once it reaches `succeeded` — see
+ * src/jobrunner.mjs's finishJob. Checks run in `cwd` (the job's own cwd) by
+ * default; a check's own `cwd` still wins. Reuses normalizeVerifyCheck for
+ * validation (invalid input throws before any check runs — "fails fast
+ * before dispatch") and execArgvCheck for the exact same argv execution
+ * runVerification's argv branch uses, so there is still only one verifier.
+ *
+ * Returns null when there is nothing to verify, otherwise
+ * `{ ok, checks: [{ name, ok, exitCode, durationMs, outputTail }] }` — the
+ * shape persisted on the job record and surfaced via job_result/job_status/
+ * job.finished (docs/verification.md).
+ */
+export async function runJobVerification({
+  checks,
+  cwd = null,
+  workflowId = null,
+  stepId = null,
+  env = process.env,
+  runCommandFn = runCommand,
+  timeoutS = 600
+} = {}) {
+  if (!Array.isArray(checks) || checks.length === 0) {
+    return null
+  }
+
+  // Validate every check up front: one bad check must abort the whole batch
+  // before the first (possibly side-effecting) check ever runs.
+  const normalized = checks.map(normalizeVerifyCheck)
+  const runner = runCommandFn || runCommand
+  const results = []
+
+  for (const check of normalized) {
+    if (check.kind === 'argv') {
+      const { res, durationMs, passed } = await execArgvCheck(check, { cwd, env, runCommandFn: runner, timeoutS })
+      results.push({
+        name: check.name,
+        ok: passed,
+        exitCode: typeof res.code === 'number' ? res.code : null,
+        durationMs,
+        outputTail: tailOf(`${res.stdout ?? ''}${res.stderr ?? ''}`)
+      })
+    } else {
+      // artifact/diff/schema: no live process output/duration in the argv
+      // sense — reuse runVerification for this single check rather than
+      // reimplementing artifact/schema/diff handling a second time.
+      const verdict = await runVerification({ node: { verify: [check] }, workflowId, stepId, cwd, env, runCommandFn: runner, timeoutS })
+      const c = verdict.checks[0]
+      results.push({ name: c.name, ok: c.passed, exitCode: null, durationMs: null, outputTail: null })
+    }
+  }
+
+  return {
+    ok: results.every((c) => c.ok),
+    checks: results
   }
 }

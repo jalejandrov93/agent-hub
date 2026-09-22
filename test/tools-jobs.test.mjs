@@ -132,6 +132,76 @@ test('delegate with an explicit valid profile on agent "agy" starts the job pinn
   assert.equal(capturedArgs.profileStatus, 'pinned')
 })
 
+// D2 (agy-hub-verification): delegate() accepts an optional `verify` array
+// (docs/verification.md). Invalid input fails fast, before any job is
+// created; valid input is forwarded to startJobFn untouched.
+
+test('delegate rejects an invalid verify check before startJobFn is ever called', async () => {
+  const home = tmpHome()
+  const { delegateTool } = await fresh(home)
+  let called = false
+  const startJobFn = () => {
+    called = true
+    return { job: { jobId: 'never', status: 'queued', errorKind: null } }
+  }
+
+  assert.throws(
+    () => delegateTool({ agent: 'agy', model: 'x', task: 't', cwd: '/tmp', startJobFn, verify: [{ name: 'bad', argv: [] }] }),
+    /argv must be a non-empty array of non-empty strings/
+  )
+  assert.equal(called, false)
+})
+
+test('delegate forwards a valid verify array to startJobFn', async () => {
+  const home = tmpHome()
+  const { delegateTool } = await fresh(home)
+  let capturedArgs = null
+  const startJobFn = (args) => {
+    capturedArgs = args
+    return { job: { jobId: 'j-verify-1', status: 'queued', errorKind: null } }
+  }
+
+  const result = delegateTool({
+    agent: 'agy',
+    model: 'x',
+    task: 't',
+    cwd: '/tmp',
+    startJobFn,
+    verify: [{ name: 'tests', argv: ['npm', 'test'] }],
+  })
+
+  assert.equal(result.jobId, 'j-verify-1')
+  assert.deepEqual(capturedArgs.verify, [{ name: 'tests', argv: ['npm', 'test'] }])
+})
+
+test('job_status and job_result surface the persisted verification field', async () => {
+  const home = tmpHome()
+  const env = { AGENT_HUB_HOME: home }
+  const { updateResult } = await import('../src/jobstore.mjs?t=' + Date.now())
+  const { jobStatusTool, jobResultTool } = await fresh(home)
+
+  const job = createJob({ agent: 'agy', model: 'x', task: 't', cwd: '/tmp', title: 't', mode: 'read', env })
+  const verification = { ok: false, checks: [{ name: 'tests', ok: false, exitCode: 1, durationMs: 5, outputTail: 'FAIL' }] }
+  updateResult(job.jobId, { status: 'succeeded', verification }, env)
+
+  const statusView = jobStatusTool({ jobId: job.jobId })
+  assert.deepEqual(statusView.verification, verification)
+
+  const resultView = jobResultTool({ jobId: job.jobId })
+  assert.deepEqual(resultView.verification, verification)
+})
+
+test('job_status and job_result report verification as null when nothing was requested', async () => {
+  const home = tmpHome()
+  const env = { AGENT_HUB_HOME: home }
+  const { jobStatusTool, jobResultTool } = await fresh(home)
+
+  const job = createJob({ agent: 'agy', model: 'x', task: 't', cwd: '/tmp', title: 't', mode: 'read', env })
+
+  assert.equal(jobStatusTool({ jobId: job.jobId }).verification, null)
+  assert.equal(jobResultTool({ jobId: job.jobId }).verification, null)
+})
+
 test('delegate rejects an unknown explicit profile with a clear error naming the valid profiles', async () => {
   const home = tmpHome()
   const { delegateTool } = await fresh(home)

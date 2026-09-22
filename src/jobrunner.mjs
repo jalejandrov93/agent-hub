@@ -18,6 +18,7 @@ import {
   computeChangedFilesMismatch as defaultComputeChangedFilesMismatch,
 } from './diffstats.mjs'
 import { readHandoff as defaultReadHandoff } from './context.mjs'
+import { normalizeVerifyCheck, runJobVerification as defaultRunJobVerification } from './verify.mjs'
 
 // jobId -> { pgid, leaseToken, heartbeatTimer, leaseTtlMs } for jobs still
 // running in THIS process. Used by cancelJob for an immediate kill; the
@@ -83,6 +84,16 @@ function summarize(text, max = 300) {
 }
 
 /**
+ * D2 (agy-hub-verification): a job that reaches a terminal state OTHER than
+ * 'succeeded' (incomplete/failed/read_mode_violation/canceled) never runs
+ * its `verify` checks — but if the caller asked for verification, that must
+ * be recorded, not silently dropped (see docs/verification.md).
+ */
+function skippedVerification(reason) {
+  return { ok: null, checks: [], skipped: true, reason }
+}
+
+/**
  * Start a job. Returns immediately with the queued/failed-fast job record;
  * the actual CLI run happens in the background. `done` resolves once the
  * job reaches a terminal state — tests can await it; the MCP layer polls
@@ -145,7 +156,17 @@ export function startJob({
   waitMode = null,
   // job-diff-stats: injectable so tests never shell out to a real git binary.
   captureDiffBaseFn = defaultCaptureDiffBase,
+  // D2 (agy-hub-verification): optional hub-run verification checks (same
+  // shapes as src/verify.mjs's normalizeVerifyCheck). Validated synchronously
+  // below, before any job record exists — "fails fast before dispatch".
+  verify = null,
+  runJobVerificationFn = defaultRunJobVerification,
 }) {
+  // D2: one bad check must reject the whole call before any side effect
+  // (job record, write lock, spawn) — mirrors the adapterFor(agent) throw
+  // just below for an unknown agent.
+  const normalizedVerify = Array.isArray(verify) && verify.length > 0 ? verify.map(normalizeVerifyCheck) : null
+
   // Resolved BEFORE anything else — including learnings/timeout/createJob —
   // because a remote adapter (Jules) edits a branch on GitHub via its own
   // infrastructure, never this process's cwd: the "must be a secondary
@@ -255,6 +276,12 @@ export function startJob({
   })
   appendEvent({ kind: 'job.queued', agent, model, cwd, title, jobId: job.jobId, taskType, harness: harness ?? null, waitMode: waitMode ?? null }, { env })
 
+  // D2: persisted on the record (not just closed over) so cancelJob -- which
+  // only receives a jobId -- can also see it and record a skipped reason.
+  if (normalizedVerify) {
+    updateResult(job.jobId, { verify: normalizedVerify }, env)
+  }
+
   // Token of the lease THIS job acquired (null for read mode / remote /
   // gate failures). Every later release/heartbeat for this job must use it,
   // so a stale holder can never delete a new holder's lease after a reclaim.
@@ -362,7 +389,7 @@ export function startJob({
 
   const done = exitPromise
     .then(({ code, timedOut }) =>
-      finishJob({ jobId: job.jobId, agent, model, cwd, title, adapter, mode, env, timedOut, exitCode: code, taskType, snapshot, takeSnapshotFn, diffSnapshotsFn, formatViolationFn, harness, waitMode, runCommandFn, profile: effectiveProfile, profileStatus: effectiveProfileStatus, recordQuotaExhaustionFn, diffBase })
+      finishJob({ jobId: job.jobId, agent, model, cwd, title, adapter, mode, env, timedOut, exitCode: code, taskType, snapshot, takeSnapshotFn, diffSnapshotsFn, formatViolationFn, harness, waitMode, runCommandFn, profile: effectiveProfile, profileStatus: effectiveProfileStatus, recordQuotaExhaustionFn, diffBase, verify: normalizedVerify, runJobVerificationFn })
     )
     .finally(() => {
       stopHeartbeat(job.jobId)
@@ -548,6 +575,10 @@ async function finishJob({
   computeDiffStatsFn = defaultComputeDiffStats,
   readHandoffFn = defaultReadHandoff,
   mismatchFn = defaultComputeChangedFilesMismatch,
+  // D2 (agy-hub-verification): normalized verify checks (or null). Only the
+  // 'succeeded' branch below actually runs them.
+  verify = null,
+  runJobVerificationFn = defaultRunJobVerification,
 }) {
   const current = readResult(jobId, env)
   if (current.status === 'canceled') return // cancelJob already finalized this job
@@ -555,6 +586,7 @@ async function finishJob({
   const eventWaitMode = waitMode ?? current.waitMode ?? null
   const eventProfile = profile ?? current.profile ?? null
   const eventProfileStatus = profileStatus ?? current.profileStatus ?? null
+  const effectiveVerify = verify ?? current.verify ?? null
 
   // job-diff-stats: computed once here (not inside each branch below) so
   // every terminal outcome — failed, read-mode violation, succeeded — gets
@@ -608,6 +640,7 @@ async function finishJob({
         sessionId: error.sessionId ?? current.sessionId ?? null,
         ...(violation ? { readModeViolation: violation } : {}),
         ...(diffStats ? { diffStats } : {}),
+        ...(effectiveVerify ? { verification: skippedVerification(`job ended failed (errorKind=${error.kind}); verification skipped`) } : {}),
       },
       env
     )
@@ -670,6 +703,7 @@ async function finishJob({
         sessionId: result.sessionId ?? null,
         toolDenials: result.toolDenials ?? [],
         ...(diffStats ? { diffStats } : {}),
+        ...(effectiveVerify ? { verification: skippedVerification('job ended failed (errorKind=read_mode_violation); verification skipped') } : {}),
       },
       env
     )
@@ -682,6 +716,27 @@ async function finishJob({
 
   const noChanges = mode === 'write' && Boolean(diff && !diff.unverifiable && !diff.changed)
 
+  // D2: the job just reached 'succeeded' -- run its verify checks here, in
+  // the foreground, before this function returns. startJob releases the
+  // write lock (and stops the lease heartbeat) only in the .finally() after
+  // finishJob's promise settles, so the lock is held for the whole run. A
+  // crash inside verification itself must never fail the job it verified.
+  let verification = null
+  if (effectiveVerify) {
+    try {
+      verification = await runJobVerificationFn({
+        checks: effectiveVerify,
+        cwd,
+        workflowId: current.workflow_id ?? current.workflowId ?? null,
+        stepId: current.step_id ?? current.stepId ?? null,
+        env,
+        runCommandFn,
+      })
+    } catch (err) {
+      verification = { ok: false, checks: [], reason: `verification crashed: ${String(err?.message ?? err)}` }
+    }
+  }
+
   updateResult(
     jobId,
     {
@@ -692,6 +747,7 @@ async function finishJob({
       toolDenials: result.toolDenials ?? [],
       ...(noChanges ? { noChanges: true } : {}),
       ...(diffStats ? { diffStats } : {}),
+      ...(verification ? { verification } : {}),
     },
     env
   )
@@ -702,7 +758,7 @@ async function finishJob({
     )
   }
   appendEvent(
-    { kind: 'job.finished', agent, model, cwd, title, jobId, taskType, tokens: result.tokens ?? null, costUsd: result.costUsd ?? null, summary: summarize(result.text), harness: eventHarness, waitMode: eventWaitMode, profile: eventProfile, profileStatus: eventProfileStatus },
+    { kind: 'job.finished', agent, model, cwd, title, jobId, taskType, tokens: result.tokens ?? null, costUsd: result.costUsd ?? null, summary: summarize(result.text), harness: eventHarness, waitMode: eventWaitMode, profile: eventProfile, profileStatus: eventProfileStatus, verificationOk: verification ? verification.ok : null },
     { env }
   )
 }
@@ -744,6 +800,12 @@ export async function cancelJob(
     mismatchFn,
   })
   if (diffStats) updated = updateResult(jobId, { diffStats }, env)
+
+  // D2: a canceled job with verify checks configured never runs them —
+  // record that explicitly instead of silently leaving `verification` unset.
+  if (result.verify) {
+    updated = updateResult(jobId, { verification: skippedVerification('job was canceled; verification skipped') }, env)
+  }
 
   if (result.remote) {
     // There is no Jules API to cancel a remote session: marking the record
