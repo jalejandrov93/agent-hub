@@ -76,9 +76,17 @@ proposals instead of leaving `DELEGATION_MAP` silently stale. Also route
   clean (fixed one pre-existing `ProposalT` fixture in
   `dashboard/src/views/config/config.test.tsx` missing the new required
   `kind` field); `npm run -w dashboard test` 179/179. Commit `f664d0a`.
-- [ ] T4 — Dashboard: render `add_candidate` proposals (new pair + tail
+- [x] T4 — Dashboard: render `add_candidate` proposals (new pair + tail
   position + "newer version of X"), accept copy, and list unmapped models.
   Tests in the dashboard workspace. Docs: `docs/routing.md` section.
+  Evidence: RED observed (`dashboard/src/views/approvals/index.test.tsx`
+  run against the pre-change component: 2 new tests failed — missing "New
+  candidate"/"adds"/"unmapped" text — 8 pre-existing tests still passed).
+  GREEN: `npx vitest run src/views/approvals/index.test.tsx` 10/10; full
+  `npm run -w dashboard test` 181/181; `npm run -w dashboard typecheck`
+  clean; `npm run build` succeeded; `grep -rn '<style\|style="\|data:font'
+  dashboard/dist` printed nothing (CSP-safe); full `npm test` 1459/1459
+  (unchanged, T4 is dashboard-only). Commit `17acc1f`.
 
 Route declaration: T2–T4 delegated to one writer (preparation trigger: 4+
 files across discovery, proposals, router, schemas, dashboard).
@@ -95,4 +103,8 @@ files across discovery, proposals, router, schemas, dashboard).
 
 ## Progress / next step
 
-- Next: T4.
+- T2, T3, T4 (this writer's scope) are all done and verified. T1 was already
+  done before this writer started.
+- Next: none for this writer's authorized scope (T2-T4). Feature-level
+  wrap-up (delivery strategy / PR, native review if RDD is enabled) is the
+  orchestrator's decision.
