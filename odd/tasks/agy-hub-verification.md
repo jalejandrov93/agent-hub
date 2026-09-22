@@ -85,8 +85,51 @@ marks the job `incomplete`, but the work is still lost.
   (`test/jobrunner-agys.test.mjs`, which asserted the raw un-guarded prompt
   text — updated to expect `${AGY_GUARD_BLOCK}\n\nsay hello`): `npm test` →
   1498/1498 pass, 0 fail (including the known SIGTERM flake, which passed).
-- [ ] D2 — `verify` on delegate/dispatch, hub-run foreground checks,
+- [x] D2 — `verify` on delegate/dispatch, hub-run foreground checks,
   `verification` on job record/API/event, dashboard job detail row + tests.
+  Commit `577f691`. Design: `src/verify.mjs` gained a shared `execArgvCheck`
+  helper (the exact command-execution primitive both `runVerification`'s
+  argv branch and the new `runJobVerification` use — one verifier, two
+  shapers) plus `runJobVerification({checks, cwd, workflowId, stepId, env,
+  runCommandFn, timeoutS})`, returning `{ok, checks:[{name, ok, exitCode,
+  durationMs, outputTail}]}` or `null`. `jobrunner.mjs`'s `startJob` accepts
+  `verify`, normalizes it synchronously via `normalizeVerifyCheck` before any
+  job record exists (fail-fast), and persists it on the record (like
+  `diffBase`) so `cancelJob` — which only gets a `jobId` — can also see it.
+  `finishJob` runs verification only in the `succeeded` branch, awaited
+  before the function returns; `startJob`'s write-lock release/heartbeat
+  stop only happen in the `.finally()` after that promise settles, so the
+  lock is held for the whole verification run (no code change needed — just
+  placement). incomplete/failed/read_mode_violation/canceled record
+  `verification: {ok:null, checks:[], skipped:true, reason}` instead.
+  `dispatch()`/`delegateTool` validate `verify` (throw away the normalized
+  result, just to fail fast) before any route/breaker/reservation/job-record
+  side effect, then forward the raw array to `startJobFn`. Exposed via
+  `job_status`/`job_result` (`tools/jobs.mjs`), the `job.finished` event
+  (`verificationOk`, a flat scalar — the full checks array stays on the
+  record, not the append-only log, matching diffStats' own precedent), and a
+  new `dashboard/src/views/jobs/JobDetailModal.tsx` "Verification" section
+  (Badge-based, never color-only). Zod: `VerifyCheckInput`,
+  `VerificationCheckResult`, `Verification` added to `src/schemas.mjs`;
+  `JobRecord.verification`, `JobResultResponse.verification`,
+  `HubEvent.verificationOk`.
+  RED: `node --test test/verify.test.mjs` failed with `SyntaxError:
+  ... does not provide an export named 'runJobVerification'`; the same
+  pattern (missing export / undefined field) for
+  `test/jobrunner-verify.test.mjs` (7/8 failing), `test/dispatch.test.mjs`
+  (1 new test failing), `test/tools-jobs.test.mjs` (5 new tests failing),
+  and `dashboard/.../JobDetailModal.test.tsx` (4/4 failing, incl. one
+  "Invalid Chai property: toBeInTheDocument" — this project's dashboard
+  tests use vitest-native `.toBeTruthy()`/`queryByText(...) === null`, not
+  jest-dom matchers; fixed in the test itself, not the component).
+  GREEN: `test/verify.test.mjs` 18/18, `test/jobrunner-verify.test.mjs` 8/8,
+  `test/dispatch.test.mjs` 16/16, `test/tools-jobs.test.mjs` 37/37,
+  `JobDetailModal.test.tsx` 4/4.
+  Verification (after D2): `npm test` → 1519/1519 pass, 0 fail.
+  `npm run -w dashboard test` → 198/198 pass (25 files). `npm run -w
+  dashboard typecheck` → clean. `npm run build` → succeeds (pre-existing
+  >500kB chunk-size warning, unrelated). `grep -rn '<style\|style="\|data:font'
+  dashboard/dist` → no matches.
 - [ ] D3 — docs + skills + coexistence regression test.
 
 Route declaration: D1–D3 delegated to one writer (mapping + preparation
@@ -104,7 +147,7 @@ triggers: adapters, jobrunner, dispatch, index tool schemas, verify, docs).
 
 ## Progress / next step
 
-- Next: D2.
+- Next: D3.
 - Queued after this feature (separate): E — run MCP + dashboard from a fixed
   runtime worktree on `main`, so development in the checkout never affects
   the live hub.
