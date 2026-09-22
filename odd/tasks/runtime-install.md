@@ -56,7 +56,17 @@ checkout, so work in progress can never affect the live hub.
   `test/install-guard.test.mjs` 6/6; live probe on this feature branch exits 1
   with "refusing to install"; full `npm test` 1526/1526.
   Route: inline (1 script + 1 test + docs).
-- [ ] E2 — install, repoint 5 client configs (with backups), systemd dashboard.
+- [x] E2 — install, repoint 5 client configs (with backups), systemd dashboard.
+  Evidence: installed from main `ce8dbd6` (INSTALL.json branch=main,
+  dirty=false). Repointed `~/.claude.json`, both agy `mcp_config.json`,
+  opencode and codex to `~/.claude/mcp-servers/agent-hub/bin/agent-hub`
+  (backups `*.bak-20260922-160845`; JSON/TOML validated; no stale refs).
+  systemd --user is unavailable in this WSL ("Failed to connect to bus"):
+  the unit and `~/.config/agent-hub/env` are installed but inactive; the
+  dashboard runs from the installed copy via nohup (HTTP 200). Enabling
+  systemd in WSL (`/etc/wsl.conf` `[boot] systemd=true`) would make it
+  start on boot. The stale codex copy (`~/.codex/mcp-servers/agent-hub`)
+  is left on disk, no longer referenced.
   Route: inline (machine configuration, no repo code).
 
 ## Acceptance criteria
@@ -69,4 +79,4 @@ checkout, so work in progress can never affect the live hub.
 
 ## Progress / next step
 
-- Next: E2 (after E1 is merged to main).
+- Next: none. Clients load the new path on their next reconnect/restart.
