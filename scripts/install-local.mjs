@@ -3,12 +3,16 @@
 // into the directory Claude Code points at, keeping this git checkout as the
 // development copy. Nothing under AGENT_HUB_HOME is touched.
 //
-// Usage: node scripts/install-local.mjs [--target <dir>] [--skip-build] [--restart]
+// Only a clean `main` checkout is installed, so an in-progress branch never
+// becomes the runtime every client loads; --allow-branch overrides that.
+//
+// Usage: node scripts/install-local.mjs [--target <dir>] [--skip-build] [--restart] [--allow-branch]
 import { execFileSync } from 'node:child_process'
 import fs from 'node:fs'
 import os from 'node:os'
 import path from 'node:path'
 import { fileURLToPath } from 'node:url'
+import { checkInstallSource, readGitState } from './install-guard.mjs'
 
 const REPO = path.resolve(path.dirname(fileURLToPath(import.meta.url)), '..')
 const args = process.argv.slice(2)
@@ -23,6 +27,13 @@ const target = path.resolve(
 )
 if (target === REPO) {
   console.error('agent-hub: the install target is this checkout; pass --target <dir>')
+  process.exit(1)
+}
+
+const gitState = readGitState(REPO)
+const guard = checkInstallSource({ ...gitState, allowBranch: flag('--allow-branch') })
+if (!guard.ok) {
+  console.error(`agent-hub: refusing to install — ${guard.reason}`)
   process.exit(1)
 }
 
@@ -74,7 +85,18 @@ try {
 }
 fs.writeFileSync(
   path.join(target, 'INSTALL.json'),
-  JSON.stringify({ version: pkg.version, commit, source: REPO, installedAt: new Date().toISOString() }, null, 2) + '\n'
+  JSON.stringify(
+    {
+      version: pkg.version,
+      commit,
+      branch: gitState.branch ?? null,
+      dirty: gitState.dirty ?? null,
+      source: REPO,
+      installedAt: new Date().toISOString(),
+    },
+    null,
+    2
+  ) + '\n'
 )
 
 console.log('agent-hub: installing runtime dependencies…')
