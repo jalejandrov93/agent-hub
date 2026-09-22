@@ -61,11 +61,21 @@ proposals instead of leaving `DELEGATION_MAP` silently stale. Also route
   Evidence: RED observed (`ERR_MODULE_NOT_FOUND src/model-gaps.mjs`), GREEN
   `node --test test/model-gaps.test.mjs` 10/10, full `npm test` 1450/1450.
   Commit `404726a`.
-- [ ] T3 — `add_candidate` proposals: schema (`src/schemas.mjs`), creation in
+- [x] T3 — `add_candidate` proposals: schema (`src/schemas.mjs`), creation in
   `refreshProposals` from `discovery.json`, dedupe/cooldown, effective-chain
   splice at tail in `route()`, `chainHash` on effective chain, and
   `pruneCacheForMap` reachability. Tests in `test/proposals.test.mjs` and
   `test/router.test.mjs`.
+  Evidence: RED observed per new test (proposals: 8 failing incl.
+  `effectiveChainFor is not a function`; router: fallback-count assertion
+  failed 2!==3; discovery: prune-keep assertion failed; dashboard-api-v2:
+  `unmapped` assertion failed after stashing the dashboard.mjs wiring).
+  GREEN: `node --test test/proposals.test.mjs test/router.test.mjs
+  test/discovery.test.mjs` 49/49; `node --test test/dashboard-api-v2.test.mjs`
+  all passing; full `npm test` 1459/1459; `npm run -w dashboard typecheck`
+  clean (fixed one pre-existing `ProposalT` fixture in
+  `dashboard/src/views/config/config.test.tsx` missing the new required
+  `kind` field); `npm run -w dashboard test` 179/179. Commit `f664d0a`.
 - [ ] T4 — Dashboard: render `add_candidate` proposals (new pair + tail
   position + "newer version of X"), accept copy, and list unmapped models.
   Tests in the dashboard workspace. Docs: `docs/routing.md` section.
@@ -85,4 +95,4 @@ files across discovery, proposals, router, schemas, dashboard).
 
 ## Progress / next step
 
-- Next: T3.
+- Next: T4.
