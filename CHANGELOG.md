@@ -6,6 +6,14 @@ and this project adheres to [Semantic Versioning](https://semver.org/).
 
 ## [Unreleased]
 
+### Fixed
+
+- agy jobs whose turn ended while the model was still "waiting" on a command
+  agy had auto-detached into the background (marker `terminating N background
+  task(s) on exit`) are now reported as `failed` with `errorKind: incomplete`
+  instead of an empty `succeeded`. The partial text and session id are kept so
+  `job_reply` can resume the conversation.
+
 ### Changed
 
 - Relicensed from Apache-2.0 to MIT. Releases up to and including v2.1.0 stay

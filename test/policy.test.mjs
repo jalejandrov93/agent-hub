@@ -1,6 +1,6 @@
 import { test } from 'node:test'
 import assert from 'node:assert/strict'
-import { ERROR_TAXONOMY } from '../src/policy/taxonomy.mjs'
+import { ERROR_TAXONOMY, classifyError } from '../src/policy/taxonomy.mjs'
 import { POLICY_TABLE, policyFor } from '../src/policy/registry.mjs'
 import { executeWithPolicy, recoveryStageOrder } from '../src/policy/executor.mjs'
 
@@ -61,4 +61,8 @@ test('executeWithPolicy on billing fails fast to human escalation without retryi
   assert.ok(caught, 'billing must throw')
   assert.equal(calls, 1, 'billing must not be retried')
   assert.equal(caught.escalation, 'human')
+})
+
+test('classifyError maps an adapter-reported incomplete turn to the non-retried quality category, like empty', () => {
+  assert.equal(classifyError('agy yielded with 1 background task(s) still running', { errorKind: 'incomplete' }), 'quality')
 })

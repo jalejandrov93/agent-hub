@@ -82,6 +82,21 @@ export function classifyError(stdout, exitInfo = {}) {
     }
   }
 
+  // agy 1.2.x auto-detaches a slow run_command into a background task; the
+  // model then "waits" by yielding its turn, and print mode ends the turn,
+  // prints this marker, kills the task and still reports SUCCESS. The work
+  // (usually the verification run) never finished, so this is not a success.
+  const backgroundKilled = stdout.match(/terminating (\d+) background task\(s\) on exit/)
+  if (backgroundKilled && resultEnvelope?.status === 'SUCCESS') {
+    return {
+      kind: 'incomplete',
+      retriable: true,
+      message: `agy ended the turn and killed ${backgroundKilled[1]} background task(s) the model was still waiting on`,
+      partialText: resultEnvelope.response || partialText,
+      sessionId,
+    }
+  }
+
   if (resultEnvelope) {
     if (resultEnvelope.status === 'SUCCESS') {
       if (!resultEnvelope.response && !partialText) {
