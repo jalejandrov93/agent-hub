@@ -105,6 +105,13 @@ files across discovery, proposals, router, schemas, dashboard).
 
 - T2, T3, T4 (this writer's scope) are all done and verified. T1 was already
   done before this writer started.
-- Next: none for this writer's authorized scope (T2-T4). Feature-level
-  wrap-up (delivery strategy / PR, native review if RDD is enabled) is the
-  orchestrator's decision.
+- Parent spot check: `npm test` 1458/1459; the single failure is the
+  timing-sensitive `test/process.test.mjs` SIGINT/SIGTERM test (untouched by
+  this branch), 5/5 green in isolation -> pre-existing load flake.
+- RDD: slice assess medium, `slice_budget_reached` (19 files, 1011 lines);
+  candidate consent relayed, user chose "skip this time" -> declined
+  (`declined_this_candidate`). Off-path tier medium: writer self-verification
+  + parent spot check.
+- Delivery: single PR to main, merged at the user's request.
+- Next: none for this feature. Follow-ups tracked separately: C (per-job
+  diff stats in dashboard), D (hub-side verification for agy jobs).
