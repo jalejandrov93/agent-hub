@@ -177,6 +177,40 @@ export async function computeDiffStats({
   }
 }
 
-// computeChangedFilesMismatch and createDiffStatsCache are added in C2,
-// alongside the tests that drive them (final-snapshot persistence + the
-// live dashboard API), to keep RED-before-implementation honest per function.
+/**
+ * Informational-only comparison between a handoff's self-reported
+ * `changedFiles` and the measured diff file set. Returns null when nothing
+ * was declared — there is nothing to compare a measurement against.
+ */
+export function computeChangedFilesMismatch({ declaredFiles = [], measuredFiles = [] } = {}) {
+  if (!Array.isArray(declaredFiles) || declaredFiles.length === 0) return null
+  const measuredSet = new Set(measuredFiles)
+  const declaredSet = new Set(declaredFiles)
+  const onlyDeclared = declaredFiles.filter((f) => !measuredSet.has(f))
+  const onlyMeasured = measuredFiles.filter((f) => !declaredSet.has(f))
+  return { matches: onlyDeclared.length === 0 && onlyMeasured.length === 0, onlyDeclared, onlyMeasured }
+}
+
+/**
+ * Tiny TTL cache for live diff stats (GET /api/jobs/:id/diff-stats on a
+ * still-running write job): a few seconds is enough to stop a fast dashboard
+ * poll loop from re-shelling out to git on every render, without staling a
+ * genuinely progressing job for long.
+ */
+export function createDiffStatsCache({ ttlMs = 4000 } = {}) {
+  const store = new Map()
+  return {
+    get(key) {
+      const hit = store.get(key)
+      if (!hit) return undefined
+      if (Date.now() - hit.at > ttlMs) {
+        store.delete(key)
+        return undefined
+      }
+      return hit.value
+    },
+    set(key, value) {
+      store.set(key, { value, at: Date.now() })
+    },
+  }
+}

@@ -12,7 +12,12 @@ import { takeSnapshot as defaultTakeSnapshot, diffSnapshots as defaultDiffSnapsh
 import { startRemoteJob as defaultStartRemoteJob } from './cloud/runner.mjs'
 import { resolveAgyCommand, profileFromEnv, resolveAgyProfileSync as defaultResolveAgyProfileSync, recordQuotaExhaustion as defaultRecordQuotaExhaustion } from './providers/agys.mjs'
 import { modelGroupFor } from './providers/profiles.mjs'
-import { captureDiffBase as defaultCaptureDiffBase } from './diffstats.mjs'
+import {
+  captureDiffBase as defaultCaptureDiffBase,
+  computeDiffStats as defaultComputeDiffStats,
+  computeChangedFilesMismatch as defaultComputeChangedFilesMismatch,
+} from './diffstats.mjs'
+import { readHandoff as defaultReadHandoff } from './context.mjs'
 
 // jobId -> { pgid, leaseToken, heartbeatTimer, leaseTtlMs } for jobs still
 // running in THIS process. Used by cancelJob for an immediate kill; the
@@ -357,7 +362,7 @@ export function startJob({
 
   const done = exitPromise
     .then(({ code, timedOut }) =>
-      finishJob({ jobId: job.jobId, agent, model, cwd, title, adapter, mode, env, timedOut, exitCode: code, taskType, snapshot, takeSnapshotFn, diffSnapshotsFn, formatViolationFn, harness, waitMode, runCommandFn, profile: effectiveProfile, profileStatus: effectiveProfileStatus, recordQuotaExhaustionFn })
+      finishJob({ jobId: job.jobId, agent, model, cwd, title, adapter, mode, env, timedOut, exitCode: code, taskType, snapshot, takeSnapshotFn, diffSnapshotsFn, formatViolationFn, harness, waitMode, runCommandFn, profile: effectiveProfile, profileStatus: effectiveProfileStatus, recordQuotaExhaustionFn, diffBase })
     )
     .finally(() => {
       stopHeartbeat(job.jobId)
@@ -429,6 +434,94 @@ async function attemptServerInterrupt({ adapter, agent, model, cwd, title, jobId
   )
 }
 
+const TERMINAL_JOB_STATUSES = new Set(['succeeded', 'failed', 'canceled'])
+
+/**
+ * Final diff-stats snapshot for a write-mode job at a terminal transition
+ * (finishJob's three branches, and cancelJob): measures `cwd` against its
+ * recorded baseline, then flags an informational mismatch against a
+ * declared handoff for the same workflow/step, when one exists. Returns
+ * null for a read-mode job, a job with no baseline, or on ANY failure along
+ * the way — a stats error must never fail the job it was computed for.
+ */
+async function computeFinalDiffStats({
+  mode,
+  cwd,
+  diffBase,
+  workflowId,
+  stepId,
+  env,
+  computeDiffStatsFn = defaultComputeDiffStats,
+  readHandoffFn = defaultReadHandoff,
+  mismatchFn = defaultComputeChangedFilesMismatch,
+}) {
+  if (mode !== 'write' || !diffBase) return null
+  let stats
+  try {
+    stats = await computeDiffStatsFn({ cwd, baseCommit: diffBase, env })
+  } catch {
+    return null
+  }
+  if (!stats) return null
+
+  if (workflowId && stepId) {
+    try {
+      const handoff = readHandoffFn({ workflowId, stepId }, env)
+      const declared = handoff?.changedFiles
+      if (Array.isArray(declared) && declared.length > 0) {
+        const measured = stats.files.map((f) => f.path)
+        const mismatch = mismatchFn({ declaredFiles: declared, measuredFiles: measured })
+        if (mismatch) return { ...stats, changedFilesMismatch: mismatch }
+      }
+    } catch {
+      // Handoff lookup is best-effort; the measured stats above are still valid on their own.
+    }
+  }
+  return stats
+}
+
+/**
+ * Live/final diff stats for the dashboard's GET /api/jobs/:id/diff-stats:
+ * a terminal job returns its persisted snapshot (survives worktree
+ * deletion — never recomputed); a still-running write-mode job with a
+ * baseline computes on demand, optionally through a short-TTL `cache`
+ * (see diffstats.mjs's createDiffStatsCache) so a fast poll loop doesn't
+ * re-shell out to git on every render. Everything else (read mode, no
+ * baseline) is null — no stats, no error.
+ */
+export async function getJobDiffStats({
+  jobId,
+  env = process.env,
+  cache = null,
+  computeDiffStatsFn = defaultComputeDiffStats,
+  readHandoffFn = defaultReadHandoff,
+  mismatchFn = defaultComputeChangedFilesMismatch,
+}) {
+  const record = readResult(jobId, env)
+  if (TERMINAL_JOB_STATUSES.has(record.status)) return record.diffStats ?? null
+  if (record.mode !== 'write' || !record.diffBase) return null
+
+  if (cache) {
+    const cached = cache.get(jobId)
+    if (cached !== undefined) return cached
+  }
+
+  const diffStats = await computeFinalDiffStats({
+    mode: record.mode,
+    cwd: record.cwd,
+    diffBase: record.diffBase,
+    workflowId: record.workflow_id ?? record.workflowId ?? null,
+    stepId: record.step_id ?? record.stepId ?? null,
+    env,
+    computeDiffStatsFn,
+    readHandoffFn,
+    mismatchFn,
+  })
+
+  if (cache) cache.set(jobId, diffStats)
+  return diffStats
+}
+
 async function finishJob({
   jobId,
   agent,
@@ -451,6 +544,10 @@ async function finishJob({
   profile = null,
   profileStatus = null,
   recordQuotaExhaustionFn = defaultRecordQuotaExhaustion,
+  diffBase = null,
+  computeDiffStatsFn = defaultComputeDiffStats,
+  readHandoffFn = defaultReadHandoff,
+  mismatchFn = defaultComputeChangedFilesMismatch,
 }) {
   const current = readResult(jobId, env)
   if (current.status === 'canceled') return // cancelJob already finalized this job
@@ -458,6 +555,23 @@ async function finishJob({
   const eventWaitMode = waitMode ?? current.waitMode ?? null
   const eventProfile = profile ?? current.profile ?? null
   const eventProfileStatus = profileStatus ?? current.profileStatus ?? null
+
+  // job-diff-stats: computed once here (not inside each branch below) so
+  // every terminal outcome — failed, read-mode violation, succeeded — gets
+  // the same final snapshot merged into its own updateResult patch. Never
+  // throws; a stats failure degrades to null and must never fail the job.
+  const effectiveDiffBase = diffBase ?? current.diffBase ?? null
+  const diffStats = await computeFinalDiffStats({
+    mode,
+    cwd,
+    diffBase: effectiveDiffBase,
+    workflowId: current.workflow_id ?? current.workflowId ?? null,
+    stepId: current.step_id ?? current.stepId ?? null,
+    env,
+    computeDiffStatsFn,
+    readHandoffFn,
+    mismatchFn,
+  })
 
   let stdout = ''
   try {
@@ -493,6 +607,7 @@ async function finishJob({
         error: error.message,
         sessionId: error.sessionId ?? current.sessionId ?? null,
         ...(violation ? { readModeViolation: violation } : {}),
+        ...(diffStats ? { diffStats } : {}),
       },
       env
     )
@@ -554,6 +669,7 @@ async function finishJob({
         costUsd: result.costUsd ?? null,
         sessionId: result.sessionId ?? null,
         toolDenials: result.toolDenials ?? [],
+        ...(diffStats ? { diffStats } : {}),
       },
       env
     )
@@ -575,6 +691,7 @@ async function finishJob({
       sessionId: result.sessionId ?? null,
       toolDenials: result.toolDenials ?? [],
       ...(noChanges ? { noChanges: true } : {}),
+      ...(diffStats ? { diffStats } : {}),
     },
     env
   )
@@ -591,7 +708,15 @@ async function finishJob({
 }
 
 /** Kill a running job's process group and mark it canceled. */
-export async function cancelJob(jobId, { env = process.env } = {}) {
+export async function cancelJob(
+  jobId,
+  {
+    env = process.env,
+    computeDiffStatsFn = defaultComputeDiffStats,
+    readHandoffFn = defaultReadHandoff,
+    mismatchFn = defaultComputeChangedFilesMismatch,
+  } = {}
+) {
   const result = readResult(jobId, env)
   if (result.status !== 'running') {
     return result
@@ -602,7 +727,23 @@ export async function cancelJob(jobId, { env = process.env } = {}) {
   // that runs the timeout ladder). finishJob checks for status:'canceled' and
   // no-ops when it sees it, so this ordering is what keeps a cancel from also
   // producing a spurious job.failed(errorKind:'empty') event for the same job.
-  const updated = updateResult(jobId, { status: 'canceled', errorKind: 'canceled_by_user' }, env)
+  let updated = updateResult(jobId, { status: 'canceled', errorKind: 'canceled_by_user' }, env)
+
+  // job-diff-stats: a canceled write-mode job still gets its final snapshot
+  // persisted (same "any terminal status" contract as finishJob) — a
+  // canceled run may have already produced real, worth-keeping changes.
+  const diffStats = await computeFinalDiffStats({
+    mode: result.mode,
+    cwd: result.cwd,
+    diffBase: result.diffBase,
+    workflowId: result.workflow_id ?? result.workflowId ?? null,
+    stepId: result.step_id ?? result.stepId ?? null,
+    env,
+    computeDiffStatsFn,
+    readHandoffFn,
+    mismatchFn,
+  })
+  if (diffStats) updated = updateResult(jobId, { diffStats }, env)
 
   if (result.remote) {
     // There is no Jules API to cancel a remote session: marking the record

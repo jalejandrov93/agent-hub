@@ -7,7 +7,8 @@ import { listJobs } from './jobstore.mjs'
 import { getWorkGraph } from './workGraph.mjs'
 import { buildExecutionGraph } from './execution-graph.mjs'
 import { readCache, agentsStatus, pingAgent, breakerStatus } from './preflight.mjs'
-import { cancelJob } from './jobrunner.mjs'
+import { cancelJob, getJobDiffStats } from './jobrunner.mjs'
+import { createDiffStatsCache } from './diffstats.mjs'
 import { paths, stateHome, DEFAULT_TIMEOUTS_S, CIRCUIT_BREAKER, PREFLIGHT_TTL_MS, WRITE_ALLOWLIST, MODEL_REGISTRY } from './config.mjs'
 import { initDb } from './storage/index.mjs'
 import { runDiscovery, readDiscovery, resolveAgentCli, KNOWN_AGENTS, pruneCacheForMap } from './discovery.mjs'
@@ -389,6 +390,9 @@ function sendError(res, error) {
 
 export function createServer({ env = process.env, commandRunner = runCommand, distDir = DEFAULT_DIST_DIR, client = defaultClient } = {}) {
   const sseClients = new Set()
+  // job-diff-stats: short-TTL cache for live diff stats on a running write
+  // job, scoped to this server instance (see GET /api/jobs/:id/diff-stats).
+  const diffStatsCache = createDiffStatsCache()
 
   // Rebuilt whenever index.html's mtime changes, so `npm run build` is
   // picked up without restarting the dashboard process — checked with one
@@ -1041,6 +1045,25 @@ export function createServer({ env = process.env, commandRunner = runCommand, di
       } catch (error) {
         sendError(res, domainError(error))
       }
+      return
+    }
+
+    const diffStatsMatch = url.pathname.match(/^\/api\/jobs\/([^/]+)\/diff-stats$/)
+    if (diffStatsMatch && req.method === 'GET') {
+      let jobId
+      try {
+        jobId = decodeURIComponent(diffStatsMatch[1])
+      } catch {
+        return sendJson(res, 400, { error: 'invalid URL encoding' })
+      }
+      getJobDiffStats({ jobId, env, cache: diffStatsCache })
+        .then((diffStats) => sendJson(res, 200, { diffStats }))
+        .catch((error) => {
+          if (typeof error?.message === 'string' && error.message.startsWith('job not found:')) {
+            return sendJson(res, 404, { error: error.message })
+          }
+          return sendError(res, domainError(error))
+        })
       return
     }
 

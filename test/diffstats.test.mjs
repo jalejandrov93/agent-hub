@@ -4,7 +4,7 @@ import fs from 'node:fs'
 import path from 'node:path'
 import os from 'node:os'
 import { execFileSync } from 'node:child_process'
-import { captureDiffBase, computeDiffStats } from '../src/diffstats.mjs'
+import { captureDiffBase, computeDiffStats, computeChangedFilesMismatch, createDiffStatsCache } from '../src/diffstats.mjs'
 
 function tmpDir(prefix) {
   return fs.mkdtempSync(path.join(os.tmpdir(), prefix))
@@ -199,5 +199,51 @@ test('computeDiffStats', async (t) => {
     const stats = await computeDiffStats({ cwd: repo, baseCommit: base, runner: hangingRunner })
     assert.equal(stats.additions, null)
     assert.match(stats.error, /timed out/)
+  })
+})
+
+test('computeChangedFilesMismatch', async (t) => {
+  await t.test('returns null when nothing was declared (nothing to compare)', () => {
+    assert.equal(computeChangedFilesMismatch({ declaredFiles: [], measuredFiles: ['a.txt'] }), null)
+    assert.equal(computeChangedFilesMismatch(), null)
+  })
+
+  await t.test('matches:true when the declared and measured sets are equal (order-independent)', () => {
+    const result = computeChangedFilesMismatch({ declaredFiles: ['b.txt', 'a.txt'], measuredFiles: ['a.txt', 'b.txt'] })
+    assert.deepEqual(result, { matches: true, onlyDeclared: [], onlyMeasured: [] })
+  })
+
+  await t.test('reports files only in the declared set and only in the measured set', () => {
+    const result = computeChangedFilesMismatch({
+      declaredFiles: ['a.txt', 'ghost.txt'],
+      measuredFiles: ['a.txt', 'surprise.txt'],
+    })
+    assert.equal(result.matches, false)
+    assert.deepEqual(result.onlyDeclared, ['ghost.txt'])
+    assert.deepEqual(result.onlyMeasured, ['surprise.txt'])
+  })
+})
+
+test('createDiffStatsCache', async (t) => {
+  await t.test('returns undefined for a miss, then the stored value on a hit', () => {
+    const cache = createDiffStatsCache({ ttlMs: 10_000 })
+    assert.equal(cache.get('job-1'), undefined)
+    cache.set('job-1', { additions: 1 })
+    assert.deepEqual(cache.get('job-1'), { additions: 1 })
+  })
+
+  await t.test('expires an entry once ttlMs has elapsed', async () => {
+    const cache = createDiffStatsCache({ ttlMs: 5 })
+    cache.set('job-1', { additions: 1 })
+    await new Promise((r) => setTimeout(r, 20))
+    assert.equal(cache.get('job-1'), undefined)
+  })
+
+  await t.test('keys are independent', () => {
+    const cache = createDiffStatsCache({ ttlMs: 10_000 })
+    cache.set('job-1', { additions: 1 })
+    cache.set('job-2', { additions: 2 })
+    assert.deepEqual(cache.get('job-1'), { additions: 1 })
+    assert.deepEqual(cache.get('job-2'), { additions: 2 })
   })
 })
