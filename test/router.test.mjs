@@ -28,6 +28,13 @@ test('route includes Claude subagent tiers as {agent:"claude", model} entries wh
   assert.equal(result.primary.model, 'sonnet')
 })
 
+test('mechanical-edit prefers agy (write mode) before the paid deepseek candidate', async () => {
+  const { DELEGATION_MAP } = await fresh(tmpHome())
+  const chain = DELEGATION_MAP['mechanical-edit'].chain
+  assert.deepEqual(chain[0], { agent: 'agy', model: 'gemini-3.8-flash-medium', mode: 'write' })
+  assert.equal(chain[1].model, 'deepseek/deepseek-v4-flash')
+})
+
 test('route skips a pair whose cached preflight is unavailable, promoting the next fallback', async () => {
   const home = tmpHome()
   process.env.AGENT_HUB_HOME = home

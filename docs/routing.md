@@ -46,7 +46,7 @@ passes availability filtering, plus the rest as fallbacks:
 | `second-opinion` | agy gemini-3.1-pro-high | copilot auto | different model lineage than Claude Code |
 | `adversarial-review` | agy claude-sonnet-4-6 (parallel with copilot auto) | agy claude-opus-4-6-thinking | dual blind review off the Claude Code quota |
 | `github-context` | copilot auto | — | built-in GitHub MCP; cheap models keep premium quota |
-| `mechanical-edit` | opencode deepseek-v4-flash (write) | copilot auto (write) → codex default (write) | cheap write-capable; single writer |
+| `mechanical-edit` | agy gemini-3.8-flash-medium (write) | opencode deepseek-v4-flash (write) → copilot auto (write) → codex default (write) | cheap write-capable; single writer |
 | `implementation-with-repo-rules` | claude sonnet | — | only Claude Code loads CLAUDE.md + skills + hooks |
 | `architecture` | claude opus | agy claude-opus-4-6-thinking | highest reasoning |
 | `structured-mechanical` | claude haiku | — | cheapest Claude tier |

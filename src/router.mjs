@@ -86,6 +86,9 @@ export const DELEGATION_MAP = {
   'mechanical-edit': {
     why: 'cheap write-capable; single writer',
     chain: [
+      // agy first: refreshable plan quota, load-balanced across profiles;
+      // deepseek is paid per token, so it only runs when agy is unavailable.
+      { agent: 'agy', model: 'gemini-3.8-flash-medium', mode: 'write' },
       { agent: 'opencode', model: 'deepseek/deepseek-v4-flash', mode: 'write' },
       { agent: 'copilot', model: 'auto', mode: 'write' },
       // LAST resort only: codex's plan quota is limited (see config.mjs).
