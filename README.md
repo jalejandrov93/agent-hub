@@ -173,7 +173,10 @@ npm run install:local -- --restart
 
 `install:local` builds the dashboard, copies the runtime into
 `~/.claude/mcp-servers/agent-hub`, installs production dependencies there and
-records the exact commit. Re-run it after every `git pull`.
+records the exact commit. Re-run it after every `git pull`. It only installs a
+clean `main` checkout (pass `--allow-branch` to install anything else on
+purpose), so work in progress never reaches the live hub. Point every MCP
+client and the dashboard service at the installed copy, never at the checkout.
 
 → Full instructions, hooks, the dashboard service and skill install:
 **[Getting started](docs/getting-started.md)**
