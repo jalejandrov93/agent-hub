@@ -86,7 +86,10 @@ export function classifyError(stdout, exitInfo = {}) {
   // model then "waits" by yielding its turn, and print mode ends the turn,
   // prints this marker, kills the task and still reports SUCCESS. The work
   // (usually the verification run) never finished, so this is not a success.
-  const backgroundKilled = stdout.match(/terminating (\d+) background task\(s\) on exit/)
+  // Line-anchored: agy prints the marker as its own raw line, while the same
+  // text quoted in tool output or model text only ever appears JSON-escaped
+  // inside a stream event line.
+  const backgroundKilled = stdout.match(/^terminating (\d+) background task\(s\) on exit\r?$/m)
   if (backgroundKilled && resultEnvelope?.status === 'SUCCESS') {
     return {
       kind: 'incomplete',

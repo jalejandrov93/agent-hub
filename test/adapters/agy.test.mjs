@@ -174,3 +174,10 @@ test('classifyError keeps a SUCCESS turn without the background-termination mark
   const stdout = read('stream-background-yield.jsonl').replace('terminating 1 background task(s) on exit\n', '')
   assert.equal(classifyError(stdout), null)
 })
+
+test('classifyError ignores the background-termination marker when it only appears inside streamed JSON (tool output or model text quoting it)', () => {
+  const quoted = JSON.stringify({ event: 'step_update', step_update: { step_index: 9, state: 'DONE', step_type: 'tool', tool_name: 'run_command', tool_info: { name: 'run_command', output: 'diff\nterminating 1 background task(s) on exit\n' } } })
+  const stdout = read('stream-success.jsonl').replace(/\n(?=\{"event": ?"result")/, `\n${quoted}\n`)
+  assert.match(stdout, /terminating 1 background task/)
+  assert.equal(classifyError(stdout), null)
+})
