@@ -408,6 +408,9 @@ export function buildServer() {
         title: z.string().optional(),
         variant: z.string().optional().describe('opencode reasoning effort (minimal/low/medium/high/max); ignored by agy/copilot.'),
         taskType: taskTypeArg,
+        profile: z.string().optional().describe(
+          'agys account to run an agy job on; omit for automatic quota/load-balanced selection. Only meaningful for agent "agy"; rejected for any other agent.'
+        ),
       },
       outputSchema: DelegateResponse,
       annotations: { readOnlyHint: false, openWorldHint: true },
@@ -416,8 +419,8 @@ export function buildServer() {
     // for the job) -- do not reach for .then() here. guard() awaits whatever
     // the handler returns, so a plain object is correct. dispatch() below can
     // use .then() only because it really is async.
-    guard(({ agent, model, task, cwd, mode, timeoutS, title, variant, taskType }, extra) => {
-      const res = delegateTool({ agent, model, task, cwd, mode, timeoutS, title, variant, taskType })
+    guard(({ agent, model, task, cwd, mode, timeoutS, title, variant, taskType, profile }, extra) => {
+      const res = delegateTool({ agent, model, task, cwd, mode, timeoutS, title, variant, taskType, profile })
       // C1.2 origin mapping (best-effort, mapping-only): remember which
       // harness session this job came from for a future wake-up bridge.
       recordDispatchOrigin({ jobId: res?.jobId, extra, harness: null, env: process.env })
@@ -449,12 +452,15 @@ export function buildServer() {
         timeoutS: z.number().int().positive().optional(),
         waitMode: waitModeEnum.optional().describe('none: return at create/start; attention: also return on waiting/attention; terminal: terminal status only. Defaults to the harness profile.'),
         harness: harnessEnum.optional().describe('Explicit harness profile; beats AGENT_HUB_HARNESS env and the MCP client hint.'),
+        profile: z.string().optional().describe(
+          'agys account to run an agy job on; omit for automatic quota/load-balanced selection. Only meaningful when the routed candidate is agent "agy"; rejected otherwise.'
+        ),
       },
       outputSchema: DispatchResponse,
       annotations: { readOnlyHint: false, openWorldHint: true },
     },
-    guard(({ task, taskType, cwd, mode, workflowStep, dispatchKey, attempt, parentExecutionId, rootExecutionId, timeoutS, waitMode, harness }, extra) =>
-      dispatch({ task, taskType, cwd, mode, workflowStep, dispatchKey, attempt, parentExecutionId, rootExecutionId, timeoutS, waitMode, harness, clientHint: getMcpClientHint() }).then((res) => {
+    guard(({ task, taskType, cwd, mode, workflowStep, dispatchKey, attempt, parentExecutionId, rootExecutionId, timeoutS, waitMode, harness, profile }, extra) =>
+      dispatch({ task, taskType, cwd, mode, workflowStep, dispatchKey, attempt, parentExecutionId, rootExecutionId, timeoutS, waitMode, harness, profile, clientHint: getMcpClientHint() }).then((res) => {
         // C1.2 origin mapping (best-effort, mapping-only): remember which
         // harness session this dispatch came from for a future wake-up bridge.
         recordDispatchOrigin({ jobId: res?.job?.jobId ?? res?.jobId, extra, harness: harness ?? null, env: process.env })

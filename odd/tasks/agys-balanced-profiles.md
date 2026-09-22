@@ -1,0 +1,81 @@
+# Feature: agys balanced profile selection + explicit profile pin
+
+Locator: `odd/tasks/agys-balanced-profiles.md` (worktree `agent-hub-worktrees/agys-balanced`, branch `feat/agys-balanced-profiles`)
+Engram mirror: `odd/agys-balanced-profiles/tasks` (project `agent-hub`)
+
+## Objective
+
+Spread agy jobs across agys accounts by quota AND current load, and let a caller pin one account per task.
+
+## Problem / why
+
+- `resolveAgyProfileSync` (src/providers/agys.mjs) caches the chosen profile for 60 s per model group, so a burst of N parallel jobs all land on ONE account (observed: 8 jobs at 2026-09-21 15:51 all on `personal`). It only moves after a 429.
+- `delegate()` / `dispatch()` expose no `profile` input, although `startJob` (src/jobrunner.mjs ~205) already accepts `profile`. Pinning today requires the global agys mode file or `AGENT_HUB_AGYS_PROFILE`, which affects every concurrent job.
+
+## Design (accepted by user 2026-09-22)
+
+- Quota-weighted, load-aware rotation:
+  `score = remainingQuota(profile, modelGroup) - LOAD_PENALTY * inFlight(profile, modelGroup)`;
+  highest score wins; ties -> least-recently-assigned profile (round-robin); then priority, then name.
+- Cache only the slow part (agys list + quota snapshot, keep the 60 s TTL). In-flight counts and last-assignment are computed on every call.
+- In-flight = jobs with status `running`/`queued` whose recorded `profile` matches and whose model is in the same model group (read from the job store).
+- Unknown quota keeps sorting last (existing behaviour); exhausted/unavailable profiles stay excluded; the 429 exhaustion record stays authoritative.
+- Explicit `profile` input on `delegate` and `dispatch`: validated against `agys list`; unknown profile -> clear error, no silent fallback. Recorded with `profileStatus: 'pinned'`.
+- Global mode precedence unchanged: `AGENT_HUB_AGYS_PROFILE` env / mode file `profile` still pin globally; per-call `profile` overrides auto only (and overrides a global pin, since it is explicit per call).
+
+## Scope
+
+In: src/providers/agys.mjs, src/providers/profiles.mjs, src/jobrunner.mjs, src/dispatch.mjs, delegate/dispatch tool schemas (src/index.mjs or src/tools/*), router annotation if it shares the resolver, tests, CHANGELOG, tool docs if they list inputs.
+Out: dashboard UI changes, agys itself, Jules accounts.
+
+T4 additionally touches: src/router.mjs (codex fallback ordering in `triage`/`mechanical-edit` chains), a new pure gate function (e.g. `src/routing/codex-gate.mjs`), CHANGELOG, and any doc stating "quota never reorders agents" — that statement becomes true for every agent except codex, which T4 intentionally gates/promotes on its own plan quota.
+
+## Constraints
+
+- Strict TDD (RED -> GREEN -> REFACTOR). Runner: `npm test` (node --test). TDD source: user global config "Strict TDD Mode: enabled".
+- No behaviour change for `mode: off`.
+- ~400 authored changed lines is a planning heuristic only.
+- Delivery strategy: ask-on-risk. Forecast ~300 lines (T1-T3); T4 forecast ~150 lines.
+
+## Tasks
+
+- [x] T1 Explicit `profile` input on `delegate` and `dispatch` (validate against agys list, `profileStatus: 'pinned'`, error on unknown). Route: delegated writer (2+ non-trivial files).
+- [ ] T2 Load-aware quota rotation in profile selection (in-flight penalty + least-recently-assigned tie-break; cache only the quota snapshot). Route: delegated writer.
+- [ ] T3 CHANGELOG + tool docs; full `npm test`.
+- [ ] T4 (added 2026-09-22, user-approved) Quota-gated codex routing: gate codex (agent 'codex', model 'default', last fallback in `triage`/`mechanical-edit` per src/config.mjs tier 'limited') on its own plan quota from CodexBar (src/quota/codexbar.mjs + src/quota/mapping.mjs). Pure, unit-tested rule, e.g. `src/routing/codex-gate.mjs`:
+  - remaining = 100 - usedPercent of the most-constrained window (primary, and secondary if present).
+  - remaining < CODEX_MIN_REMAINING_PCT (20) -> drop codex from the chain entirely; annotate `skipped: [{agent:'codex', reason:'quota_low', remainingPct}]` (or router's existing annotation style).
+  - remaining >= CODEX_PROMOTE_REMAINING_PCT (50) AND on pace (usedPercent/100 <= elapsedFraction of the window, elapsedFraction = 1 - (resetsAt - now)/windowMinutes) -> promote codex to position 2 (right after the first entry) in `triage`/`mechanical-edit`; annotate reason `quota_headroom`.
+  - Otherwise (including unknown/unreachable/stale quota) -> unchanged, last fallback. Never drop/promote on missing data.
+  - Only codex is affected; every other agent's ordering stays byte-identical — keep/extend the existing "quota never reorders" pin test for non-codex chains and note codex as the documented exception.
+  - Apply wherever the chain is consumed for execution: verify dispatch.mjs walks route()'s ordered chain (not a second copy) before wiring the gate only into router.mjs.
+  - Inject `now` and usage for tests; no live network calls in tests.
+  - Commit: `feat(router): gate codex fallback on its plan quota`.
+
+## Acceptance criteria
+
+- 3 simultaneous gemini jobs with similar quota go to 3 different accounts.
+- An account with much higher quota receives more jobs, but in-flight load reduces its score.
+- `delegate({profile:'work1', ...})` runs on work1 and the job record shows `profile: 'work1'`, `profileStatus: 'pinned'`.
+- `delegate({profile:'nope'})` fails fast with a clear message.
+- Full suite green.
+- T4: codex remaining quota < 20% -> dropped from `triage`/`mechanical-edit` chains entirely, with an annotated reason. remaining >= 50% and on pace -> promoted to position 2. Otherwise/unknown quota -> unchanged as last fallback. Every non-codex chain is byte-identical to before T4.
+
+## Checks
+
+`npm test` in the worktree.
+
+## Progress
+
+- T1 done (2026-09-22). Route: delegated writer (this agent), TDD RED->GREEN observed per behaviour.
+  - `listAgysProfilesSync` added to src/providers/agys.mjs (sync `agys list` parse, injectable execFn) — RED: `SyntaxError: ... does not provide an export named 'listAgysProfilesSync'`; GREEN: test/providers-agys.test.mjs 52/52.
+  - `delegateTool` (src/tools/jobs.mjs) accepts `profile`, validates via `listAgysProfilesFn` (sync), rejects non-agy agent / unknown profile / agys-unavailable, sets `profileStatus:'pinned'`, now takes injectable `startJobFn`/`listAgysProfilesFn`/`env` — RED: 4 new tests failed (missing exception / real startJob invoked); GREEN: test/tools-jobs.test.mjs 33/33.
+  - `dispatch()` (src/dispatch.mjs) accepts `profile`, validates against the routed/explicit primary candidate's agent + `listAgysProfilesFn`/`isAgysAvailableFn` (async, injectable) right after candidate discovery, and bypasses `resolveProfileFn`/the per-group memo entirely when pinned (profile stays fixed through retry/fallback; a 429 on a pinned job still fails with quota and still records exhaustion, since selection never runs) — RED evidence: initial run hung past 120s (unvalidated `profile` fell into `...restDeps` and reached the real, unmocked `resolveAgyProfile`/agys CLI on the "unknown profile" and "non-agy" rejection tests) killed manually; after wiring, GREEN: test/dispatch-agys.test.mjs 14/14.
+  - `delegate`/`dispatch` MCP tool schemas (src/index.mjs) gained an optional `profile` string input with the documented description; wired through to the tool handlers.
+  - Design note: mode 'off' + explicit profile -> explicit profile is authoritative (dispatch's pinned branch never consults `getAgysMode`), covered by an explicit test.
+  - Full `npm test`: 1404/1404 pass.
+  - Commit: (recorded after this commit is created).
+
+## Next step
+
+T2 (load-aware quota rotation) via one delegated writer, then T3, then T4 (user-approved 2026-09-22).

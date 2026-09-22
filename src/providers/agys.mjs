@@ -168,6 +168,37 @@ export async function listAgysProfiles({ runCommandFn = defaultRunCommand, env =
   }
 }
 
+/**
+ * Synchronous counterpart to listAgysProfiles, for callers that must stay
+ * synchronous (e.g. delegateTool validating an explicit `profile` input).
+ * Uses child_process.execFileSync by default (injectable via execFn, same
+ * pattern as resolveAgyProfileSync). Never throws: on failure returns
+ * { available: false, profiles: [], reason }, distinguishing an unavailable
+ * agys CLI (ENOENT / exit 127) from any other execFn error so a caller can
+ * tell "agys is not installed" apart from "the profile list is genuinely
+ * unreadable".
+ */
+export function listAgysProfilesSync({ env = process.env, execFn = child_process.execFileSync } = {}) {
+  try {
+    let stdout = execFn('agys', ['list'], {
+      encoding: 'utf8',
+      timeout: 2500,
+      env: env || {},
+    })
+    if (typeof stdout !== 'string') {
+      stdout = stdout?.toString?.('utf8') ?? ''
+    }
+    return { available: true, profiles: parseAgysList(stdout) }
+  } catch (err) {
+    const isUnavailable = err?.code === 'ENOENT' || err?.code === 127
+    return {
+      available: false,
+      profiles: [],
+      reason: isUnavailable ? 'unavailable' : String(err?.message ?? err),
+    }
+  }
+}
+
 export async function readAgysQuota({ runCommandFn = defaultRunCommand, env = process.env } = {}) {
   try {
     const res = await runCommandFn('agys', ['quota', '--json'], { env, timeoutMs: 15_000 })

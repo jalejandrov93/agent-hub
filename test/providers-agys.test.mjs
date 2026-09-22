@@ -19,6 +19,7 @@ import {
   agysAutoArgv,
   isAgysAvailable,
   listAgysProfiles,
+  listAgysProfilesSync,
   readAgysQuota,
   runAgyWithProfile,
   resolveAgyCommand,
@@ -903,6 +904,34 @@ test('resolveAgyProfileSync memoizes results so a counting execFn is called at m
   const res3 = resolveAgyProfileSync({ env, execFn })
   assert.deepEqual(res3, res1)
   assert.equal(callCount, 4) // 2 more calls
+})
+
+test('listAgysProfilesSync parses `agys list` via execFn and returns { available: true, profiles }', () => {
+  const calls = []
+  const execFn = (cmd, args) => {
+    calls.push({ cmd, args })
+    return FIXTURE_AGYS_LIST
+  }
+  const res = listAgysProfilesSync({ env: {}, execFn })
+  assert.equal(res.available, true)
+  assert.equal(calls.length, 1)
+  assert.equal(calls[0].cmd, 'agys')
+  assert.deepEqual(calls[0].args, ['list'])
+  assert.equal(res.profiles.length, 3)
+  assert.deepEqual(res.profiles.map((p) => p.name), ['work', 'personal', 'backup'])
+})
+
+test('listAgysProfilesSync reports unavailable on ENOENT and a generic reason on any other execFn error', () => {
+  const enoentErr = new Error('not found')
+  enoentErr.code = 'ENOENT'
+  const unavailRes = listAgysProfilesSync({ env: {}, execFn: () => { throw enoentErr } })
+  assert.deepEqual(unavailRes, { available: false, profiles: [], reason: 'unavailable' })
+
+  const genericErr = new Error('boom')
+  const genericRes = listAgysProfilesSync({ env: {}, execFn: () => { throw genericErr } })
+  assert.equal(genericRes.available, false)
+  assert.deepEqual(genericRes.profiles, [])
+  assert.match(genericRes.reason, /boom/)
 })
 
 const REAL_SHAPE_LIST = `Active Profiles:

@@ -105,6 +105,77 @@ test('delegate rejects an unknown taskType with a clear error', async () => {
   )
 })
 
+test('delegate with an explicit valid profile on agent "agy" starts the job pinned', async () => {
+  const home = tmpHome()
+  const { delegateTool } = await fresh(home)
+
+  let capturedArgs = null
+  const startJobFn = (args) => {
+    capturedArgs = args
+    return { job: { jobId: 'j-pinned-1', status: 'queued', errorKind: null } }
+  }
+  const listAgysProfilesFn = () => ({ available: true, profiles: [{ name: 'work1' }, { name: 'work2' }] })
+
+  const result = delegateTool({
+    agent: 'agy',
+    model: 'gemini-3.8-flash',
+    task: 't',
+    cwd: '/tmp',
+    profile: 'work1',
+    startJobFn,
+    listAgysProfilesFn,
+  })
+
+  assert.equal(result.jobId, 'j-pinned-1')
+  assert.ok(capturedArgs, 'startJobFn was called')
+  assert.equal(capturedArgs.profile, 'work1')
+  assert.equal(capturedArgs.profileStatus, 'pinned')
+})
+
+test('delegate rejects an unknown explicit profile with a clear error naming the valid profiles', async () => {
+  const home = tmpHome()
+  const { delegateTool } = await fresh(home)
+
+  const startJobFn = () => {
+    throw new Error('startJobFn must never be called for an unknown profile')
+  }
+  const listAgysProfilesFn = () => ({ available: true, profiles: [{ name: 'work1' }, { name: 'work2' }] })
+
+  assert.throws(
+    () => delegateTool({ agent: 'agy', model: 'x', task: 't', cwd: '/tmp', profile: 'nope', startJobFn, listAgysProfilesFn }),
+    /unknown agys profile "nope".*work1, work2/
+  )
+})
+
+test('delegate rejects an explicit profile on a non-agy agent', async () => {
+  const home = tmpHome()
+  const { delegateTool } = await fresh(home)
+
+  const startJobFn = () => {
+    throw new Error('startJobFn must never be called for a rejected agent')
+  }
+
+  assert.throws(
+    () => delegateTool({ agent: 'opencode', model: 'x', task: 't', cwd: '/tmp', profile: 'work1', startJobFn }),
+    /profile is only meaningful for agent "agy"/
+  )
+})
+
+test('delegate with an explicit profile fails fast when agys is unavailable', async () => {
+  const home = tmpHome()
+  const { delegateTool } = await fresh(home)
+
+  const startJobFn = () => {
+    throw new Error('startJobFn must never be called when agys is unavailable')
+  }
+  const listAgysProfilesFn = () => ({ available: false, profiles: [], reason: 'unavailable' })
+
+  assert.throws(
+    () => delegateTool({ agent: 'agy', model: 'x', task: 't', cwd: '/tmp', profile: 'work1', startJobFn, listAgysProfilesFn }),
+    /agys is unavailable/
+  )
+})
+
 test('job_reply rejects an unknown taskType', async () => {
   const home = tmpHome()
   const { jobReplyTool } = await fresh(home)
