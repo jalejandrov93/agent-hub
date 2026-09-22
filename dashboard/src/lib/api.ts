@@ -11,6 +11,7 @@ import {
   ConfigResponse,
   MetricsResponse,
   Proposal,
+  ProposalsResponse,
   Learning,
   LearningInput,
   AgentStatusRow,
@@ -35,6 +36,7 @@ import type {
   AgentsQuotaResponseT,
   AgysSnapshotResponseT,
   ProposalT,
+  ProposalsResponseT,
   LearningT,
   LearningInputT,
   AgentRow,
@@ -127,13 +129,12 @@ export function setProvidersMode(params: { mode: "off" | "profile" | "auto"; pro
   return fetchJson(AgysSnapshotResponse, "/api/providers/mode", writeInit("POST", params))
 }
 
-const ProposalsPayload = z.object({ proposals: z.array(Proposal) })
-export function getProposals(): Promise<{ proposals: ProposalT[] }> {
-  return fetchJson(ProposalsPayload, "/api/proposals")
+export function getProposals(): Promise<ProposalsResponseT> {
+  return fetchJson(ProposalsResponse, "/api/proposals")
 }
 
-export function refreshProposals(): Promise<{ proposals: ProposalT[] }> {
-  return fetchJson(ProposalsPayload, "/api/proposals/refresh", writeInit("POST"))
+export function refreshProposals(): Promise<ProposalsResponseT> {
+  return fetchJson(ProposalsResponse, "/api/proposals/refresh", writeInit("POST"))
 }
 
 export function decideProposal(id: string, decision: "accept" | "reject"): Promise<ProposalT> {

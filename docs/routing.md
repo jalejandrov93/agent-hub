@@ -143,6 +143,40 @@ matches the delegation map (its chain hash changed) is marked `superseded`.
 After a rejection, no new proposal for that task type for 7 days. `route()`
 applies an accepted proposal to the chain and returns it as `appliedProposal`.
 
+## Model autodiscover
+
+`discovery.json` already records each CLI's own model catalog (see
+"Startup discovery" above); `computeModelGaps({discovery, map, registry})`
+(`src/model-gaps.mjs`) diffs that catalog against `DELEGATION_MAP` and
+`MODEL_REGISTRY` for **agy and opencode only** — copilot's catalog is not
+authoritative and codex has no real model listing, so neither ever produces a
+gap. A model id is split into `{family, version, effort}` (e.g.
+`gemini-3.8-flash-low` → family `gemini-*-flash`, version `[3, 8]`, effort
+`low`); a catalog model is a **version bump** of a model already used in some
+chain when it shares that model's agent, family and effort suffix and has a
+strictly higher version — the highest such match wins. A catalog model that
+matches no chain model and isn't already in `MODEL_REGISTRY` is **unmapped**:
+no taskType can be inferred safely for it, so it is only ever surfaced for a
+human to look at, never proposed.
+
+`refreshProposals()` turns each version bump into a pending `add_candidate`
+proposal (one per taskType per bump, deduped and cooldown-gated the same way
+as a reorder proposal). Its `reason` names the bump; `addCandidate` carries
+the new `{agent, model, mode}` and `replaces` names the older model id.
+**Accepting one only ever appends the new candidate at the TAIL of that
+taskType's chain — never index 0, and never as a reorder.** `route()` builds
+this "effective chain" (the static `DELEGATION_MAP` chain plus every accepted
+`add_candidate` step, in acceptance order) before applying any accepted
+reorder proposal, and `refreshProposals()` computes new reorder proposals
+over that same effective chain — so a newly added candidate only ever gets
+promoted ahead of the current primary through a later, evidence-backed
+reorder proposal once it has its own metrics. `pruneCacheForMap` treats an
+accepted `add_candidate` pair as reachable, the same as a static chain step.
+
+`GET /api/proposals` and `POST /api/proposals/refresh` also return an
+`unmapped` list (`[{agent, model}]`) of catalog models with no safe taskType,
+rendered in the dashboard's Proposals panel alongside the proposal list.
+
 ## Learnings
 
 `learning_propose` records a short gotcha about an agent, model or task type as
