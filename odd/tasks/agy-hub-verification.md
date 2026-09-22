@@ -180,3 +180,12 @@ triggers: adapters, jobrunner, dispatch, index tool schemas, verify, docs).
 - Queued after this feature (separate): E — run MCP + dashboard from a fixed
   runtime worktree on `main`, so development in the checkout never affects
   the live hub.
+
+## Delivery
+
+- Parent spot check: `npm test` 1520/1520.
+- RDD: medium (21 files, 1436 lines); candidate consent relayed, user chose
+  "skip this time" -> declined (`declined_this_candidate`). Off-path tier
+  medium: writer self-verification + parent spot check.
+- Delivery: single PR to main, merged at the user's request.
+- Next: E — runtime worktree on `main` for MCP + dashboard.
