@@ -98,7 +98,7 @@ T4 additionally touches: src/router.mjs (codex fallback ordering in `triage`/`me
   - Docs: `docs/routing.md` ("It never decides anything" -> documents the codex exception with the score/threshold summary); `src/index.mjs` `agents_quota` tool description (was "quota never chooses, skips or reorders an agent" -> now scoped to "every agent except codex", with the codex rule summarized); CHANGELOG `[Unreleased]/Added`.
   - Design decisions / deviations from the doc: (1) when multiple windows exist (primary+secondary), the SAME most-constrained window drives both the drop threshold and the promote pace check (the doc's wording was ambiguous about which window's pace to use when several exist) — documented in the module docstring. (2) `route()`'s existing empty-survivors early-return is duplicated (not refactored into a shared helper) for the post-gate-drop empty case, to keep the diff small and avoid touching unrelated control flow. (3) `dispatch.mjs` needed NO changes — verified it already consumes `route()`'s ordered `primary`/`fallbacks` exclusively (no second chain-building path), so the gate lives in exactly one place.
   - Full `npm test`: 1435/1435 pass (was 1419 after T3; +16).
-  - Commit: (recorded after this commit is created).
+  - Commit: `5e4d9e7` feat(router): gate codex fallback on its plan quota.
 
 ## Next step
 
