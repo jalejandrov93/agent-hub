@@ -41,7 +41,7 @@ T4 additionally touches: src/router.mjs (codex fallback ordering in `triage`/`me
 
 - [x] T1 Explicit `profile` input on `delegate` and `dispatch` (validate against agys list, `profileStatus: 'pinned'`, error on unknown). Route: delegated writer (2+ non-trivial files).
 - [x] T2 Load-aware quota rotation in profile selection (in-flight penalty + least-recently-assigned tie-break; cache only the quota snapshot). Route: delegated writer.
-- [ ] T3 CHANGELOG + tool docs; full `npm test`.
+- [x] T3 CHANGELOG + tool docs; full `npm test`.
 - [ ] T4 (added 2026-09-22, user-approved) Quota-gated codex routing: gate codex (agent 'codex', model 'default', last fallback in `triage`/`mechanical-edit` per src/config.mjs tier 'limited') on its own plan quota from CodexBar (src/quota/codexbar.mjs + src/quota/mapping.mjs). Pure, unit-tested rule, e.g. `src/routing/codex-gate.mjs`:
   - remaining = 100 - usedPercent of the most-constrained window (primary, and secondary if present).
   - remaining < CODEX_MIN_REMAINING_PCT (20) -> drop codex from the chain entirely; annotate `skipped: [{agent:'codex', reason:'quota_low', remainingPct}]` (or router's existing annotation style).
@@ -83,8 +83,15 @@ T4 additionally touches: src/router.mjs (codex fallback ordering in `triage`/`me
   - `router.mjs` untouched: its informational `_resolveAgyProfileSync` call keeps the `reserve: false` default, so annotation-only lookups never bias a later real pick.
   - Design decisions / deviations from the doc: (1) reservation is opt-in per call (`reserve` flag) rather than automatic inside the resolver, specifically to protect router.mjs's annotation-only call from polluting shared state — the doc's wording ("small in-process reservation map... released on terminal state or after a short TTL") is satisfied via TTL-only expiry (10s), no explicit release-on-terminal wiring, since createJob() persists synchronously and the job-store count takes over almost immediately. (2) LOAD_PENALTY kept at the suggested 0.15. (3) `listJobsFn`/`reservations` are injectable on both resolvers to keep tests off the real `~/.local/share/agent-hub` state (this machine has real, live job history — several pre-existing tests that pass `model` without `AGENT_HUB_HOME` needed an explicit `listJobsFn: () => []` to stay isolated; documented inline at each call site).
   - Full `npm test`: 1419/1419 pass (was 1404 after T1; +15).
+  - Commit: `6fd6705` feat(agys): balance agy jobs across profiles by quota and in-flight load.
+
+- T3 done (2026-09-22). Route: delegated writer (this agent); docs-only, no TDD applicable.
+  - `CHANGELOG.md`: two `[Unreleased] / Added` entries (explicit `profile` pin; load-aware rotation).
+  - `docs/reference/tools.md`: `delegate`/`dispatch` input-signature table rows updated with `profile?` and its semantics.
+  - `docs/providers/agy.md`: `auto` mode description corrected (was "highest-priority", now load-aware score); added "Load-aware rotation (auto mode)" and "Per-call profile pin" subsections with the score formula, tie-break order, and pin semantics (validation, `profileStatus:'pinned'`, retry/fallback immunity).
+  - Full `npm test`: 1419/1419 pass (unchanged from T2 — docs only).
   - Commit: (recorded after this commit is created).
 
 ## Next step
 
-T3 (CHANGELOG + docs) via one delegated writer, then T4 (user-approved 2026-09-22).
+T4 (quota-gated codex routing, user-approved 2026-09-22) via one delegated writer.
