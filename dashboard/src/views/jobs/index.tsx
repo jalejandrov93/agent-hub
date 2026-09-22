@@ -7,6 +7,7 @@ import { StatusBadge } from "@/components/StatusBadge"
 import { EmptyState } from "@/components/EmptyState"
 import { DataTable, type DataTableColumn } from "@/components/DataTable"
 import { ConfirmDialog } from "@/components/ConfirmDialog"
+import { DiffStatsSummary } from "@/components/DiffStatsSummary"
 import { RelativeTime } from "@/components/RelativeTime"
 import { Alert, AlertDescription, AlertTitle } from "@/components/ui/alert"
 import { Badge } from "@/components/ui/badge"
@@ -23,6 +24,16 @@ import { cn } from "@/lib/utils"
 import { JobProfileBadge } from "@/views/providers"
 import { ElapsedCell } from "./ElapsedCell"
 import { JobDetailModal } from "./JobDetailModal"
+import { useJobDiffStatsQuery } from "./useJobDiffStats"
+
+/** Live "+X −Y · N files" cell for a job row. A read-mode job never even
+ * queries the endpoint — DiffStatsSummary would render nothing for it anyway,
+ * but skipping the fetch avoids a pointless poll loop for every read job. */
+function DiffStatsCell({ job }: { job: Job }) {
+  const diffStats = useJobDiffStatsQuery(job.jobId, job.mode === "write")
+  if (job.mode !== "write") return null
+  return <DiffStatsSummary stats={diffStats.data?.diffStats ?? null} />
+}
 
 function remoteWaitingState(job: Job): string | null {
   const state = job.remote?.state ?? job.remote_state
@@ -163,6 +174,11 @@ export function JobsView() {
           {job.timeoutSource ? <Badge variant="outline">{job.timeoutSource}</Badge> : null}
         </div>
       ),
+    },
+    {
+      key: "changes",
+      header: "Changes",
+      cell: (job) => <DiffStatsCell job={job} />,
     },
     {
       key: "actions",

@@ -11,6 +11,8 @@ import { JobProfileBadge } from "@/views/providers"
 import { formatModel, formatNumber, formatDuration } from "@/lib/format"
 import { PageHeader } from "@/components/PageHeader"
 import { DataTable, type DataTableColumn } from "@/components/DataTable"
+import { DiffStatsSummary } from "@/components/DiffStatsSummary"
+import { DiffStatsTable } from "@/components/DiffStatsTable"
 import { StatusBadge } from "@/components/StatusBadge"
 import { RelativeTime } from "@/components/RelativeTime"
 import { EmptyState } from "@/components/EmptyState"
@@ -260,6 +262,11 @@ export function HistoryView() {
           const seconds = Math.round((end - start) / 1000)
           return <span className="font-mono text-xs">{formatDuration(seconds)}</span>
         },
+      },
+      {
+        key: "changes",
+        header: "Changes",
+        cell: (job) => <DiffStatsSummary stats={job.diffStats ?? null} />,
       },
       {
         key: "tokens",
@@ -543,6 +550,22 @@ export function HistoryView() {
                   </dd>
                 </div>
               </dl>
+
+              {selectedJob.diffStats ? (
+                <>
+                  <Separator />
+                  <div className="flex flex-col gap-2">
+                    <div className="flex items-center justify-between">
+                      <h3 className="text-sm font-medium">Changes</h3>
+                      <DiffStatsSummary stats={selectedJob.diffStats} />
+                    </div>
+                    <DiffStatsTable
+                      files={selectedJob.diffStats.files}
+                      truncated={selectedJob.diffStats.truncated}
+                    />
+                  </div>
+                </>
+              ) : null}
 
               <Separator />
 
