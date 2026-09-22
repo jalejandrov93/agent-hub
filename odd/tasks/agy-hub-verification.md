@@ -130,7 +130,34 @@ marks the job `incomplete`, but the work is still lost.
   dashboard typecheck` → clean. `npm run build` → succeeds (pre-existing
   >500kB chunk-size warning, unrelated). `grep -rn '<style\|style="\|data:font'
   dashboard/dist` → no matches.
-- [ ] D3 — docs + skills + coexistence regression test.
+- [x] D3 — docs + skills + coexistence regression test. Commit `71c92d3`.
+  `docs/verification.md` gained a "Hub-run verification for delegate/dispatch"
+  section (why the guard exists, the `verify` shape, skip/never-changes-status
+  rules, reuse of `runJobVerification`). `skills/multi-agent-orchestrator/
+  SKILL.md`: `delegate`'s documented signature now includes `verify`, a new
+  "Verification" section explains it, and the "Task header template" no
+  longer tells the agent to "run the test/type-check/lint command and paste
+  the output" (that was the exact anti-pattern D1 fixes) — it now says write
+  a RED test but don't run it, and to pass the same commands via `verify`
+  instead. `skills/agy-delegate/SKILL.md` gained a note that the hub's guard
+  covers the MCP path only; its `agy-run.sh` no-MCP fallback calls `agy`
+  directly and does NOT get the guard, so a user of that fallback must
+  restate the instruction themselves — documented, not silently gapped.
+  Coexistence regression: a new test in `test/jobrunner-verify.test.mjs`
+  starts a REAL agy job (the real adapter, not a fake), asserts the built
+  prompt carries `AGY_GUARD_BLOCK`, feeds the real
+  `stream-background-yield.jsonl` fixture as the child's stdout, and asserts
+  the job still ends `status:'failed'`/`errorKind:'incomplete'` (the D1
+  guard text living in the prompt never interferes with D2's `incomplete`
+  detection, which reads stdout) — with a configured `verify` correctly
+  recorded as `skipped` rather than run. RED/GREEN: N/A — this task added no
+  new production code, only docs/skills text and one regression test; the
+  test passed on the first run (9/9 in that file) because D1/D2 were already
+  correctly implemented, which is itself the intended proof of coexistence.
+  Verification: `npm test` → 1520/1520 pass, 0 fail. `npm run -w dashboard
+  test` → 198/198 pass. `npm run -w dashboard typecheck` → clean. `npm run
+  build` → succeeds. `grep -rn '<style\|style="\|data:font' dashboard/dist`
+  → no matches.
 
 Route declaration: D1–D3 delegated to one writer (mapping + preparation
 triggers: adapters, jobrunner, dispatch, index tool schemas, verify, docs).
@@ -147,7 +174,9 @@ triggers: adapters, jobrunner, dispatch, index tool schemas, verify, docs).
 
 ## Progress / next step
 
-- Next: D3.
+- Next: D1-D3 complete. Feature scope fully implemented, tested, documented,
+  and verified. See "Queued after this feature" above (E) for the next
+  separate feature.
 - Queued after this feature (separate): E — run MCP + dashboard from a fixed
   runtime worktree on `main`, so development in the checkout never affects
   the live hub.
