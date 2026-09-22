@@ -17,6 +17,7 @@ import { defaultPairs, agentsQuotaTool } from './tools/agents.mjs'
 import { runCommand } from './process.mjs'
 import { computeMetrics } from './metrics.mjs'
 import { listProposals, refreshProposals, decideProposal } from './proposals.mjs'
+import { computeModelGaps } from './model-gaps.mjs'
 import { listLearnings, proposeLearning, decideLearning, deleteLearning } from './learnings.mjs'
 import { jobResultTool } from './tools/jobs.mjs'
 import { JobRecord } from './schemas.mjs'
@@ -723,13 +724,16 @@ export function createServer({ env = process.env, commandRunner = runCommand, di
     }
 
     if (url.pathname === '/api/proposals' && req.method === 'GET') {
-      sendJson(res, 200, { proposals: listProposals({}, env) })
+      const { unmapped } = computeModelGaps({ discovery: readDiscovery(env), map: DELEGATION_MAP, registry: MODEL_REGISTRY })
+      sendJson(res, 200, { proposals: listProposals({}, env), unmapped })
       return
     }
 
     if (url.pathname === '/api/proposals/refresh' && req.method === 'POST') {
       try {
-        sendJson(res, 200, { proposals: refreshProposals({ env, map: DELEGATION_MAP }) })
+        const proposals = refreshProposals({ env, map: DELEGATION_MAP, discovery: readDiscovery(env), registry: MODEL_REGISTRY })
+        const { unmapped } = computeModelGaps({ discovery: readDiscovery(env), map: DELEGATION_MAP, registry: MODEL_REGISTRY })
+        sendJson(res, 200, { proposals, unmapped })
       } catch (error) {
         sendError(res, domainError(error))
       }

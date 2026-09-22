@@ -91,6 +91,22 @@ const REJECTED_PROPOSAL = {
   decidedAt: "2026-09-02T04:00:00.000Z",
 }
 
+const ADD_CANDIDATE_PROPOSAL = {
+  id: "prop-3",
+  taskType: "recon",
+  chainHash: "def",
+  kind: "add_candidate",
+  fromOrder: [{ agent: "agy", model: "gemini-3.8-flash-low" }],
+  toOrder: [{ agent: "agy", model: "gemini-3.8-flash-low" }],
+  addCandidate: { agent: "agy", model: "gemini-3.9-flash-low", mode: "read" },
+  replaces: "gemini-3.8-flash-low",
+  evidence: {},
+  reason: "agy:gemini-3.9-flash-low looks like a newer version of gemini-3.8-flash-low, already used for recon",
+  status: "pending",
+  createdAt: "2026-09-18T04:00:00.000Z",
+  decidedAt: null,
+}
+
 const PENDING_LEARNING = {
   id: "learn-pending",
   agent: "agy",
@@ -239,5 +255,33 @@ describe("ApprovalsView", () => {
     const actions = within(rows[1]).getByRole("button", { name: /approve/i })
     expect(actions).toBeTruthy()
     expect(within(rows[1]).getByRole("button", { name: /reject/i })).toBeTruthy()
+  })
+
+  it("renders an add_candidate proposal distinctly and scopes its accept dialog to the addition", async () => {
+    api.getProposals.mockResolvedValue({ proposals: [ADD_CANDIDATE_PROPOSAL], unmapped: [] })
+    renderApprovals("/approvals")
+
+    await screen.findByText("New candidate")
+    expect(screen.getByText(/adds/i)).toBeTruthy()
+    expect(screen.getByText("gemini-3.9-flash-low")).toBeTruthy()
+    expect(screen.getAllByText(/newer version of gemini-3\.8-flash-low/i).length).toBeGreaterThan(0)
+
+    fireEvent.click(screen.getByRole("button", { name: "Accept" }))
+    const dialog = await screen.findByRole("alertdialog")
+    expect(within(dialog).getByText(/added as a new fallback/i)).toBeTruthy()
+
+    fireEvent.click(within(dialog).getByRole("button", { name: /accept/i }))
+    await waitFor(() => expect(api.decideProposal).toHaveBeenCalledWith("prop-3", "accept"))
+  })
+
+  it("lists unmapped catalog models with no safe routing match", async () => {
+    api.getProposals.mockResolvedValue({
+      proposals: [],
+      unmapped: [{ agent: "agy", model: "gpt-oss-999-low" }],
+    })
+    renderApprovals("/approvals")
+
+    expect(await screen.findByText("Unmapped models")).toBeTruthy()
+    expect(screen.getByText("gpt-oss-999-low")).toBeTruthy()
   })
 })

@@ -19,6 +19,8 @@ import type {
   BreakerState,
   Override,
   Proposal,
+  ProposalsResponse,
+  UnmappedModel,
   Learning,
   LearningInput,
   CloudAccountsResponse,
@@ -56,6 +58,8 @@ export type AgentQuotaRowT = z.infer<typeof AgentQuotaRow>
 export type AgentsQuotaResponseT = z.infer<typeof AgentsQuotaResponse>
 export type OverrideT = z.infer<typeof Override>
 export type ProposalT = z.infer<typeof Proposal>
+export type ProposalsResponseT = z.infer<typeof ProposalsResponse>
+export type UnmappedModelT = z.infer<typeof UnmappedModel>
 export type LearningT = z.infer<typeof Learning>
 export type LearningInputT = z.infer<typeof LearningInput>
 export type AgysSnapshotResponseT = z.infer<typeof AgysSnapshotResponse>

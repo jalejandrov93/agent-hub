@@ -247,3 +247,43 @@ test('pruneCacheForMap drops preflight-cache rows for pairs no longer in DELEGAT
   assert.equal('copilot:auto' in cache, true)
   assert.equal(result.removed, 1)
 })
+
+test('pruneCacheForMap keeps a preflight-cache row for an accepted add_candidate pair not otherwise in DELEGATION_MAP', async () => {
+  const home = tmpHome()
+  process.env.AGENT_HUB_HOME = home
+  const { writeCacheEntry, readCache } = await import('../src/preflight.mjs?t=' + Date.now())
+  writeCacheEntry('agy:gemini-3.9-flash-low', { agent: 'agy', model: 'gemini-3.9-flash-low', status: 'ready', checkedAt: new Date().toISOString() })
+
+  const { writeJsonAtomic } = await import('../src/fsutil.mjs?t=' + Date.now())
+  const { paths } = await import('../src/config.mjs?t=' + Date.now())
+  const { chainHash } = await import('../src/proposals.mjs?t=' + Date.now())
+  const { DELEGATION_MAP } = await import('../src/router.mjs?t=' + Date.now())
+  const hash = chainHash(DELEGATION_MAP.recon.chain)
+
+  writeJsonAtomic(paths({ AGENT_HUB_HOME: home }).proposalsFile, {
+    version: 1,
+    proposals: [
+      {
+        id: 'prop-add-1',
+        taskType: 'recon',
+        kind: 'add_candidate',
+        chainHash: hash,
+        fromOrder: [],
+        toOrder: [],
+        addCandidate: { agent: 'agy', model: 'gemini-3.9-flash-low', mode: 'read' },
+        replaces: 'gemini-3.8-flash-low',
+        evidence: {},
+        reason: 'test',
+        status: 'accepted',
+        createdAt: new Date().toISOString(),
+        decidedAt: new Date().toISOString(),
+      },
+    ],
+  })
+
+  const { pruneCacheForMap } = await fresh(home)
+  const result = pruneCacheForMap({ AGENT_HUB_HOME: home })
+  const cache = readCache({ AGENT_HUB_HOME: home })
+  assert.equal('agy:gemini-3.9-flash-low' in cache, true)
+  assert.equal(result.removed, 0)
+})

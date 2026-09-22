@@ -32,7 +32,7 @@ import {
   useProposalsQuery,
   useRefreshProposalsMutation,
 } from "@/lib/queries"
-import type { ProposalT } from "@/lib/types"
+import type { ProposalT, UnmappedModelT } from "@/lib/types"
 
 type Pair = ProposalT["fromOrder"][number]
 
@@ -122,6 +122,28 @@ function OrderList({
   )
 }
 
+function isAddCandidate(proposal: ProposalT): boolean {
+  return proposal.kind === "add_candidate"
+}
+
+/** Distinct summary for an add_candidate proposal: fromOrder/toOrder are identical for these (see proposals.mjs), so the two-column reorder view would show nothing useful. */
+function AddCandidateSummary({ proposal }: { proposal: ProposalT }) {
+  const candidate = proposal.addCandidate
+  if (!candidate) return null
+  return (
+    <div className="flex flex-col gap-1 text-sm">
+      <p>
+        Adds <span className="font-medium">{candidate.agent}</span>{" "}
+        <span className="truncate text-muted-foreground">{candidate.model}</span> at the end of{" "}
+        <span className="font-medium capitalize">{proposal.taskType}</span>.
+      </p>
+      {proposal.replaces ? (
+        <p className="text-muted-foreground">Newer version of {proposal.replaces}.</p>
+      ) : null}
+    </div>
+  )
+}
+
 function ProposalCard({
   proposal,
   onAccept,
@@ -134,20 +156,26 @@ function ProposalCard({
   rejecting: boolean
 }) {
   const rows = evidenceRows(proposal)
+  const addCandidate = isAddCandidate(proposal)
   return (
     <Card>
       <CardHeader>
         <CardTitle className="capitalize">{proposal.taskType}</CardTitle>
-        <CardAction>
+        <CardAction className="flex items-center gap-2">
+          {addCandidate ? <Badge variant="outline">New candidate</Badge> : null}
           <StatusBadge kind="status" value={proposal.status} />
         </CardAction>
         <CardDescription>{proposal.reason}</CardDescription>
       </CardHeader>
       <CardContent className="flex flex-col gap-4">
-        <div className="grid gap-4 sm:grid-cols-2">
-          <OrderList title="Current order" order={proposal.fromOrder} other={proposal.toOrder} />
-          <OrderList title="Proposed order" order={proposal.toOrder} other={proposal.fromOrder} />
-        </div>
+        {addCandidate ? (
+          <AddCandidateSummary proposal={proposal} />
+        ) : (
+          <div className="grid gap-4 sm:grid-cols-2">
+            <OrderList title="Current order" order={proposal.fromOrder} other={proposal.toOrder} />
+            <OrderList title="Proposed order" order={proposal.toOrder} other={proposal.fromOrder} />
+          </div>
+        )}
         <DataTable
           columns={EVIDENCE_COLUMNS}
           rows={rows}
@@ -178,6 +206,40 @@ function ProposalCard({
   )
 }
 
+/** ConfirmDialog copy for a pending proposal, scoped to its kind. */
+function acceptDescription(proposal: ProposalT | null): string {
+  if (!proposal) return ""
+  if (isAddCandidate(proposal) && proposal.addCandidate) {
+    return `${proposal.addCandidate.agent}:${proposal.addCandidate.model} will be added as a new fallback at the end of ${proposal.taskType}. It never becomes primary on its own — only a later reorder proposal can promote it once it has evidence.`
+  }
+  return `route() will use this order for ${proposal.taskType} tasks once you accept. Nothing changes before you accept.`
+}
+
+function UnmappedModelsCard({ models }: { models: UnmappedModelT[] }) {
+  if (models.length === 0) return null
+  return (
+    <Card size="sm">
+      <CardHeader>
+        <CardTitle className="text-sm">Unmapped models</CardTitle>
+        <CardDescription>
+          Discovered models that don&apos;t look like a newer version of anything already routed, and
+          aren&apos;t in the model registry either. No taskType can be inferred safely — review manually.
+        </CardDescription>
+      </CardHeader>
+      <CardContent>
+        <ul className="flex flex-col gap-1 text-sm">
+          {models.map((m) => (
+            <li key={`${m.agent}:${m.model}`} className="flex min-w-0 items-center gap-2">
+              <span className="text-muted-foreground">{m.agent}</span>
+              <span className="truncate">{m.model}</span>
+            </li>
+          ))}
+        </ul>
+      </CardContent>
+    </Card>
+  )
+}
+
 export function ProposalsPanel() {
   const { data, isLoading } = useProposalsQuery()
   const refresh = useRefreshProposalsMutation()
@@ -186,6 +248,7 @@ export function ProposalsPanel() {
   const [accepting, setAccepting] = React.useState<ProposalT | null>(null)
 
   const proposals = data?.proposals ?? []
+  const unmapped = data?.unmapped ?? []
   const filtered =
     statusFilter === "pending" ? proposals.filter((p) => p.status === "pending") : proposals
 
@@ -253,13 +316,15 @@ export function ProposalsPanel() {
         ))
       )}
 
+      <UnmappedModelsCard models={unmapped} />
+
       <ConfirmDialog
         open={accepting !== null}
         onOpenChange={(open) => {
           if (!open) setAccepting(null)
         }}
         title={`Accept proposal for ${accepting?.taskType ?? ""}`}
-        description={`route() will use this order for ${accepting?.taskType ?? ""} tasks once you accept. Nothing changes before you accept.`}
+        description={acceptDescription(accepting)}
         confirmLabel="Accept order"
         onConfirm={() => {
           if (accepting) decide.mutate({ id: accepting.id, decision: "accept" })

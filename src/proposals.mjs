@@ -1,8 +1,9 @@
 import crypto from 'node:crypto'
-import { paths, METRICS_MIN_SAMPLES, PROPOSAL_REJECT_COOLDOWN_MS } from './config.mjs'
+import { paths, METRICS_MIN_SAMPLES, PROPOSAL_REJECT_COOLDOWN_MS, MODEL_REGISTRY } from './config.mjs'
 import { readJsonSafe, updateJsonLocked } from './fsutil.mjs'
 import { appendEvent } from './eventlog.mjs'
 import { computeMetrics } from './metrics.mjs'
+import { computeModelGaps } from './model-gaps.mjs'
 
 /**
  * Routing proposals: evidence-backed reorders of a DELEGATION_MAP chain,
@@ -31,6 +32,28 @@ export function chainHash(chain) {
     return out
   })
   return crypto.createHash('sha1').update(JSON.stringify(normalized)).digest('hex').slice(0, 12)
+}
+
+/** Accepted add_candidate proposals for `taskType` whose chainHash matches `chain` (in-memory, no fs access). */
+function acceptedAddCandidates(taskType, chain, data) {
+  const hash = chainHash(chain)
+  return data.proposals.filter((p) => p.taskType === taskType && p.status === 'accepted' && p.kind === 'add_candidate' && p.chainHash === hash)
+}
+
+/**
+ * The effective chain for `taskType`: `chain` plus every accepted
+ * add_candidate step appended at the TAIL, in the order they were decided —
+ * never at index 0, and never reordering existing steps. Returns `chain`
+ * itself (no copy) when there is nothing to append, so callers that skip
+ * work on an unchanged reference stay cheap.
+ */
+export function effectiveChainFor(taskType, chain, env = process.env) {
+  const { proposalsFile } = paths(env)
+  const data = readJsonSafe(proposalsFile, DEFAULT_PROPOSALS_FILE)
+  const additions = acceptedAddCandidates(taskType, chain, data)
+  if (additions.length === 0) return chain
+  const extra = additions.map((p) => ({ agent: p.addCandidate.agent, model: p.addCandidate.model, mode: p.addCandidate.mode }))
+  return [...chain, ...extra]
 }
 
 /**
@@ -113,6 +136,7 @@ export function computeProposals({ metrics, map, minSamples = METRICS_MIN_SAMPLE
 
     proposals.push({
       taskType,
+      kind: 'reorder',
       chainHash: chainHash(chain),
       fromOrder: cliCandidates.map((c) => ({ agent: c.agent, model: c.model })),
       toOrder: toOrder.map((c) => ({ agent: c.agent, model: c.model })),
@@ -129,34 +153,74 @@ function sameToOrder(a, b) {
   return a.every((pair, i) => pair.agent === b[i].agent && pair.model === b[i].model)
 }
 
-/** Recompute from current metrics, persist new pending proposals, return every stored proposal. */
-export function refreshProposals({ env = process.env, map = {}, now = new Date() } = {}) {
+/**
+ * Recompute from current metrics AND discovery.json, persist new pending
+ * proposals, return every stored proposal. `discovery` (readDiscovery(env)
+ * shape) and `registry` (MODEL_REGISTRY shape) drive add_candidate proposal
+ * creation via computeModelGaps — both default to "nothing new to add" so
+ * every existing caller/test that only passes `map` keeps its old (reorder
+ * -only) behavior.
+ */
+export function refreshProposals({ env = process.env, map = {}, discovery = {}, registry = MODEL_REGISTRY, now = new Date() } = {}) {
   const { proposalsFile } = paths(env)
   const metrics = computeMetrics({ env })
-  const computed = computeProposals({ metrics, map, now })
+  const gaps = computeModelGaps({ discovery, map, registry })
   const created = []
 
   const result = updateJsonLocked(
     proposalsFile,
     (data) => {
+      // 1. Supersede add_candidate proposals whose chainHash no longer
+      // matches the CURRENT static chain (they always target the static
+      // chain, never a previously-extended effective chain).
       for (const proposal of data.proposals) {
+        if (proposal.kind !== 'add_candidate') continue
         if (proposal.status !== 'pending' && proposal.status !== 'accepted') continue
         const entry = map[proposal.taskType]
         if (!entry) continue
-        const currentHash = chainHash(entry.chain)
-        if (proposal.chainHash !== currentHash) {
+        if (proposal.chainHash !== chainHash(entry.chain)) {
           proposal.status = 'superseded'
           proposal.decidedAt = now.toISOString()
         }
       }
 
-      for (const candidate of computed) {
-        const hasPending = data.proposals.some((p) => p.taskType === candidate.taskType && p.status === 'pending')
+      // 2. Build the effective chain per taskType from the (now consistent)
+      // accepted add_candidate proposals, and supersede reorder proposals
+      // whose chainHash no longer matches THAT effective chain.
+      const effectiveMap = {}
+      for (const [taskType, entry] of Object.entries(map)) {
+        const extra = acceptedAddCandidates(taskType, entry.chain, data).map((p) => ({
+          agent: p.addCandidate.agent,
+          model: p.addCandidate.model,
+          mode: p.addCandidate.mode,
+        }))
+        effectiveMap[taskType] = extra.length === 0 ? entry : { ...entry, chain: [...entry.chain, ...extra] }
+      }
+
+      for (const proposal of data.proposals) {
+        if (proposal.kind === 'add_candidate') continue // handled above
+        if (proposal.status !== 'pending' && proposal.status !== 'accepted') continue
+        const entry = effectiveMap[proposal.taskType]
+        if (!entry) continue
+        if (proposal.chainHash !== chainHash(entry.chain)) {
+          proposal.status = 'superseded'
+          proposal.decidedAt = now.toISOString()
+        }
+      }
+
+      // 3. Reorder proposals, computed over the effective chain so a newly
+      // added candidate becomes eligible for promotion once it has metrics.
+      const computedReorders = computeProposals({ metrics, map: effectiveMap, now })
+      for (const candidate of computedReorders) {
+        const hasPending = data.proposals.some(
+          (p) => p.taskType === candidate.taskType && (p.kind ?? 'reorder') === 'reorder' && p.status === 'pending'
+        )
         if (hasPending) continue
 
         const recentlyRejected = data.proposals.some(
           (p) =>
             p.taskType === candidate.taskType &&
+            (p.kind ?? 'reorder') === 'reorder' &&
             p.status === 'rejected' &&
             p.decidedAt &&
             now.getTime() - new Date(p.decidedAt).getTime() < PROPOSAL_REJECT_COOLDOWN_MS
@@ -164,13 +228,19 @@ export function refreshProposals({ env = process.env, map = {}, now = new Date()
         if (recentlyRejected) continue
 
         const alreadyAccepted = data.proposals.some(
-          (p) => p.taskType === candidate.taskType && p.status === 'accepted' && p.chainHash === candidate.chainHash && sameToOrder(p.toOrder, candidate.toOrder)
+          (p) =>
+            p.taskType === candidate.taskType &&
+            (p.kind ?? 'reorder') === 'reorder' &&
+            p.status === 'accepted' &&
+            p.chainHash === candidate.chainHash &&
+            sameToOrder(p.toOrder, candidate.toOrder)
         )
         if (alreadyAccepted) continue
 
         const proposal = {
           id: `prop-${candidate.taskType}-${Date.now()}-${crypto.randomBytes(2).toString('hex')}`,
           taskType: candidate.taskType,
+          kind: 'reorder',
           chainHash: candidate.chainHash,
           fromOrder: candidate.fromOrder,
           toOrder: candidate.toOrder,
@@ -182,6 +252,55 @@ export function refreshProposals({ env = process.env, map = {}, now = new Date()
         }
         data.proposals.push(proposal)
         created.push(proposal)
+      }
+
+      // 4. add_candidate proposals from discovery-vs-map/registry gaps, one
+      // per taskType per bump, deduped against any pending/accepted proposal
+      // for the same taskType+toModel and respecting the reject cooldown.
+      for (const bump of gaps.versionBumps) {
+        for (const taskType of bump.taskTypes) {
+          const entry = map[taskType]
+          if (!entry) continue
+
+          const exists = data.proposals.some(
+            (p) =>
+              p.taskType === taskType &&
+              p.kind === 'add_candidate' &&
+              p.addCandidate?.model === bump.toModel &&
+              (p.status === 'pending' || p.status === 'accepted')
+          )
+          if (exists) continue
+
+          const recentlyRejected = data.proposals.some(
+            (p) =>
+              p.taskType === taskType &&
+              p.kind === 'add_candidate' &&
+              p.addCandidate?.model === bump.toModel &&
+              p.status === 'rejected' &&
+              p.decidedAt &&
+              now.getTime() - new Date(p.decidedAt).getTime() < PROPOSAL_REJECT_COOLDOWN_MS
+          )
+          if (recentlyRejected) continue
+
+          const cli = entry.chain.filter((c) => c.agent !== 'claude').map((c) => ({ agent: c.agent, model: c.model }))
+          const proposal = {
+            id: `prop-add-${taskType}-${Date.now()}-${crypto.randomBytes(2).toString('hex')}`,
+            taskType,
+            kind: 'add_candidate',
+            chainHash: chainHash(entry.chain),
+            fromOrder: cli,
+            toOrder: cli,
+            addCandidate: { agent: bump.agent, model: bump.toModel, mode: bump.mode },
+            replaces: bump.fromModel,
+            evidence: {},
+            reason: `${bump.agent}:${bump.toModel} looks like a newer version of ${bump.fromModel}, already used for ${taskType}`,
+            status: 'pending',
+            createdAt: now.toISOString(),
+            decidedAt: null,
+          }
+          data.proposals.push(proposal)
+          created.push(proposal)
+        }
       }
 
       return data
@@ -224,11 +343,19 @@ export function decideProposal(id, status, env = process.env) {
       proposal.decidedAt = decidedAt
 
       if (status === 'accepted') {
+        // Reorder and add_candidate proposals are independent axes for the
+        // same taskType (one promotes among existing candidates, the other
+        // appends a new one) — only supersede an older accepted proposal of
+        // the SAME kind, never across kinds. For add_candidate specifically,
+        // also scope to the same addCandidate.model: two different version
+        // bumps for the same taskType can both stay accepted at once.
+        const kind = proposal.kind ?? 'reorder'
         for (const other of data.proposals) {
-          if (other !== proposal && other.taskType === proposal.taskType && other.status === 'accepted') {
-            other.status = 'superseded'
-            other.decidedAt = decidedAt
-          }
+          if (other === proposal || other.taskType !== proposal.taskType || other.status !== 'accepted') continue
+          if ((other.kind ?? 'reorder') !== kind) continue
+          if (kind === 'add_candidate' && other.addCandidate?.model !== proposal.addCandidate?.model) continue
+          other.status = 'superseded'
+          other.decidedAt = decidedAt
         }
       }
 
@@ -255,7 +382,9 @@ export function acceptedOrderFor(taskType, env = process.env, { chain } = {}) {
   const hash = chainHash(chain)
   const { proposalsFile } = paths(env)
   const data = readJsonSafe(proposalsFile, DEFAULT_PROPOSALS_FILE)
-  const accepted = data.proposals.find((p) => p.taskType === taskType && p.status === 'accepted' && p.chainHash === hash)
+  const accepted = data.proposals.find(
+    (p) => p.taskType === taskType && p.status === 'accepted' && p.chainHash === hash && (p.kind ?? 'reorder') === 'reorder'
+  )
   if (!accepted) return null
 
   const cliOriginal = chain.filter((s) => s.agent !== 'claude')

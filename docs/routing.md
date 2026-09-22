@@ -46,7 +46,7 @@ passes availability filtering, plus the rest as fallbacks:
 | `second-opinion` | agy gemini-3.1-pro-high | copilot auto | different model lineage than Claude Code |
 | `adversarial-review` | agy claude-sonnet-4-6 (parallel with copilot auto) | agy claude-opus-4-6-thinking | dual blind review off the Claude Code quota |
 | `github-context` | copilot auto | — | built-in GitHub MCP; cheap models keep premium quota |
-| `mechanical-edit` | opencode deepseek-v4-flash (write) | copilot auto (write) → codex default (write) | cheap write-capable; single writer |
+| `mechanical-edit` | agy gemini-3.8-flash-medium (write) | opencode deepseek-v4-flash (write) → copilot auto (write) → codex default (write) | cheap write-capable; single writer |
 | `implementation-with-repo-rules` | claude sonnet | — | only Claude Code loads CLAUDE.md + skills + hooks |
 | `architecture` | claude opus | agy claude-opus-4-6-thinking | highest reasoning |
 | `structured-mechanical` | claude haiku | — | cheapest Claude tier |
@@ -142,6 +142,40 @@ proposal for the same task type, and a stored proposal whose chain no longer
 matches the delegation map (its chain hash changed) is marked `superseded`.
 After a rejection, no new proposal for that task type for 7 days. `route()`
 applies an accepted proposal to the chain and returns it as `appliedProposal`.
+
+## Model autodiscover
+
+`discovery.json` already records each CLI's own model catalog (see
+"Startup discovery" above); `computeModelGaps({discovery, map, registry})`
+(`src/model-gaps.mjs`) diffs that catalog against `DELEGATION_MAP` and
+`MODEL_REGISTRY` for **agy and opencode only** — copilot's catalog is not
+authoritative and codex has no real model listing, so neither ever produces a
+gap. A model id is split into `{family, version, effort}` (e.g.
+`gemini-3.8-flash-low` → family `gemini-*-flash`, version `[3, 8]`, effort
+`low`); a catalog model is a **version bump** of a model already used in some
+chain when it shares that model's agent, family and effort suffix and has a
+strictly higher version — the highest such match wins. A catalog model that
+matches no chain model and isn't already in `MODEL_REGISTRY` is **unmapped**:
+no taskType can be inferred safely for it, so it is only ever surfaced for a
+human to look at, never proposed.
+
+`refreshProposals()` turns each version bump into a pending `add_candidate`
+proposal (one per taskType per bump, deduped and cooldown-gated the same way
+as a reorder proposal). Its `reason` names the bump; `addCandidate` carries
+the new `{agent, model, mode}` and `replaces` names the older model id.
+**Accepting one only ever appends the new candidate at the TAIL of that
+taskType's chain — never index 0, and never as a reorder.** `route()` builds
+this "effective chain" (the static `DELEGATION_MAP` chain plus every accepted
+`add_candidate` step, in acceptance order) before applying any accepted
+reorder proposal, and `refreshProposals()` computes new reorder proposals
+over that same effective chain — so a newly added candidate only ever gets
+promoted ahead of the current primary through a later, evidence-backed
+reorder proposal once it has its own metrics. `pruneCacheForMap` treats an
+accepted `add_candidate` pair as reachable, the same as a static chain step.
+
+`GET /api/proposals` and `POST /api/proposals/refresh` also return an
+`unmapped` list (`[{agent, model}]`) of catalog models with no safe taskType,
+rendered in the dashboard's Proposals panel alongside the proposal list.
 
 ## Learnings
 

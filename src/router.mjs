@@ -3,7 +3,7 @@ import { readCache } from './preflight.mjs'
 import { circuitBreakerOpen } from './breakers.mjs'
 import { readDiscovery } from './discovery.mjs'
 import { readOverrides, overrideKey } from './overrides.mjs'
-import { acceptedOrderFor } from './proposals.mjs'
+import { acceptedOrderFor, effectiveChainFor } from './proposals.mjs'
 import { fetchUsage } from './quota/codexbar.mjs'
 import { quotaFor, getProvider } from './quota/mapping.mjs'
 import { computeMetrics } from './metrics.mjs'
@@ -86,6 +86,9 @@ export const DELEGATION_MAP = {
   'mechanical-edit': {
     why: 'cheap write-capable; single writer',
     chain: [
+      // agy first: refreshable plan quota, load-balanced across profiles;
+      // deepseek is paid per token, so it only runs when agy is unavailable.
+      { agent: 'agy', model: 'gemini-3.8-flash-medium', mode: 'write' },
       { agent: 'opencode', model: 'deepseek/deepseek-v4-flash', mode: 'write' },
       { agent: 'copilot', model: 'auto', mode: 'write' },
       // LAST resort only: codex's plan quota is limited (see config.mjs).
@@ -215,8 +218,13 @@ export async function route({
     throw new Error(`unknown task type: "${taskType}". Known types: ${Object.keys(DELEGATION_MAP).join(', ')}`)
   }
 
-  const applied = acceptedOrderFor(taskType, env, { chain: entry.chain })
-  const chain = applied ? applied.chain : entry.chain
+  // The effective chain is the static DELEGATION_MAP chain plus every
+  // accepted add_candidate proposal appended at the TAIL (never index 0);
+  // the reorder proposal (if any) is then applied on top of THAT chain, so
+  // an accepted addition becomes eligible for promotion once it has metrics.
+  const effective = effectiveChainFor(taskType, entry.chain, env)
+  const applied = acceptedOrderFor(taskType, env, { chain: effective })
+  const chain = applied ? applied.chain : effective
   const appliedProposal = applied ? { id: applied.proposalId } : null
 
   const evaluated = chain.map((c) => ({ candidate: c, ...evaluateCandidate(c, env) }))

@@ -147,7 +147,7 @@ files, you paid two quotas for one answer. Delegate when the answer is a *locati
 | `second-opinion` | agy `gemini-3.1-pro-high` | copilot `auto` | different model lineage than Claude Code |
 | `adversarial-review` | agy `claude-sonnet-4-6` **parallel with** copilot `auto` | agy `claude-opus-4-6-thinking` | dual blind review off the Claude Code quota |
 | `github-context` | copilot `auto` | — | built-in GitHub MCP; no second fallback (see copilot.md) |
-| `mechanical-edit` | opencode `deepseek/deepseek-v4-flash` (write) | copilot `auto` (write) | cheap write-capable; single writer |
+| `mechanical-edit` | agy `gemini-3.8-flash-medium` (write) | opencode `deepseek/deepseek-v4-flash` (write) → copilot `auto` (write) | cheap write-capable; single writer |
 | `implementation-with-repo-rules` | Claude `sonnet` (Agent tool) | — | only Claude Code loads CLAUDE.md + skills + hooks |
 | `architecture` | Claude `opus` (Agent tool) | agy `claude-opus-4-6-thinking` | highest reasoning |
 | `structured-mechanical` | Claude `haiku` (Agent tool) | — | cheapest Claude tier |

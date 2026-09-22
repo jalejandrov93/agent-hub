@@ -28,6 +28,13 @@ test('route includes Claude subagent tiers as {agent:"claude", model} entries wh
   assert.equal(result.primary.model, 'sonnet')
 })
 
+test('mechanical-edit prefers agy (write mode) before the paid deepseek candidate', async () => {
+  const { DELEGATION_MAP } = await fresh(tmpHome())
+  const chain = DELEGATION_MAP['mechanical-edit'].chain
+  assert.deepEqual(chain[0], { agent: 'agy', model: 'gemini-3.8-flash-medium', mode: 'write' })
+  assert.equal(chain[1].model, 'deepseek/deepseek-v4-flash')
+})
+
 test('route skips a pair whose cached preflight is unavailable, promoting the next fallback', async () => {
   const home = tmpHome()
   process.env.AGENT_HUB_HOME = home
@@ -275,4 +282,46 @@ test('clearing a hold override makes the candidate usable again', async () => {
   clearOverride(key)
   const released = await route({ taskType: 'recon' })
   assert.deepEqual(released.primary, primaryPair)
+})
+
+test('route() appends an accepted add_candidate proposal at the tail; primary and fallback order stay unchanged', async () => {
+  const home = tmpHome()
+  process.env.AGENT_HUB_HOME = home
+  const { writeJsonAtomic } = await import('../src/fsutil.mjs?t=' + Date.now())
+  const { paths } = await import('../src/config.mjs?t=' + Date.now())
+  const { chainHash } = await import('../src/proposals.mjs?t=' + Date.now())
+  const { DELEGATION_MAP, route } = await fresh(home)
+
+  const chain = DELEGATION_MAP.recon.chain
+  const hash = chainHash(chain)
+  const before = await route({ taskType: 'recon' })
+
+  writeJsonAtomic(paths({ AGENT_HUB_HOME: home }).proposalsFile, {
+    version: 1,
+    proposals: [
+      {
+        id: 'prop-add-recon-1',
+        taskType: 'recon',
+        kind: 'add_candidate',
+        chainHash: hash,
+        fromOrder: [],
+        toOrder: [],
+        addCandidate: { agent: 'agy', model: 'gemini-3.9-flash-low', mode: 'read' },
+        replaces: 'gemini-3.8-flash-low',
+        evidence: {},
+        reason: 'test',
+        status: 'accepted',
+        createdAt: new Date().toISOString(),
+        decidedAt: new Date().toISOString(),
+      },
+    ],
+  })
+
+  const result = await route({ taskType: 'recon' })
+  assert.equal(result.primary.agent, before.primary.agent)
+  assert.equal(result.primary.model, before.primary.model)
+  assert.equal(result.fallbacks.length, before.fallbacks.length + 1, 'the new candidate is appended, not swapped in')
+  const last = result.fallbacks[result.fallbacks.length - 1]
+  assert.equal(last.agent, 'agy')
+  assert.equal(last.model, 'gemini-3.9-flash-low')
 })
