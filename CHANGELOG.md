@@ -35,6 +35,12 @@ and this project adheres to [Semantic Versioning](https://semver.org/).
 
 ### Added
 
+- Quota-gated codex routing in the `triage`/`mechanical-edit` chains
+  (`src/routing/codex-gate.mjs`): codex, always a LAST-resort fallback there,
+  is now dropped entirely when its own plan quota is below 20% remaining, and
+  promoted to position 2 when at/above 50% remaining and on pace. This is the
+  one deliberate exception to "quota is informational only" (see
+  `docs/routing.md`); every other agent's ordering is unaffected.
 - `delegate()`/`dispatch()` accept an optional `profile` input to pin one
   agys account (agy only) for a single call: validated against the live
   `agys list`, recorded as `profile`/`profileStatus:'pinned'` on the job,

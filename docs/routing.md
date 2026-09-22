@@ -73,10 +73,19 @@ server (`codexbar serve`, default `http://127.0.0.1:8787`, override with
 rows and on `route()`'s primary and fallbacks, in the `agents_quota` tool, at
 `GET /api/quota`, and in the dashboard's Agents view.
 
-**It never decides anything.** Quota data does not choose, skip, reorder or
-block an agent, and `route()` returns the same chain with or without it — a test
-pins that. An exhausted agent stays in its place; the point is that you see it
-before a job fails, and decide.
+**It never decides anything — with one deliberate exception.** Quota data does
+not choose, skip, reorder or block an agent, and `route()` returns the same
+chain with or without it — a test pins that. An exhausted agent stays in its
+place; the point is that you see it before a job fails, and decide.
+
+The exception is **codex**, which only ever appears as a LAST-resort fallback
+in the `triage` and `mechanical-edit` chains because its plan quota is scarce
+(see `src/routing/codex-gate.mjs`). There, and only there, codex's own quota
+*does* reorder the chain: below 20% remaining on its most-constrained window it
+is dropped entirely (never even attempted); at or above 50% remaining and "on
+pace" (burn rate not ahead of the elapsed window) it is promoted to position 2
+instead of being saved for last. Every other agent, and codex in every other
+chain, is unaffected — quota still never decides anything for them.
 
 Each pair maps to the CodexBar windows that actually limit it. agy splits by
 model family: `gemini-*` models read the Gemini windows, while `claude-*` and

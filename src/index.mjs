@@ -309,9 +309,12 @@ export function buildServer() {
         'Quota state of each delegation pair, read from a local CodexBar server: every window that limits it, with used percent ' +
         'and reset time, and exhausted:true when one is used up. This tool waits for a live reading (up to 45s on a cold CodexBar ' +
         'probe) so its data is always fresh; route() and agents_status instead show whatever is already cached (stale:true/cachedAt ' +
-        'when it is), and never wait on the network. INFORMATION ONLY: quota never chooses, skips or reorders an agent, and route() ' +
-        'is unaffected by it. Check it before delegating and tell the user when a chosen agent is exhausted, with its reset time; ' +
-        'the human decides whether to use it anyway. A null quota carries a reason (CodexBar unreachable, not metered).',
+        'when it is), and never wait on the network. INFORMATION ONLY for every agent except codex: quota never chooses, skips or ' +
+        'reorders any other agent, and route() is unaffected by it for them. codex is the one deliberate exception (triage/' +
+        'mechanical-edit only, where it is always a last-resort fallback): route() drops it entirely below 20% remaining and ' +
+        'promotes it to position 2 at/above 50% remaining and on pace — see docs/routing.md. Check it before delegating and tell ' +
+        'the user when a chosen agent is exhausted, with its reset time; the human decides whether to use it anyway. A null quota ' +
+        'carries a reason (CodexBar unreachable, not metered).',
       inputSchema: { refresh: z.boolean().optional().describe('Bypass the 5-minute cache and fetch live.') },
       outputSchema: AgentsQuotaResponseWrapper,
       annotations: { readOnlyHint: true, openWorldHint: true, idempotentHint: true },

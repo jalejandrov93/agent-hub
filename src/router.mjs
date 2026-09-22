@@ -8,7 +8,13 @@ import { fetchUsage } from './quota/codexbar.mjs'
 import { quotaFor, getProvider } from './quota/mapping.mjs'
 import { computeMetrics } from './metrics.mjs'
 import { rankCandidates, metricKey } from './routing/score.mjs'
+import { codexQuotaDecision } from './routing/codex-gate.mjs'
 import { resolveAgyProfileSync as defaultResolveAgyProfileSync } from './providers/agys.mjs'
+
+// T4: the ONLY taskTypes where codex appears (always as a last-resort
+// fallback — see DELEGATION_MAP) and therefore the only ones where the
+// quota-gated codex reordering below can ever apply.
+const CODEX_GATED_TASK_TYPES = new Set(['triage', 'mechanical-edit'])
 
 /**
  * The delegation map from the plan, expressed as ordered candidate chains.
@@ -200,6 +206,7 @@ export async function route({
   preferences = {},
   adaptive = false,
   env = process.env,
+  now = Date.now,
   _computeMetrics = computeMetrics,
   _resolveAgyProfileSync = defaultResolveAgyProfileSync,
 }) {
@@ -267,19 +274,69 @@ export async function route({
     candidates = eligibleSurvivors
   }
 
-  const [primary, ...fallbacks] = candidates
-
+  // Quota is informational only for every agent EXCEPT codex, which is
+  // deliberately quota-gated below (T4) — see CODEX_GATED_TASK_TYPES and
+  // src/routing/codex-gate.mjs. It must never slow a delegation either way:
+  // 'cached' mode reads whatever is already in the quota cache and never
+  // awaits the network. Providers are computed from every surviving
+  // candidate (not just the eventual primary/fallbacks) since the codex
+  // gate below needs codex's own quota BEFORE the chain is finalized.
   const providers = new Set()
-  const toAnnotate = [primary, ...fallbacks]
-  for (const c of toAnnotate) {
+  for (const c of candidates) {
     const p = getProvider(c.agent, c.model)
     if (p) providers.add(p)
   }
-
-  // Quota is informational only (never chooses/skips/reorders a candidate),
-  // so it must never slow a delegation: 'cached' mode reads whatever is
-  // already in the quota cache and never awaits the network.
   const usageByProvider = await fetchUsage({ providers: [...providers], env, mode: 'cached' })
+
+  // T4: quota-gated codex routing. codex is a last-resort-only fallback in
+  // `triage`/`mechanical-edit`; when its OWN plan quota is nearly exhausted
+  // it is dropped from the chain entirely (never even attempted), and when
+  // it clearly has headroom to spare AND is on pace it is promoted ahead of
+  // the other fallback(s). This is the one deliberate exception to "quota
+  // never chooses/skips/reorders a candidate" — every other agent's order
+  // is untouched.
+  if (CODEX_GATED_TASK_TYPES.has(taskType)) {
+    const codexIdx = candidates.findIndex((c) => c.agent === 'codex')
+    if (codexIdx !== -1) {
+      const codexCandidate = candidates[codexIdx]
+      const decision = codexQuotaDecision({ quota: quotaFor(codexCandidate, usageByProvider), now: now() })
+      if (decision.action === 'drop') {
+        candidates = candidates.filter((_, i) => i !== codexIdx)
+        skipped.push({
+          agent: codexCandidate.agent,
+          model: codexCandidate.model,
+          reason: decision.reason,
+          remainingPct: decision.remainingPct,
+        })
+      } else if (decision.action === 'promote' && candidates.length > 1) {
+        const rest = candidates.filter((_, i) => i !== codexIdx)
+        const promoted = {
+          ...codexCandidate,
+          quotaGate: { action: 'promoted', reason: decision.reason, remainingPct: decision.remainingPct },
+        }
+        candidates = [rest[0], promoted, ...rest.slice(1)]
+      }
+    }
+  }
+
+  if (candidates.length === 0) {
+    // Only reachable when codex was the LAST surviving candidate and the
+    // quota gate just dropped it — mirrors the eligibleSurvivors.length===0
+    // branch above.
+    const detail = skipped.map((s) => `${s.agent}:${s.model} (${s.reason})`).join(', ')
+    return {
+      primary: null,
+      fallbacks: [],
+      skipped,
+      discovery,
+      ranking: [],
+      reason: `every candidate for "${taskType}" is unavailable: ${detail} (${entry.why})`,
+      appliedProposal,
+    }
+  }
+
+  const [primary, ...fallbacks] = candidates
+  const toAnnotate = [primary, ...fallbacks]
 
   const agysEnv = env?.AGENT_HUB_AGYS
   const isAgysSet = typeof agysEnv === 'string' ? agysEnv.trim() !== '' : Boolean(agysEnv)
