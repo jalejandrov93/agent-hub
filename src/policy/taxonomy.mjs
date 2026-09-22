@@ -30,7 +30,7 @@ export function classifyError(text, meta = {}) {
   if (kind && kind in ERROR_TAXONOMY) {
     return kind
   }
-  if (kind === 'empty' || kind === 'read_mode_violation') {
+  if (kind === 'empty' || kind === 'incomplete' || kind === 'read_mode_violation') {
     return 'quality'
   }
 

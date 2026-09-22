@@ -159,3 +159,25 @@ test('listModels parses the real `agy models` fixture into id/label pairs', () =
   assert.equal(byId['claude-opus-4-6-thinking'], 'Claude Opus 4.6 (Thinking)')
   assert.ok(!byId['Fetching'], 'the "Fetching available models..." banner line must not become a model')
 })
+
+test('classifyError flags a SUCCESS turn whose background tasks agy killed on exit as a retriable incomplete error (the model yielded while "waiting")', () => {
+  const stdout = read('stream-background-yield.jsonl')
+  const error = classifyError(stdout, { timedOut: false })
+  assert.equal(error.kind, 'incomplete')
+  assert.equal(error.retriable, true)
+  assert.match(error.message, /1 background task/)
+  assert.equal(error.partialText, 'I have launched the command and am waiting for it to finish.\n')
+  assert.equal(error.sessionId, '25ed2d55-8579-4192-aa48-4fb0e12904b1')
+})
+
+test('classifyError keeps a SUCCESS turn without the background-termination marker as success', () => {
+  const stdout = read('stream-background-yield.jsonl').replace('terminating 1 background task(s) on exit\n', '')
+  assert.equal(classifyError(stdout), null)
+})
+
+test('classifyError ignores the background-termination marker when it only appears inside streamed JSON (tool output or model text quoting it)', () => {
+  const quoted = JSON.stringify({ event: 'step_update', step_update: { step_index: 9, state: 'DONE', step_type: 'tool', tool_name: 'run_command', tool_info: { name: 'run_command', output: 'diff\nterminating 1 background task(s) on exit\n' } } })
+  const stdout = read('stream-success.jsonl').replace(/\n(?=\{"event": ?"result")/, `\n${quoted}\n`)
+  assert.match(stdout, /terminating 1 background task/)
+  assert.equal(classifyError(stdout), null)
+})
