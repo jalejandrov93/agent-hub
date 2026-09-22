@@ -3,7 +3,7 @@ import { readCache } from './preflight.mjs'
 import { circuitBreakerOpen } from './breakers.mjs'
 import { readDiscovery } from './discovery.mjs'
 import { readOverrides, overrideKey } from './overrides.mjs'
-import { acceptedOrderFor } from './proposals.mjs'
+import { acceptedOrderFor, effectiveChainFor } from './proposals.mjs'
 import { fetchUsage } from './quota/codexbar.mjs'
 import { quotaFor, getProvider } from './quota/mapping.mjs'
 import { computeMetrics } from './metrics.mjs'
@@ -218,8 +218,13 @@ export async function route({
     throw new Error(`unknown task type: "${taskType}". Known types: ${Object.keys(DELEGATION_MAP).join(', ')}`)
   }
 
-  const applied = acceptedOrderFor(taskType, env, { chain: entry.chain })
-  const chain = applied ? applied.chain : entry.chain
+  // The effective chain is the static DELEGATION_MAP chain plus every
+  // accepted add_candidate proposal appended at the TAIL (never index 0);
+  // the reorder proposal (if any) is then applied on top of THAT chain, so
+  // an accepted addition becomes eligible for promotion once it has metrics.
+  const effective = effectiveChainFor(taskType, entry.chain, env)
+  const applied = acceptedOrderFor(taskType, env, { chain: effective })
+  const chain = applied ? applied.chain : effective
   const appliedProposal = applied ? { id: applied.proposalId } : null
 
   const evaluated = chain.map((c) => ({ candidate: c, ...evaluateCandidate(c, env) }))

@@ -125,6 +125,35 @@ test('POST /api/proposals/refresh recomputes from metrics and returns the stored
   }
 })
 
+test('GET /api/proposals and POST /api/proposals/refresh include an unmapped list of catalog models with no safe taskType', async () => {
+  const env = { AGENT_HUB_HOME: tmpHome() }
+  writeJsonAtomic(paths(env).discoveryFile, {
+    agy: {
+      agent: 'agy',
+      cmd: 'agy',
+      binPath: '/bin/agy',
+      version: 'v1',
+      models: [{ id: 'gemini-9.9-nova-low' }],
+      checkedAt: new Date().toISOString(),
+      error: null,
+    },
+  })
+  const server = createServer({ env })
+  const port = await listen(server)
+  try {
+    const get = await request(port, '/api/proposals')
+    assert.equal(get.status, 200)
+    assert.ok(Array.isArray(get.body.unmapped))
+    assert.ok(get.body.unmapped.some((m) => m.agent === 'agy' && m.model === 'gemini-9.9-nova-low'))
+
+    const refresh = await request(port, '/api/proposals/refresh', { method: 'POST', body: {} })
+    assert.equal(refresh.status, 200)
+    assert.ok(refresh.body.unmapped.some((m) => m.agent === 'agy' && m.model === 'gemini-9.9-nova-low'))
+  } finally {
+    server.close()
+  }
+})
+
 function seedPendingProposal(env, overrides = {}) {
   const proposal = {
     id: 'prop-recon-test-1',

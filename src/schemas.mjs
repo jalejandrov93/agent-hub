@@ -369,13 +369,28 @@ export const PairRef = z.object({ agent: z.string(), model: z.string() }).passth
 
 export const ProposalStatus = z.enum(['pending', 'accepted', 'rejected', 'superseded'])
 
+// 'reorder' (default, back-compat with every stored/fixture proposal that
+// predates this field): promotes among candidates already in the chain.
+// 'add_candidate': appends a brand-new agent:model at the TAIL of the chain
+// (see acceptedOrderFor/effectiveChainFor in proposals.mjs) — never reorders
+// on its own; promotion of the new candidate only happens through a later
+// 'reorder' proposal computed over the resulting effective chain.
+export const ProposalKind = z.enum(['reorder', 'add_candidate'])
+
+export const AddCandidate = z.object({ agent: z.string(), model: z.string(), mode: z.string().optional() }).passthrough()
+
 export const Proposal = z
   .object({
     id: z.string(),
     taskType: TaskType,
     chainHash: z.string(),
+    kind: ProposalKind.default('reorder'),
     fromOrder: z.array(PairRef),
     toOrder: z.array(PairRef),
+    // Only set when kind is 'add_candidate': the new agent:model to append,
+    // and the older model id (already in the chain) it is a newer version of.
+    addCandidate: AddCandidate.nullable().optional(),
+    replaces: z.string().nullable().optional(),
     evidence: z.record(
       z
         .object({
@@ -395,6 +410,12 @@ export const Proposal = z
   .passthrough()
 
 export const ProposalsFile = z.object({ version: z.literal(1), proposals: z.array(Proposal) }).passthrough()
+
+/** A catalog model computeModelGaps() could not safely map to any taskType (no family/registry match). */
+export const UnmappedModel = z.object({ agent: z.string(), model: z.string() }).passthrough()
+
+/** GET /api/proposals and POST /api/proposals/refresh response shape. */
+export const ProposalsResponse = z.object({ proposals: z.array(Proposal), unmapped: z.array(UnmappedModel).optional() }).passthrough()
 
 export const LearningStatus = z.enum(['pending', 'approved', 'rejected'])
 

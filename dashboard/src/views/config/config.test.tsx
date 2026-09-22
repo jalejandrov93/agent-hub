@@ -228,6 +228,7 @@ describe("ConfigView", () => {
       id: "prop-1",
       taskType: "recon",
       chainHash: "abc",
+      kind: "reorder",
       fromOrder: [],
       toOrder: [],
       evidence: {},

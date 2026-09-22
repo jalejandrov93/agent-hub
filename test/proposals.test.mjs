@@ -316,3 +316,126 @@ test('decideProposal: accepting one proposal supersedes an older accepted propos
   assert.equal(stored.find((p) => p.id === 'old').status, 'superseded')
   assert.equal(stored.find((p) => p.id === 'new').status, 'accepted')
 })
+
+// --- add_candidate (T3: model autodiscover) ---
+
+const RECON_VERSIONED_MAP = {
+  recon: {
+    why: 'test',
+    chain: [
+      { agent: 'agy', model: 'gemini-3.8-flash-low', mode: 'read' },
+      { agent: 'opencode', model: 'opencode/muse-spark-1.3-contributor-free', mode: 'read' },
+      { agent: 'claude', model: 'haiku' },
+    ],
+  },
+}
+
+test('refreshProposals: creates a pending add_candidate proposal for a detected version bump', async () => {
+  const home = tmpHome()
+  const { proposals, config } = await fresh(home)
+  const env = { AGENT_HUB_HOME: home }
+  const discovery = { agy: { models: [{ id: 'gemini-3.8-flash-low' }, { id: 'gemini-3.9-flash-low' }] } }
+
+  const result = proposals.refreshProposals({ env, map: RECON_VERSIONED_MAP, discovery, registry: config.MODEL_REGISTRY })
+  const added = result.filter((p) => p.kind === 'add_candidate')
+  assert.equal(added.length, 1)
+  const p = added[0]
+  assert.equal(p.taskType, 'recon')
+  assert.equal(p.status, 'pending')
+  assert.equal(p.chainHash, proposals.chainHash(RECON_VERSIONED_MAP.recon.chain))
+  assert.deepEqual(p.addCandidate, { agent: 'agy', model: 'gemini-3.9-flash-low', mode: 'read' })
+  assert.equal(p.replaces, 'gemini-3.8-flash-low')
+})
+
+test('refreshProposals: does not duplicate a pending add_candidate proposal on a second refresh', async () => {
+  const home = tmpHome()
+  const { proposals, config } = await fresh(home)
+  const env = { AGENT_HUB_HOME: home }
+  const discovery = { agy: { models: [{ id: 'gemini-3.8-flash-low' }, { id: 'gemini-3.9-flash-low' }] } }
+
+  proposals.refreshProposals({ env, map: RECON_VERSIONED_MAP, discovery, registry: config.MODEL_REGISTRY })
+  const second = proposals.refreshProposals({ env, map: RECON_VERSIONED_MAP, discovery, registry: config.MODEL_REGISTRY })
+  assert.equal(second.filter((p) => p.kind === 'add_candidate' && p.taskType === 'recon').length, 1)
+})
+
+test('refreshProposals: cooldown suppresses a rejected add_candidate proposal from being recreated until it expires', async () => {
+  const home = tmpHome()
+  const { proposals, config } = await fresh(home)
+  const env = { AGENT_HUB_HOME: home }
+  const discovery = { agy: { models: [{ id: 'gemini-3.8-flash-low' }, { id: 'gemini-3.9-flash-low' }] } }
+
+  const [created] = proposals
+    .refreshProposals({ env, map: RECON_VERSIONED_MAP, discovery, registry: config.MODEL_REGISTRY })
+    .filter((p) => p.kind === 'add_candidate')
+  proposals.decideProposal(created.id, 'rejected', env)
+
+  const soon = proposals.refreshProposals({ env, map: RECON_VERSIONED_MAP, discovery, registry: config.MODEL_REGISTRY, now: new Date() })
+  assert.equal(soon.filter((p) => p.kind === 'add_candidate' && p.status === 'pending').length, 0, 'still in cooldown')
+
+  const later = proposals.refreshProposals({
+    env,
+    map: RECON_VERSIONED_MAP,
+    discovery,
+    registry: config.MODEL_REGISTRY,
+    now: new Date(Date.now() + config.PROPOSAL_REJECT_COOLDOWN_MS + 1000),
+  })
+  assert.equal(later.filter((p) => p.kind === 'add_candidate' && p.status === 'pending').length, 1, 'cooldown expired')
+})
+
+test('refreshProposals: an add_candidate proposal never blocks a reorder proposal for the same taskType, and vice versa', async () => {
+  const home = tmpHome()
+  const { proposals, config } = await fresh(home)
+  const env = { AGENT_HUB_HOME: home }
+  const discovery = { agy: { models: [{ id: 'gemini-3.8-flash-low' }, { id: 'gemini-3.9-flash-low' }] } }
+
+  for (let i = 0; i < 14; i++) writeJobRecord(home, { agent: 'agy', model: 'gemini-3.8-flash-low', taskType: 'recon', status: i < 8 ? 'succeeded' : 'failed' })
+  for (let i = 0; i < 18; i++) writeJobRecord(home, { agent: 'opencode', model: 'opencode/muse-spark-1.3-contributor-free', taskType: 'recon', status: 'succeeded' })
+
+  const result = proposals.refreshProposals({ env, map: RECON_VERSIONED_MAP, discovery, registry: config.MODEL_REGISTRY })
+  assert.equal(result.filter((p) => p.kind === 'add_candidate' && p.taskType === 'recon').length, 1)
+  assert.equal(result.filter((p) => (p.kind ?? 'reorder') === 'reorder' && p.taskType === 'recon').length, 1)
+})
+
+test('effectiveChainFor: appends an accepted add_candidate step at the tail, never displacing index 0', async () => {
+  const home = tmpHome()
+  const { proposals } = await fresh(home)
+  const env = { AGENT_HUB_HOME: home }
+  const chain = RECON_VERSIONED_MAP.recon.chain
+  const hash = proposals.chainHash(chain)
+
+  const { writeJsonAtomic } = await import('../src/fsutil.mjs?t=' + Date.now())
+  const { paths } = await import('../src/config.mjs?t=' + Date.now())
+  writeJsonAtomic(paths(env).proposalsFile, {
+    version: 1,
+    proposals: [
+      {
+        id: 'prop-add-1',
+        taskType: 'recon',
+        kind: 'add_candidate',
+        chainHash: hash,
+        fromOrder: [],
+        toOrder: [],
+        addCandidate: { agent: 'agy', model: 'gemini-3.9-flash-low', mode: 'read' },
+        replaces: 'gemini-3.8-flash-low',
+        evidence: {},
+        reason: 'r',
+        status: 'accepted',
+        createdAt: new Date().toISOString(),
+        decidedAt: new Date().toISOString(),
+      },
+    ],
+  })
+
+  const effective = proposals.effectiveChainFor('recon', chain, env)
+  assert.equal(effective.length, chain.length + 1)
+  assert.deepEqual(effective.slice(0, chain.length), chain, 'original chain steps stay in place')
+  assert.deepEqual(effective[effective.length - 1], { agent: 'agy', model: 'gemini-3.9-flash-low', mode: 'read' })
+})
+
+test('effectiveChainFor: returns the same chain unchanged when there is no accepted add_candidate proposal', async () => {
+  const home = tmpHome()
+  const { proposals } = await fresh(home)
+  const env = { AGENT_HUB_HOME: home }
+  const chain = RECON_VERSIONED_MAP.recon.chain
+  assert.deepEqual(proposals.effectiveChainFor('recon', chain, env), chain)
+})

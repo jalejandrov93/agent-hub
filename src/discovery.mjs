@@ -6,6 +6,7 @@ import { adapterFor, modelsArgv } from './adapters/index.mjs'
 import { runCommand } from './process.mjs'
 import { appendEvent } from './eventlog.mjs'
 import { DELEGATION_MAP } from './router.mjs'
+import { listProposals } from './proposals.mjs'
 
 export const KNOWN_AGENTS = ['agy', 'opencode', 'copilot', 'codex']
 
@@ -160,8 +161,14 @@ export async function runDiscovery({ agents = KNOWN_AGENTS, env = process.env, c
   })
 }
 
-/** Every agent:model pair still reachable from DELEGATION_MAP's chains. */
-function validPairKeys() {
+/**
+ * Every agent:model pair still reachable from DELEGATION_MAP's chains, plus
+ * every accepted add_candidate proposal's pair (route()/effectiveChainFor
+ * appends those at the tail of their taskType's chain, so they are just as
+ * reachable as a static chain step even though DELEGATION_MAP itself never
+ * changes).
+ */
+function validPairKeys(env = process.env) {
   const keys = new Set()
   for (const entry of Object.values(DELEGATION_MAP)) {
     for (const candidate of entry.chain) {
@@ -169,6 +176,11 @@ function validPairKeys() {
       if (candidate.parallelWith && candidate.parallelWith.agent !== 'claude') {
         keys.add(`${candidate.parallelWith.agent}:${candidate.parallelWith.model}`)
       }
+    }
+  }
+  for (const proposal of listProposals({ status: 'accepted' }, env)) {
+    if (proposal.kind === 'add_candidate' && proposal.addCandidate) {
+      keys.add(`${proposal.addCandidate.agent}:${proposal.addCandidate.model}`)
     }
   }
   return keys
@@ -191,7 +203,7 @@ export function pruneCacheForMap(env = process.env) {
     if (error.code !== 'ENOENT') cache = {}
   }
 
-  const valid = validPairKeys()
+  const valid = validPairKeys(env)
   const pruned = {}
   let removed = 0
   for (const [key, entry] of Object.entries(cache)) {
