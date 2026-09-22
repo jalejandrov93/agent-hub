@@ -73,8 +73,16 @@ see how much work a job did or is doing.
   404ing. GREEN: 11/11 (jobrunner-diffstats.test.mjs), 4/4
   (dashboard-diffstats.test.mjs), 21/21 (diffstats.test.mjs); full
   `npm test` 1495/1495 pass.
-- [ ] C3 — Dashboard UI: `+X −Y · N files` on job rows/cards, per-file
+- [x] C3 — Dashboard UI: `+X −Y · N files` on job rows/cards, per-file
   table in job detail. Tests + typecheck + build. Docs section.
+  Commit: `2d03567`. RED: `Failed to resolve import "./DiffStatsSummary"` /
+  `"./DiffStatsTable"` (new component tests), then `findByText("+7")` /
+  `findByText("+9")` timing out (JobsView/HistoryView tests) before the
+  column and hook existed. GREEN: 8/8 (DiffStatsSummary+DiffStatsTable),
+  10/10 (jobs/index.test.tsx), 13/13 (history.test.tsx); full dashboard
+  suite 194/194 pass. `npm run -w dashboard typecheck`: clean. `npm run
+  build`: succeeded. `grep -rn '<style\|style="\|data:font' dashboard/dist`:
+  no matches (exit 1). Full `npm test`: 1495/1495 pass.
 
 Route declaration: C1–C3 delegated to one writer (mapping + preparation
 triggers: jobrunner, jobstore, schemas, dashboard server and UI).
@@ -89,6 +97,7 @@ triggers: jobrunner, jobstore, schemas, dashboard server and UI).
 
 ## Progress / next step
 
-- Next: C3.
+- Next: none — C1, C2, C3 all done. Feature complete on branch
+  `feat/job-diff-stats`; no push/PR performed (writer scope).
 - Queued after this feature (separate): D — hub-side verification for agy
   jobs (agy never runs tests) + keep `incomplete` detection.
