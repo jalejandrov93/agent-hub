@@ -257,6 +257,32 @@ test('the memo: dispatch retry re-running agy candidate calls resolveProfileFn a
   }
 })
 
+test('dispatch asks resolveProfileFn to reserve:true for its auto pick (T2 burst spreading, same rationale as jobrunner)', async () => {
+  const { env, cleanup } = makeTempHome()
+  try {
+    const mockStartJob = async () => ({ job: { jobId: 'j-reserve', status: 'queued' }, done: Promise.resolve() })
+    let receivedReserve = 'NOT_CALLED'
+    const fakeResolveProfile = async ({ reserve }) => {
+      receivedReserve = reserve
+      return { profile: 'work', status: 'selected' }
+    }
+
+    await dispatch({
+      task: 'test-dispatch-reserve',
+      taskType: 'recon',
+      cwd: '/tmp/test-dispatch-reserve',
+      env,
+      startJobFn: mockStartJob,
+      resolveProfileFn: fakeResolveProfile,
+      ...fakeRoute({ agent: 'agy', model: 'gemini-3.8-flash' }),
+    })
+
+    assert.equal(receivedReserve, true)
+  } finally {
+    cleanup()
+  }
+})
+
 test('the memo: dispatch fallback re-running agy candidate calls resolveProfileFn at most once', async () => {
   const { env, cleanup } = makeTempHome()
   try {
@@ -362,6 +388,173 @@ test('error or malformed resolveProfileFn result falls back to nulls without thr
     assert.ok(capturedArgs)
     assert.equal(capturedArgs.profile, null)
     assert.equal(capturedArgs.profileStatus, null)
+  } finally {
+    cleanup()
+  }
+})
+
+test('dispatch with an explicit valid profile bypasses resolveProfileFn entirely and marks the job "pinned"', async () => {
+  const { env, cleanup } = makeTempHome()
+  try {
+    let capturedArgs = null
+    const mockStartJob = async (args) => {
+      capturedArgs = args
+      return { job: { jobId: 'j-pinned', status: 'queued' }, done: Promise.resolve() }
+    }
+    let resolveCalls = 0
+    const fakeResolveProfile = async () => {
+      resolveCalls++
+      return { profile: 'work', status: 'selected' }
+    }
+    const listAgysProfilesFn = async () => [{ name: 'work1' }, { name: 'work2' }]
+
+    await dispatch({
+      task: 'test-dispatch-pinned',
+      taskType: 'recon',
+      cwd: '/tmp/test-dispatch-pinned',
+      profile: 'work1',
+      env,
+      startJobFn: mockStartJob,
+      resolveProfileFn: fakeResolveProfile,
+      listAgysProfilesFn,
+      isAgysAvailableFn: async () => true,
+      ...fakeRoute({ agent: 'agy', model: 'gemini-3.8-flash' }),
+    })
+
+    assert.equal(resolveCalls, 0, 'resolveProfileFn must never be called when a profile is pinned')
+    assert.ok(capturedArgs, 'startJobFn was called')
+    assert.equal(capturedArgs.profile, 'work1')
+    assert.equal(capturedArgs.profileStatus, 'pinned')
+  } finally {
+    cleanup()
+  }
+})
+
+test('dispatch rejects an unknown explicit profile before ever calling startJobFn', async () => {
+  const { env, cleanup } = makeTempHome()
+  try {
+    const mockStartJob = async () => {
+      throw new Error('startJobFn must never be called for an unknown profile')
+    }
+    const listAgysProfilesFn = async () => [{ name: 'work1' }, { name: 'work2' }]
+
+    await assert.rejects(
+      () =>
+        dispatch({
+          task: 'test-dispatch-unknown-profile',
+          taskType: 'recon',
+          cwd: '/tmp/test-dispatch-unknown-profile',
+          profile: 'nope',
+          env,
+          startJobFn: mockStartJob,
+          listAgysProfilesFn,
+          isAgysAvailableFn: async () => true,
+          ...fakeRoute({ agent: 'agy', model: 'gemini-3.8-flash' }),
+        }),
+      /unknown agys profile "nope".*work1, work2/
+    )
+  } finally {
+    cleanup()
+  }
+})
+
+test('dispatch rejects an explicit profile when the routed candidate is not agy', async () => {
+  const { env, cleanup } = makeTempHome()
+  try {
+    const mockStartJob = async () => {
+      throw new Error('startJobFn must never be called for a rejected agent')
+    }
+
+    await assert.rejects(
+      () =>
+        dispatch({
+          task: 'test-dispatch-non-agy-profile',
+          taskType: 'recon',
+          cwd: '/tmp/test-dispatch-non-agy-profile',
+          profile: 'work1',
+          env,
+          startJobFn: mockStartJob,
+          ...fakeRoute({ agent: 'opencode', model: 'opencode/muse-spark' }),
+        }),
+      /profile is only meaningful for agent "agy"/
+    )
+  } finally {
+    cleanup()
+  }
+})
+
+test('dispatch keeps a pinned profile through a retry (RDD #97 failover never swaps an explicit pin)', async () => {
+  const { env, cleanup } = makeTempHome()
+  try {
+    let resolveCalls = 0
+    const fakeResolveProfile = async () => {
+      resolveCalls++
+      return { profile: 'work', status: 'selected' }
+    }
+    const capturedList = []
+    const mockStartJob = async (args) => {
+      capturedList.push(args)
+      if (capturedList.length === 1) {
+        return {
+          job: { jobId: 'j-pin-retry-1', agent: args.agent, model: args.model, status: 'failed', errorKind: 'network', error: 'Connection reset' },
+          done: Promise.resolve(),
+        }
+      }
+      return { job: { jobId: 'j-pin-retry-2', agent: args.agent, model: args.model, status: 'queued' }, done: Promise.resolve() }
+    }
+    const listAgysProfilesFn = async () => [{ name: 'work1' }]
+
+    await dispatch({
+      task: 'test-dispatch-pinned-retry',
+      taskType: 'recon',
+      cwd: '/tmp/test-dispatch-pinned-retry',
+      category: 'crash',
+      profile: 'work1',
+      env,
+      startJobFn: mockStartJob,
+      resolveProfileFn: fakeResolveProfile,
+      listAgysProfilesFn,
+      isAgysAvailableFn: async () => true,
+      ...fakeRoute({ agent: 'agy', model: 'gemini-3.8-flash' }),
+    })
+
+    assert.equal(capturedList.length, 2, 'startJobFn called twice across retry')
+    assert.equal(resolveCalls, 0, 'resolveProfileFn must never be called while a profile is pinned')
+    assert.equal(capturedList[0].profile, 'work1')
+    assert.equal(capturedList[0].profileStatus, 'pinned')
+    assert.equal(capturedList[1].profile, 'work1')
+    assert.equal(capturedList[1].profileStatus, 'pinned')
+  } finally {
+    cleanup()
+  }
+})
+
+test('mode "off" + an explicit profile: the explicit per-call profile is authoritative', async () => {
+  const { env, cleanup } = makeTempHome()
+  env.AGENT_HUB_AGYS = 'off'
+  try {
+    let capturedArgs = null
+    const mockStartJob = async (args) => {
+      capturedArgs = args
+      return { job: { jobId: 'j-pin-off', status: 'queued' }, done: Promise.resolve() }
+    }
+    const listAgysProfilesFn = async () => [{ name: 'work1' }]
+
+    await dispatch({
+      task: 'test-dispatch-pinned-off',
+      taskType: 'recon',
+      cwd: '/tmp/test-dispatch-pinned-off',
+      profile: 'work1',
+      env,
+      startJobFn: mockStartJob,
+      listAgysProfilesFn,
+      isAgysAvailableFn: async () => true,
+      ...fakeRoute({ agent: 'agy', model: 'gemini-3.8-flash' }),
+    })
+
+    assert.ok(capturedArgs)
+    assert.equal(capturedArgs.profile, 'work1')
+    assert.equal(capturedArgs.profileStatus, 'pinned')
   } finally {
     cleanup()
   }

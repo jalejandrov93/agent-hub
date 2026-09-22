@@ -35,6 +35,26 @@ and this project adheres to [Semantic Versioning](https://semver.org/).
 
 ### Added
 
+- Quota-gated codex routing in the `triage`/`mechanical-edit` chains
+  (`src/routing/codex-gate.mjs`): codex, always a LAST-resort fallback there,
+  is now dropped entirely when its own plan quota is below 20% remaining, and
+  promoted to position 2 when at/above 50% remaining and on pace. This is the
+  one deliberate exception to "quota is informational only" (see
+  `docs/routing.md`); every other agent's ordering is unaffected.
+- `delegate()`/`dispatch()` accept an optional `profile` input to pin one
+  agys account (agy only) for a single call: validated against the live
+  `agys list`, recorded as `profile`/`profileStatus:'pinned'` on the job,
+  and authoritative over both auto selection and a global pin (including
+  `mode:'off'`) — dispatch's retry/fallback recovery never swaps a pinned
+  profile. An unknown profile, a non-agy agent, or an unavailable agys CLI
+  fails fast with a clear error and no silent fallback.
+- agy account auto-selection is now load-aware, not just quota-aware: the
+  pick is `remainingQuota - 0.15 * inFlightJobsOnThatAccount` (same model
+  group), so a burst of similar-quota jobs spreads across accounts instead
+  of piling onto one, while an account with meaningfully more quota still
+  wins several jobs in a row. Ties break by least-recently-assigned, then
+  priority, then name. Only the agys list/quota snapshot is cached (60s);
+  the pick itself is recomputed on every call.
 - Quality/cost/latency intelligence in `computeMetrics` (`agents_metrics`,
   `GET /api/metrics`): `costUsdTotal`/`costUsdAvg`, `verifiedCount`/
   `verifiedSamples`/`verifiedRate`/`verificationFailures`, `judgeVerdicts`,

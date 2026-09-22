@@ -3,6 +3,7 @@ import { runCommand as defaultRunCommand } from '../process.mjs'
 import { normalizeProfile, selectProfile, profileStateFor, modelGroupFor } from './profiles.mjs'
 import { paths } from '../config.mjs'
 import { writeJsonAtomic, readJsonSafe, updateJsonLocked } from '../fsutil.mjs'
+import { listJobs as defaultListJobs } from '../jobstore.mjs'
 
 /**
  * agys is an external Go CLI (~/.local/bin/agys) that isolates multi-account profiles
@@ -165,6 +166,37 @@ export async function listAgysProfiles({ runCommandFn = defaultRunCommand, env =
     return parseAgysList(res.stdout)
   } catch {
     return []
+  }
+}
+
+/**
+ * Synchronous counterpart to listAgysProfiles, for callers that must stay
+ * synchronous (e.g. delegateTool validating an explicit `profile` input).
+ * Uses child_process.execFileSync by default (injectable via execFn, same
+ * pattern as resolveAgyProfileSync). Never throws: on failure returns
+ * { available: false, profiles: [], reason }, distinguishing an unavailable
+ * agys CLI (ENOENT / exit 127) from any other execFn error so a caller can
+ * tell "agys is not installed" apart from "the profile list is genuinely
+ * unreadable".
+ */
+export function listAgysProfilesSync({ env = process.env, execFn = child_process.execFileSync } = {}) {
+  try {
+    let stdout = execFn('agys', ['list'], {
+      encoding: 'utf8',
+      timeout: 2500,
+      env: env || {},
+    })
+    if (typeof stdout !== 'string') {
+      stdout = stdout?.toString?.('utf8') ?? ''
+    }
+    return { available: true, profiles: parseAgysList(stdout) }
+  } catch (err) {
+    const isUnavailable = err?.code === 'ENOENT' || err?.code === 127
+    return {
+      available: false,
+      profiles: [],
+      reason: isUnavailable ? 'unavailable' : String(err?.message ?? err),
+    }
   }
 }
 
@@ -375,6 +407,109 @@ function isProfileExhaustedForModel(profileName, model, env, now) {
   return Object.values(entry).some((g) => typeof g?.resetAt === 'number' && now() < g.resetAt)
 }
 
+// In-flight job statuses that count toward a profile's load penalty. Any
+// other status (succeeded/failed/canceled, or a remote-only state) is a
+// finished job and must not keep penalizing the profile it ran on.
+const AGY_LOAD_IN_FLIGHT_STATUSES = new Set(['running', 'queued'])
+
+/**
+ * Bound for an in-process load reservation (see reserveAgyLoadSlot): long
+ * enough to cover the synchronous createJob() write that follows a profile
+ * pick within the same tick/process (a burst of concurrent startJob/dispatch
+ * calls), short enough that a stale reservation cannot meaningfully skew
+ * selection once the real job record exists in the job store and is itself
+ * being counted as in-flight.
+ */
+export const AGY_LOAD_RESERVATION_TTL_MS = 10_000
+
+/** Shared in-process reservation store: `"<profile>:<modelGroup>"` -> [{ id, expiresAt }]. */
+export const defaultAgyLoadReservations = new Map()
+
+let agyLoadReservationSeq = 0
+
+/**
+ * Reserves one load slot for `profile` in `modelGroup`, so a burst of
+ * same-tick resolutions (before any of their jobs are durably written to the
+ * job store) still see each other's picks and spread instead of piling onto
+ * the same account. The caller is responsible for calling this ONLY after
+ * actually committing to a pick that will start a real job — an
+ * informational-only caller (e.g. router.mjs's annotation) must never
+ * reserve, or it would wrongly bias the next real selection.
+ */
+export function reserveAgyLoadSlot({ profile, modelGroup, reservations = defaultAgyLoadReservations, now = Date.now, ttlMs = AGY_LOAD_RESERVATION_TTL_MS } = {}) {
+  if (typeof profile !== 'string' || !profile || typeof modelGroup !== 'string' || !modelGroup) return null
+  const key = `${profile}:${modelGroup}`
+  const entry = { id: ++agyLoadReservationSeq, expiresAt: now() + ttlMs }
+  const list = reservations.get(key) ?? []
+  list.push(entry)
+  reservations.set(key, list)
+  return entry.id
+}
+
+/** Test helper: clears every in-process load reservation. */
+export function resetAgyLoadReservations(reservations = defaultAgyLoadReservations) {
+  reservations.clear()
+}
+
+/**
+ * Computes the load-awareness inputs for selectProfile() from the job store
+ * plus any in-process reservations: `inFlightByProfile` (profileName ->
+ * count of running/queued agy jobs on it, scoped to `modelGroup`) and
+ * `lastAssignedByProfile` (profileName -> most recent createdAt, ms epoch,
+ * of ANY agy job on it in that group — including terminal ones, since "last
+ * assigned" is about round-robin fairness, not current load).
+ *
+ * Pure with respect to its inputs (listJobsFn/reservations/now are all
+ * injectable); the only side effect is pruning expired reservation entries
+ * from the given `reservations` map.
+ */
+export function computeAgyLoadContext({ modelGroup, listJobsFn = defaultListJobs, env = process.env, reservations = defaultAgyLoadReservations, now = Date.now } = {}) {
+  const inFlightByProfile = {}
+  const lastAssignedByProfile = {}
+  if (!modelGroup) return { inFlightByProfile, lastAssignedByProfile }
+
+  let jobs = []
+  try {
+    jobs = listJobsFn(env) || []
+  } catch {
+    jobs = []
+  }
+
+  for (const job of jobs) {
+    if (job?.agent !== 'agy') continue
+    const name = job?.profile
+    if (typeof name !== 'string' || !name) continue
+    if (modelGroupFor(job?.model) !== modelGroup) continue
+
+    if (AGY_LOAD_IN_FLIGHT_STATUSES.has(job?.status)) {
+      inFlightByProfile[name] = (inFlightByProfile[name] ?? 0) + 1
+    }
+
+    const ts = typeof job?.createdAt === 'string' ? Date.parse(job.createdAt) : NaN
+    if (Number.isFinite(ts) && (!(name in lastAssignedByProfile) || ts > lastAssignedByProfile[name])) {
+      lastAssignedByProfile[name] = ts
+    }
+  }
+
+  if (reservations && typeof reservations.entries === 'function') {
+    const nowMs = now()
+    for (const [key, list] of reservations.entries()) {
+      const sep = key.lastIndexOf(':')
+      if (sep === -1) continue
+      const name = key.slice(0, sep)
+      const group = key.slice(sep + 1)
+      if (group !== modelGroup) continue
+      const active = (Array.isArray(list) ? list : []).filter((entry) => entry?.expiresAt > nowMs)
+      if (active.length !== list.length) reservations.set(key, active)
+      if (active.length > 0) {
+        inFlightByProfile[name] = (inFlightByProfile[name] ?? 0) + active.length
+      }
+    }
+  }
+
+  return { inFlightByProfile, lastAssignedByProfile }
+}
+
 export async function resolveAgyProfile({
   env = process.env,
   runCommandFn = defaultRunCommand,
@@ -383,6 +518,14 @@ export async function resolveAgyProfile({
   selectFn = selectProfile,
   model = null,
   now = Date.now,
+  // T2 load-awareness: same pure scoring as resolveAgyProfileSync (shared via
+  // selectProfile's inFlightByProfile/lastAssignedByProfile), computed fresh
+  // on every call from the job store (+ any in-process reservations). See
+  // computeAgyLoadContext / reserveAgyLoadSlot for the reserve:false default
+  // rationale (an informational-only caller like router.mjs must not reserve).
+  listJobsFn = defaultListJobs,
+  reservations = defaultAgyLoadReservations,
+  reserve = false,
 } = {}) {
   try {
     const safeEnv = env || {}
@@ -423,9 +566,17 @@ export async function resolveAgyProfile({
         return { ...p, state, quotaEntry }
       })
 
-      const chosen = selectFn({ profiles: candidates, model })
+      const modelGroup = modelGroupFor(model)
+      const { inFlightByProfile, lastAssignedByProfile } = modelGroup
+        ? computeAgyLoadContext({ modelGroup, listJobsFn, env: safeEnv, reservations, now })
+        : { inFlightByProfile: {}, lastAssignedByProfile: {} }
+
+      const chosen = selectFn({ profiles: candidates, model, inFlightByProfile, lastAssignedByProfile })
       if (!chosen) {
         return { profile: null, status: null }
+      }
+      if (chosen.name && reserve && modelGroup) {
+        reserveAgyLoadSlot({ profile: chosen.name, modelGroup, reservations, now })
       }
       return {
         profile: chosen.name ?? null,
@@ -452,6 +603,13 @@ export function resolveAgyProfileSync({
   cache = defaultSyncCache,
   now = Date.now,
   model = null,
+  // T2 load-awareness: see resolveAgyProfile's matching params above. Shares
+  // the same pure scoring (selectProfile) and the same job-store/reservation
+  // computation (computeAgyLoadContext) as the async resolver — one shared
+  // implementation, two entry points.
+  listJobsFn = defaultListJobs,
+  reservations = defaultAgyLoadReservations,
+  reserve = false,
 } = {}) {
   try {
     const safeEnv = env || {}
@@ -472,64 +630,79 @@ export function resolveAgyProfileSync({
     // Claude/GPT resolution (or vice versa) — their exhaustion differs.
     const modelGroup = modelGroupFor(model)
     const cacheKey = `agys:${modeInfo.mode}:${modeInfo.profile ?? ''}:${modeInfo.source}:${modelGroup ?? 'unknown'}`
+
+    // T2: the cache holds ONLY the slow agys list+quota snapshot (as
+    // `candidates`, or a failure result when agys itself could not be
+    // reached) — never the final pick. In-flight load and last-assigned are
+    // recomputed on EVERY call (cache hit or miss) so a burst of calls
+    // within the 60s TTL still spreads across profiles instead of all
+    // replaying one cached decision.
+    let candidates = null
     if (cache && typeof cache.get === 'function') {
       const cached = cache.get(cacheKey)
       if (cached && typeof cached.expiresAt === 'number' && now() < cached.expiresAt) {
-        return cached.value
+        if (cached.failure) return cached.value
+        candidates = cached.candidates
       }
     }
 
-    const effectiveExecFn = execFn ?? child_process.execFileSync
-    let stdoutList = ''
-    let stdoutQuota = ''
+    if (!candidates) {
+      const effectiveExecFn = execFn ?? child_process.execFileSync
+      let stdoutList = ''
+      let stdoutQuota = ''
 
-    try {
-      stdoutList = effectiveExecFn('agys', ['list'], {
-        encoding: 'utf8',
-        timeout: 2500,
-        env: safeEnv,
+      try {
+        stdoutList = effectiveExecFn('agys', ['list'], {
+          encoding: 'utf8',
+          timeout: 2500,
+          env: safeEnv,
+        })
+        if (typeof stdoutList !== 'string') {
+          stdoutList = stdoutList?.toString?.('utf8') ?? ''
+        }
+      } catch (err) {
+        const isUnavailable = err?.code === 'ENOENT' || err?.code === 127
+        const failureResult = {
+          profile: null,
+          status: isUnavailable ? 'unavailable' : null,
+          profiles: [],
+        }
+        if (cache && typeof cache.set === 'function') {
+          cache.set(cacheKey, { failure: true, value: failureResult, expiresAt: now() + SYNC_PROFILE_CACHE_TTL_MS })
+        }
+        return failureResult
+      }
+
+      try {
+        stdoutQuota = effectiveExecFn('agys', ['quota', '--json'], {
+          encoding: 'utf8',
+          timeout: 2500,
+          env: safeEnv,
+        })
+        if (typeof stdoutQuota !== 'string') {
+          stdoutQuota = stdoutQuota?.toString?.('utf8') ?? ''
+        }
+      } catch {
+        stdoutQuota = ''
+      }
+
+      const rawProfiles = parseAgysList(stdoutList)
+      const quotaMap = parseAgysQuota(stdoutQuota)
+      const profiles = Array.isArray(rawProfiles) ? rawProfiles : []
+
+      candidates = profiles.map((p) => {
+        const quotaEntry = quotaMap && typeof quotaMap === 'object' ? quotaMap[p.name] : null
+        let state = p?.state ?? profileStateFor({ profile: p, quotaEntry, model })
+        if (state !== 'exhausted' && state !== 'unavailable' && isProfileExhaustedForModel(p.name, model, safeEnv, now)) {
+          state = 'exhausted'
+        }
+        return { ...p, state, quotaEntry }
       })
-      if (typeof stdoutList !== 'string') {
-        stdoutList = stdoutList?.toString?.('utf8') ?? ''
-      }
-    } catch (err) {
-      const isUnavailable = err?.code === 'ENOENT' || err?.code === 127
-      const failureResult = {
-        profile: null,
-        status: isUnavailable ? 'unavailable' : null,
-        profiles: [],
-      }
+
       if (cache && typeof cache.set === 'function') {
-        cache.set(cacheKey, { value: failureResult, expiresAt: now() + SYNC_PROFILE_CACHE_TTL_MS })
+        cache.set(cacheKey, { failure: false, candidates, expiresAt: now() + SYNC_PROFILE_CACHE_TTL_MS })
       }
-      return failureResult
     }
-
-    try {
-      stdoutQuota = effectiveExecFn('agys', ['quota', '--json'], {
-        encoding: 'utf8',
-        timeout: 2500,
-        env: safeEnv,
-      })
-      if (typeof stdoutQuota !== 'string') {
-        stdoutQuota = stdoutQuota?.toString?.('utf8') ?? ''
-      }
-    } catch {
-      stdoutQuota = ''
-    }
-
-    const rawProfiles = parseAgysList(stdoutList)
-    const quotaMap = parseAgysQuota(stdoutQuota)
-    const profiles = Array.isArray(rawProfiles) ? rawProfiles : []
-
-    const candidates = profiles.map((p) => {
-      const quotaEntry = quotaMap && typeof quotaMap === 'object' ? quotaMap[p.name] : null
-      let state = p?.state ?? profileStateFor({ profile: p, quotaEntry, model })
-      if (state !== 'exhausted' && state !== 'unavailable' && isProfileExhaustedForModel(p.name, model, safeEnv, now)) {
-        state = 'exhausted'
-      }
-      return { ...p, state, quotaEntry }
-    })
 
     const annotatedProfiles = candidates.map((c) => ({
       name: c.name,
@@ -538,20 +711,20 @@ export function resolveAgyProfileSync({
 
     let chosen = null
     if (modeInfo.mode === 'auto') {
-      chosen = selectProfile({ profiles: candidates, model })
+      const { inFlightByProfile, lastAssignedByProfile } = modelGroup
+        ? computeAgyLoadContext({ modelGroup, listJobsFn, env: safeEnv, reservations, now })
+        : { inFlightByProfile: {}, lastAssignedByProfile: {} }
+      chosen = selectProfile({ profiles: candidates, model, inFlightByProfile, lastAssignedByProfile })
+      if (chosen?.name && reserve && modelGroup) {
+        reserveAgyLoadSlot({ profile: chosen.name, modelGroup, reservations, now })
+      }
     }
 
-    const result = {
+    return {
       profile: modeInfo.mode === 'profile' ? modeInfo.profile : (chosen?.name ?? null),
       status: modeInfo.mode === 'profile' ? 'selected' : (chosen ? (chosen.active ? 'selected' : 'fallback') : null),
       profiles: annotatedProfiles,
     }
-
-    if (cache && typeof cache.set === 'function') {
-      cache.set(cacheKey, { value: result, expiresAt: now() + SYNC_PROFILE_CACHE_TTL_MS })
-    }
-
-    return result
   } catch {
     return { profile: null, status: null, profiles: [] }
   }

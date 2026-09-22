@@ -13,7 +13,7 @@ import { classifyError } from './policy/taxonomy.mjs'
 import { adapterFor as defaultAdapterFor } from './adapters/index.mjs'
 import { cancelJob as defaultCancelJob } from './jobrunner.mjs'
 import { resolveHarness, normalizeWaitMode } from './harness/registry.mjs'
-import { resolveAgyProfile } from './providers/agys.mjs'
+import { resolveAgyProfile, listAgysProfiles, isAgysAvailable } from './providers/agys.mjs'
 import { getDb, reserveDispatchKey, releaseDispatchReservation } from './storage/index.mjs'
 
 
@@ -398,6 +398,16 @@ export async function dispatch({
   executeWithPolicyFn = executeWithPolicy,
   startJobFn = startJob,
   resolveProfileFn = resolveAgyProfile,
+  // Explicit per-call agys profile pin ("nope" -> unknown agys profile).
+  // Only meaningful for agent 'agy' — validated against the live profile
+  // list once the routed/explicit candidate's agent is known. Overrides
+  // BOTH auto selection and a global pin (AGENT_HUB_AGYS_PROFILE / mode
+  // file `profile`): it is explicit per call, so it wins even under
+  // mode 'off' (see the pinned-profile branch below, which never consults
+  // resolveProfileFn/getAgysMode).
+  profile: pinnedProfile = null,
+  listAgysProfilesFn = listAgysProfiles,
+  isAgysAvailableFn = isAgysAvailable,
   createJobFn = createJob,
   listJobsFn = listJobs,
   readResultFn = readResult,
@@ -633,6 +643,26 @@ export async function dispatch({
       fallbackCandidates = usableCandidates.slice(1)
     }
 
+    // Explicit profile pin: validate fast, before any job is started. Only
+    // meaningful for agent 'agy' — any other agent rejects instead of
+    // silently ignoring a pin that would never apply (mirrors delegateTool).
+    let normalizedPinnedProfile = null
+    if (typeof pinnedProfile === 'string' && pinnedProfile.trim() !== '') {
+      normalizedPinnedProfile = pinnedProfile.trim()
+      if (primaryCandidate.agent !== 'agy') {
+        throw new Error(`profile is only meaningful for agent "agy" (got "${primaryCandidate.agent}")`)
+      }
+      const available = await isAgysAvailableFn({ env })
+      if (!available) {
+        throw new Error(`agys is unavailable; cannot validate profile "${normalizedPinnedProfile}"`)
+      }
+      const profiles = await listAgysProfilesFn({ env })
+      const names = (Array.isArray(profiles) ? profiles : []).map((p) => p.name)
+      if (!names.includes(normalizedPinnedProfile)) {
+        throw new Error(`unknown agys profile "${normalizedPinnedProfile}"; valid profiles: ${names.join(', ') || '(none)'}`)
+      }
+    }
+
     // Helper to determine if a candidate is remote
     const isRemoteCandidate = (c) => {
       if (!c) return false
@@ -803,7 +833,15 @@ export async function dispatch({
         let profile = null
         let profileStatus = null
 
-        if (candidate?.agent === 'agy') {
+        if (candidate?.agent === 'agy' && normalizedPinnedProfile) {
+          // Pinned wins outright: never consult resolveProfileFn/the memo, so
+          // a 429-driven failover (fallback stage) can swap the CANDIDATE
+          // (agent/model) but never swaps the pinned account — the job just
+          // fails with quota on that account, same as an unpinned exhausted
+          // pick would, and recordQuotaExhaustion still runs on that error.
+          profile = normalizedPinnedProfile
+          profileStatus = 'pinned'
+        } else if (candidate?.agent === 'agy') {
           // Quota is per model group (Gemini vs Claude/GPT — see
           // src/providers/profiles.mjs), so the memo is keyed by agent+group,
           // not just agent: a fallback in a DIFFERENT group (e.g. a gemini
@@ -812,7 +850,10 @@ export async function dispatch({
           const memoKey = `${candidate.agent}:${modelGroupFor(candidate.model) ?? 'unknown'}`
           if (!profileMemo.has(memoKey)) {
             try {
-              const res = await resolveProfileFn({ env, model: candidate.model })
+              // reserve:true — this pick is actually about to start a job, so
+              // it must reserve a same-tick load slot (T2 burst spreading);
+              // see the matching comment in jobrunner.mjs's startJob.
+              const res = await resolveProfileFn({ env, model: candidate.model, reserve: true })
               if (res && typeof res === 'object') {
                 const p = typeof res.profile === 'string' && res.profile.trim() !== '' ? res.profile.trim() : null
                 const s = typeof (res.profileStatus ?? res.status) === 'string' && (res.profileStatus ?? res.status).trim() !== ''

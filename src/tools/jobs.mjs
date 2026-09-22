@@ -10,6 +10,7 @@ import { interactWithSession } from './jules.mjs'
 import * as defaultJulesClient from '../cloud/jules/client.mjs'
 import * as defaultJulesAdapter from '../cloud/jules/adapter.mjs'
 import { getDb, listAgentMessages, markAgentMessageDelivered } from '../storage/index.mjs'
+import { listAgysProfilesSync } from '../providers/agys.mjs'
 
 /** Reject a caller-supplied taskType that is not one of schemas.mjs TASK_TYPES. */
 function assertTaskType(taskType) {
@@ -34,9 +35,73 @@ function jobStatusView(result) {
   }
 }
 
-export function delegateTool({ agent, model, task, cwd, mode = 'read', timeoutS, title, variant, taskType }) {
+/**
+ * Validates an explicit per-call `profile` input against the live agys
+ * profile list. Only meaningful for agent 'agy' — any other agent rejects
+ * fast instead of silently ignoring a pin that would never apply. Unknown
+ * profile / unavailable agys also reject fast: no silent fallback to auto
+ * selection, since the caller explicitly asked to pin one account.
+ */
+function assertPinnedProfile({ agent, profile, listAgysProfilesFn, env }) {
+  if (agent !== 'agy') {
+    throw new Error(`profile is only meaningful for agent "agy" (got "${agent}")`)
+  }
+  const { available, profiles, reason } = listAgysProfilesFn({ env })
+  if (!available) {
+    throw new Error(`agys is unavailable; cannot validate profile "${profile}"${reason ? ` (${reason})` : ''}`)
+  }
+  const names = (profiles ?? []).map((p) => p.name)
+  if (!names.includes(profile)) {
+    throw new Error(`unknown agys profile "${profile}"; valid profiles: ${names.join(', ') || '(none)'}`)
+  }
+}
+
+export function delegateTool({
+  agent,
+  model,
+  task,
+  cwd,
+  mode = 'read',
+  timeoutS,
+  title,
+  variant,
+  taskType,
+  profile = null,
+  startJobFn = defaultStartJob,
+  listAgysProfilesFn = listAgysProfilesSync,
+  env = process.env,
+}) {
   assertTaskType(taskType)
-  const { job } = defaultStartJob({ agent, model, task, cwd, mode, title, timeoutS, variant, taskType, turnDepth: 0, allowlist: WRITE_ALLOWLIST })
+
+  // An explicit per-call profile overrides auto selection AND a global pin
+  // (AGENT_HUB_AGYS_PROFILE / mode file): it is explicit per call, so it is
+  // the most specific signal available. startJob() already honors a truthy
+  // `profile` as-is (see src/jobrunner.mjs) — this only validates it and
+  // marks it 'pinned' instead of 'selected'.
+  let effectiveProfile = null
+  let effectiveProfileStatus = null
+  if (profile != null && String(profile).trim() !== '') {
+    const trimmed = String(profile).trim()
+    assertPinnedProfile({ agent, profile: trimmed, listAgysProfilesFn, env })
+    effectiveProfile = trimmed
+    effectiveProfileStatus = 'pinned'
+  }
+
+  const { job } = startJobFn({
+    agent,
+    model,
+    task,
+    cwd,
+    mode,
+    title,
+    timeoutS,
+    variant,
+    taskType,
+    turnDepth: 0,
+    allowlist: WRITE_ALLOWLIST,
+    profile: effectiveProfile,
+    profileStatus: effectiveProfileStatus,
+  })
   return { jobId: job.jobId, status: job.status, errorKind: job.errorKind ?? null }
 }
 

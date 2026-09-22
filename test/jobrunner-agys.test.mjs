@@ -231,6 +231,100 @@ test('startJob forwards the job model to resolveAgyProfileSyncFn (T3 quota-aware
   assert.equal(receivedModel, 'claude-sonnet-4-6')
 })
 
+test('startJob asks resolveAgyProfileSyncFn to reserve:true for the auto pick (T2 burst spreading), but never for an explicit profile pin', async () => {
+  const home = tmpHome()
+  const { startJob } = await freshModules(home)
+  const spawn = () => fakeChild()
+
+  let receivedReserve = 'NOT_CALLED'
+  const capturingResolver = ({ reserve }) => {
+    receivedReserve = reserve
+    return { profile: 'work', status: 'selected' }
+  }
+
+  const { done } = startJob({
+    agent: 'agy',
+    model: 'gemini-3.8-flash-low',
+    task: 'auto task',
+    cwd: '/tmp',
+    mode: 'read',
+    adapterFor,
+    spawn,
+    resolveAgyProfileSyncFn: capturingResolver,
+    env: { AGENT_HUB_HOME: home, AGENT_HUB_AGYS: 'auto' },
+  })
+  await done
+
+  assert.equal(receivedReserve, true, 'the auto pick that actually starts a job must reserve a load slot')
+
+  // An explicit per-call profile never calls resolveAgyProfileSyncFn at all.
+  let resolverCalled = false
+  const { done: done2 } = startJob({
+    agent: 'agy',
+    model: 'gemini-3.8-flash-low',
+    task: 'pinned task',
+    cwd: '/tmp',
+    mode: 'read',
+    adapterFor,
+    spawn,
+    profile: 'personal',
+    resolveAgyProfileSyncFn: () => {
+      resolverCalled = true
+      return { profile: 'work', status: 'selected' }
+    },
+    env: { AGENT_HUB_HOME: home, AGENT_HUB_AGYS: 'auto' },
+  })
+  await done2
+  assert.equal(resolverCalled, false, 'a pinned profile bypasses auto resolution/reservation entirely')
+})
+
+test('3 sequential agy startJob calls with similar Gemini quota spread across 3 different profiles (real resolveAgyProfileSync, no fakes)', async () => {
+  const home = tmpHome()
+  const { startJob } = await freshModules(home)
+  const spawn = () => fakeChild()
+
+  const listStdout = `Active Profiles:
+PROFILE          PRIO  EMAIL                CONFIG  PATH
+alpha (default)  0     a@example.com        (-)     ~/.agys/profiles/alpha
+beta             0     b@example.com        (-)     ~/.agys/profiles/beta
+gamma            0     c@example.com        (-)     ~/.agys/profiles/gamma
+`
+  const quotaJson = JSON.stringify([
+    { profileName: 'alpha', quota: { groups: [{ displayName: 'Gemini Models', buckets: [{ bucketId: 'gemini-5h', remainingFraction: 0.5 }] }] } },
+    { profileName: 'beta', quota: { groups: [{ displayName: 'Gemini Models', buckets: [{ bucketId: 'gemini-5h', remainingFraction: 0.5 }] }] } },
+    { profileName: 'gamma', quota: { groups: [{ displayName: 'Gemini Models', buckets: [{ bucketId: 'gemini-5h', remainingFraction: 0.5 }] }] } },
+  ])
+  const execFn = (cmd, args) => {
+    if (args[0] === 'list') return listStdout
+    if (args[0] === 'quota') return quotaJson
+    return ''
+  }
+  const { resolveAgyProfileSync, resetSyncProfileCache, resetAgyLoadReservations } = await import('../src/providers/agys.mjs?t=' + Date.now())
+  resetSyncProfileCache()
+  resetAgyLoadReservations()
+  const resolveAgyProfileSyncFn = (args) => resolveAgyProfileSync({ ...args, execFn })
+
+  const env = { AGENT_HUB_HOME: home, AGENT_HUB_AGYS: 'auto' }
+  const picks = []
+  for (let i = 0; i < 3; i++) {
+    const { job, done } = startJob({
+      agent: 'agy',
+      model: 'gemini-3.8-flash-low',
+      task: `job ${i}`,
+      cwd: '/tmp',
+      mode: 'read',
+      adapterFor,
+      spawn,
+      resolveAgyProfileSyncFn,
+      env,
+    })
+    await done
+    picks.push(job.profile)
+  }
+
+  assert.equal(new Set(picks).size, 3, `expected 3 distinct profiles, got ${JSON.stringify(picks)}`)
+})
+
 test('startJob with faked sync resolver without agys env stays plain agy', async () => {
   const home = tmpHome()
   const { startJob, jobstore } = await freshModules(home)

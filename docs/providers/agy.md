@@ -38,9 +38,17 @@ agys priority set <name> <priority> # sets integer priority (higher = preferred 
 ### Modes and precedence
 
 Profile selection operates in one of three modes:
-- `auto`: dynamically inspects `agys list` and `agys quota --json` to select the highest-priority non-exhausted profile.
+- `auto`: dynamically inspects `agys list` and `agys quota --json` and picks the
+  non-exhausted profile with the highest load-aware score for the job's model
+  group (Gemini vs Claude/GPT): `remainingQuota - 0.15 * inFlightJobsOnThatAccount`,
+  ties broken by least-recently-assigned, then priority, then name. See
+  [Load-aware rotation](#load-aware-rotation-auto-mode) below.
 - `profile`: pins execution to a specific named profile.
 - `off`: disables agys wrapping entirely; runs standard `agy`.
+
+An individual `delegate()`/`dispatch()` call can also pin a profile for just
+that call — see [Per-call profile pin](#per-call-profile-pin) below; this is
+independent of (and takes priority over) the mode precedence table.
 
 Precedence is evaluated in strict order (highest to lowest):
 
@@ -107,4 +115,59 @@ agys priority set work 5
 ```
 
 With mode `auto`, agent-hub routes jobs to `personal` (priority 10). If `personal` quota is exhausted (bucket >= 100% or errorClass `quota`), agent-hub automatically routes to `work` as a fallback. To force the work profile for a specific session, set `AGENT_HUB_AGYS_PROFILE=work`.
+
+### Load-aware rotation (`auto` mode)
+
+`auto` mode no longer just picks the profile with the most remaining quota —
+it also accounts for how many jobs are already in flight on each account, so
+a burst of similar-quota jobs spreads across accounts instead of piling onto
+one:
+
+```
+score = remainingQuota(profile, modelGroup) - 0.15 * inFlightJobs(profile, modelGroup)
+```
+
+- `remainingQuota` is the minimum remaining fraction across that model group's
+  quota windows (5h, weekly, ...), same as before.
+- `inFlightJobs` counts `running`/`queued` agy jobs on that profile in the
+  same model group (Gemini vs Claude/GPT), read from the job store plus a
+  short-lived (10s) in-process reservation that covers the gap between
+  picking a profile and the job record landing in the store (protects
+  same-tick bursts, e.g. several parallel `dispatch()` calls).
+- The highest score wins. Ties (within floating-point noise) break by
+  least-recently-assigned profile for that model group, then priority, then
+  name.
+- A profile with no readable quota data still sorts last, unaffected by load
+  (unchanged from before).
+- Only the slow `agys list`/`agys quota --json` snapshot is cached (60s); the
+  pick itself is recomputed on every call, so load-awareness stays accurate
+  within that window.
+
+Net effect: 3 simultaneous jobs against accounts with similar quota land on 3
+different accounts; an account with meaningfully more quota still gets more
+of the next few jobs before a similar-quota idle account becomes preferable.
+
+### Per-call profile pin
+
+`delegate()` and `dispatch()` accept an optional `profile` input to pin one
+agys account for that single call, independent of the global mode:
+
+```js
+delegate({ agent: 'agy', model: 'gemini-3.8-flash-low', task: '...', cwd: '...', profile: 'work' })
+dispatch({ task: '...', cwd: '...', taskType: 'recon', profile: 'work' })
+```
+
+- Only meaningful for agent `agy` — any other agent, or a `dispatch()` call
+  whose routed candidate is not `agy`, fails fast with a clear error.
+- Validated against the live `agys list`; an unknown profile fails fast
+  (`unknown agys profile "...": valid profiles: ...`) instead of silently
+  falling back to auto selection.
+- Recorded on the job as `profile` with `profileStatus: 'pinned'` (distinct
+  from the auto-selected `selected`/`fallback` statuses).
+- Overrides BOTH auto selection and a global pin — including under
+  `mode: 'off'` — since it is explicit per call.
+- In `dispatch()`, a pinned profile is never swapped by retry/fallback
+  recovery: only the candidate (agent/model) can fail over, the pinned
+  account stays fixed. A 429 on a pinned job still fails with quota, and
+  exhaustion is still recorded for that account.
 

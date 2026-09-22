@@ -11,6 +11,8 @@ import {
   selectProfile,
   modelGroupFor,
   remainingQuotaForModel,
+  scoreProfile,
+  LOAD_PENALTY,
 } from '../src/providers/profiles.mjs'
 import {
   parseAgysList,
@@ -19,6 +21,7 @@ import {
   agysAutoArgv,
   isAgysAvailable,
   listAgysProfiles,
+  listAgysProfilesSync,
   readAgysQuota,
   runAgyWithProfile,
   resolveAgyCommand,
@@ -32,6 +35,10 @@ import {
   recordQuotaExhaustion,
   readQuotaExhaustion,
   isProfileExhaustedFor,
+  computeAgyLoadContext,
+  reserveAgyLoadSlot,
+  resetAgyLoadReservations,
+  AGY_LOAD_RESERVATION_TTL_MS,
 } from '../src/providers/agys.mjs'
 
 const FIXTURE_AGYS_LIST = `Active Profiles:
@@ -146,6 +153,19 @@ const REAL_SHAPE_QUOTA = [
       ],
     },
   },
+]
+
+// Same shape as REAL_SHAPE_QUOTA but with EQUAL Gemini headroom for esp/ita
+// (both 0.5), used by the T2 load-aware burst-spreading tests below.
+const REAL_SHAPE_QUOTA_EQUAL_GEMINI = [
+  { ...REAL_SHAPE_QUOTA[0], quota: { groups: [
+    { displayName: 'Gemini Models', buckets: [{ bucketId: 'gemini-5h', remainingFraction: 0.5 }] },
+    { displayName: 'Claude and GPT models', buckets: [{ bucketId: '3p-5h', remainingFraction: 0.5 }] },
+  ] } },
+  { ...REAL_SHAPE_QUOTA[1], quota: { groups: [
+    { displayName: 'Gemini Models', buckets: [{ bucketId: 'gemini-5h', remainingFraction: 0.5 }] },
+    { displayName: 'Claude and GPT models', buckets: [{ bucketId: '3p-5h', remainingFraction: 0.5 }] },
+  ] } },
 ]
 
 test('modelGroupFor maps gemini/claude/gpt model ids to the two agys quota groups, unknown to null', () => {
@@ -458,6 +478,88 @@ test('selectProfile with a model treats missing quota data as lowest priority (k
   const withQuota = { name: 'known', priority: 0, active: false, quotaEntry: REAL_SHAPE_QUOTA[1] }
   const withoutQuota = { name: 'unknown', priority: 0, active: false }
   assert.equal(selectProfile({ profiles: [withQuota, withoutQuota], model: 'claude-sonnet-4-6' })?.name, 'known')
+})
+
+test('scoreProfile: score = remainingQuota - LOAD_PENALTY * inFlight; null remainingQuota stays null (unknown quota)', () => {
+  assert.equal(scoreProfile(0.85, 0), 0.85)
+  assert.ok(Math.abs(scoreProfile(0.85, 1) - 0.7) < 1e-9)
+  assert.ok(Math.abs(scoreProfile(0.85, 2) - 0.55) < 1e-9)
+  assert.equal(scoreProfile(null, 3), null)
+  assert.equal(scoreProfile(0.5), 0.5, 'inFlight defaults to 0')
+})
+
+test('selectProfile with a model penalizes inFlightByProfile so a busier profile loses to an idle one with equal quota', () => {
+  const quotaEqual = { quota: { groups: [{ displayName: 'Gemini Models', buckets: [{ bucketId: 'gemini-5h', remainingFraction: 0.5 }] }] } }
+  const a = { name: 'a', priority: 0, active: false, quotaEntry: quotaEqual }
+  const b = { name: 'b', priority: 0, active: false, quotaEntry: quotaEqual }
+
+  // No load: name tie-break picks 'a'.
+  assert.equal(selectProfile({ profiles: [a, b], model: 'gemini-3.8-flash-low' })?.name, 'a')
+
+  // 'a' already has one in-flight job in this model group -> 'b' wins instead.
+  const picked = selectProfile({
+    profiles: [a, b],
+    model: 'gemini-3.8-flash-low',
+    inFlightByProfile: { a: 1 },
+  })
+  assert.equal(picked?.name, 'b')
+})
+
+test('selectProfile with a model: a much higher quota profile keeps winning across several in-flight jobs before a lower-quota idle profile catches up (0.85/0.30/0.29, LOAD_PENALTY 0.15)', () => {
+  const quotaFor = (fraction) => ({ quota: { groups: [{ displayName: 'Gemini Models', buckets: [{ bucketId: 'gemini-5h', remainingFraction: fraction }] }] } })
+  const A = { name: 'A', priority: 0, active: false, quotaEntry: quotaFor(0.85) }
+  const B = { name: 'B', priority: 0, active: false, quotaEntry: quotaFor(0.30) }
+  const C = { name: 'C', priority: 0, active: false, quotaEntry: quotaFor(0.29) }
+  const profiles = [A, B, C]
+  const model = 'gemini-3.8-flash-low'
+
+  // A: 0.85, 0.85-0.15=0.70, 0.85-0.30=0.55, 0.85-0.45=0.40 all still beat B's 0.30/C's 0.29.
+  assert.equal(selectProfile({ profiles, model, inFlightByProfile: { A: 0 } })?.name, 'A')
+  assert.equal(selectProfile({ profiles, model, inFlightByProfile: { A: 1 } })?.name, 'A')
+  assert.equal(selectProfile({ profiles, model, inFlightByProfile: { A: 2 } })?.name, 'A')
+  assert.equal(selectProfile({ profiles, model, inFlightByProfile: { A: 3 } })?.name, 'A')
+  // A: 0.85-0.60=0.25 < B's 0.30 -> B (higher of the two remaining) wins.
+  assert.equal(selectProfile({ profiles, model, inFlightByProfile: { A: 4 } })?.name, 'B')
+})
+
+test('selectProfile with a model: in-flight load in a DIFFERENT model group never penalizes (caller must pass a group-scoped inFlightByProfile)', () => {
+  const quotaEqual = { quota: { groups: [{ displayName: 'Gemini Models', buckets: [{ bucketId: 'gemini-5h', remainingFraction: 0.5 }] }] } }
+  const a = { name: 'a', priority: 0, active: false, quotaEntry: quotaEqual }
+  const b = { name: 'b', priority: 0, active: false, quotaEntry: quotaEqual }
+
+  // inFlightByProfile is expected to already be scoped to this call's model
+  // group by the caller (agys.mjs); an unscoped/irrelevant count of 0 changes nothing.
+  const picked = selectProfile({ profiles: [a, b], model: 'gemini-3.8-flash-low', inFlightByProfile: {} })
+  assert.equal(picked?.name, 'a', 'no in-flight data for this group -> falls back to the existing name tie-break')
+})
+
+test('selectProfile with a model: unknown remainingQuota still sorts last even when inFlightByProfile is given', () => {
+  const withQuota = { name: 'known', priority: 0, active: false, quotaEntry: REAL_SHAPE_QUOTA[1] }
+  const withoutQuota = { name: 'unknown', priority: 0, active: false }
+  const picked = selectProfile({
+    profiles: [withQuota, withoutQuota],
+    model: 'claude-sonnet-4-6',
+    inFlightByProfile: { known: 50 }, // even heavily loaded, known quota beats no quota data
+  })
+  assert.equal(picked?.name, 'known')
+})
+
+test('selectProfile with a model: equal score (within 1e-9) tie-breaks by least-recently-assigned before priority/name', () => {
+  const quotaEqual = { quota: { groups: [{ displayName: 'Gemini Models', buckets: [{ bucketId: 'gemini-5h', remainingFraction: 0.5 }] }] } }
+  const zed = { name: 'zed', priority: 0, active: false, quotaEntry: quotaEqual }
+  const abc = { name: 'abc', priority: 0, active: false, quotaEntry: quotaEqual }
+
+  // Without lastAssignedByProfile: falls back to name ('abc' < 'zed').
+  assert.equal(selectProfile({ profiles: [zed, abc], model: 'gemini-3.8-flash-low' })?.name, 'abc')
+
+  // 'abc' was assigned more recently than 'zed' (which was never assigned) ->
+  // 'zed' (the least-recently-assigned / never-used) wins the tie instead.
+  const picked = selectProfile({
+    profiles: [zed, abc],
+    model: 'gemini-3.8-flash-low',
+    lastAssignedByProfile: { abc: 1000 },
+  })
+  assert.equal(picked?.name, 'zed')
 })
 
 test('parseAgysList parses fixture and handles spacing, (default), and (-)', () => {
@@ -905,6 +1007,90 @@ test('resolveAgyProfileSync memoizes results so a counting execFn is called at m
   assert.equal(callCount, 4) // 2 more calls
 })
 
+test('listAgysProfilesSync parses `agys list` via execFn and returns { available: true, profiles }', () => {
+  const calls = []
+  const execFn = (cmd, args) => {
+    calls.push({ cmd, args })
+    return FIXTURE_AGYS_LIST
+  }
+  const res = listAgysProfilesSync({ env: {}, execFn })
+  assert.equal(res.available, true)
+  assert.equal(calls.length, 1)
+  assert.equal(calls[0].cmd, 'agys')
+  assert.deepEqual(calls[0].args, ['list'])
+  assert.equal(res.profiles.length, 3)
+  assert.deepEqual(res.profiles.map((p) => p.name), ['work', 'personal', 'backup'])
+})
+
+test('computeAgyLoadContext counts running/queued agy jobs on a profile in the SAME model group as in-flight, and tracks the most recent createdAt as lastAssigned', () => {
+  const jobs = [
+    { agent: 'agy', profile: 'work', model: 'gemini-3.8-flash', status: 'running', createdAt: '2026-09-22T10:00:00.000Z' },
+    { agent: 'agy', profile: 'work', model: 'gemini-2.5-flash', status: 'queued', createdAt: '2026-09-22T10:05:00.000Z' },
+    { agent: 'agy', profile: 'work', model: 'gemini-3.8-flash', status: 'succeeded', createdAt: '2026-09-22T09:00:00.000Z' }, // terminal: not in-flight
+    { agent: 'agy', profile: 'personal', model: 'gemini-3.8-flash', status: 'running', createdAt: '2026-09-22T09:30:00.000Z' },
+    { agent: 'agy', profile: 'work', model: 'claude-sonnet-4-6', status: 'running', createdAt: '2026-09-22T10:10:00.000Z' }, // different group
+    { agent: 'opencode', profile: 'work', model: 'gemini-3.8-flash', status: 'running', createdAt: '2026-09-22T10:20:00.000Z' }, // not agy
+  ]
+  const listJobsFn = () => jobs
+
+  const { inFlightByProfile, lastAssignedByProfile } = computeAgyLoadContext({
+    modelGroup: 'gemini',
+    listJobsFn,
+    env: {},
+    reservations: new Map(),
+  })
+
+  assert.equal(inFlightByProfile.work, 2, 'running + queued in the gemini group; terminal/other-group/other-agent excluded')
+  assert.equal(inFlightByProfile.personal, 1)
+  assert.equal(lastAssignedByProfile.work, Date.parse('2026-09-22T10:05:00.000Z'), 'most recent createdAt across ALL work/gemini jobs, including the terminal one')
+  assert.equal(lastAssignedByProfile.personal, Date.parse('2026-09-22T09:30:00.000Z'))
+})
+
+test('computeAgyLoadContext folds active in-process reservations into inFlightByProfile, scoped by model group, and prunes expired ones', () => {
+  const reservations = new Map()
+  const now = () => 1_000_000
+  reserveAgyLoadSlot({ profile: 'work', modelGroup: 'gemini', reservations, now })
+  reserveAgyLoadSlot({ profile: 'work', modelGroup: 'gemini', reservations, now })
+  reserveAgyLoadSlot({ profile: 'work', modelGroup: 'claude-gpt', reservations, now }) // different group
+  reserveAgyLoadSlot({ profile: 'personal', modelGroup: 'gemini', reservations, now, ttlMs: 1 }) // will already be expired
+
+  const { inFlightByProfile } = computeAgyLoadContext({
+    modelGroup: 'gemini',
+    listJobsFn: () => [],
+    env: {},
+    reservations,
+    now: () => now() + 10, // past the 1ms TTL reservation, well within the default TTL
+  })
+
+  assert.equal(inFlightByProfile.work, 2, 'two active gemini reservations for work')
+  assert.equal(inFlightByProfile.personal ?? 0, 0, 'expired reservation is pruned, not counted')
+})
+
+test('reserveAgyLoadSlot + resetAgyLoadReservations: reset clears every reservation', () => {
+  const reservations = new Map()
+  reserveAgyLoadSlot({ profile: 'work', modelGroup: 'gemini', reservations })
+  resetAgyLoadReservations(reservations)
+  const { inFlightByProfile } = computeAgyLoadContext({ modelGroup: 'gemini', listJobsFn: () => [], env: {}, reservations })
+  assert.equal(inFlightByProfile.work ?? 0, 0)
+})
+
+test('AGY_LOAD_RESERVATION_TTL_MS is a short, positive, bounded default', () => {
+  assert.ok(typeof AGY_LOAD_RESERVATION_TTL_MS === 'number' && AGY_LOAD_RESERVATION_TTL_MS > 0 && AGY_LOAD_RESERVATION_TTL_MS <= 60_000)
+})
+
+test('listAgysProfilesSync reports unavailable on ENOENT and a generic reason on any other execFn error', () => {
+  const enoentErr = new Error('not found')
+  enoentErr.code = 'ENOENT'
+  const unavailRes = listAgysProfilesSync({ env: {}, execFn: () => { throw enoentErr } })
+  assert.deepEqual(unavailRes, { available: false, profiles: [], reason: 'unavailable' })
+
+  const genericErr = new Error('boom')
+  const genericRes = listAgysProfilesSync({ env: {}, execFn: () => { throw genericErr } })
+  assert.equal(genericRes.available, false)
+  assert.deepEqual(genericRes.profiles, [])
+  assert.match(genericRes.reason, /boom/)
+})
+
 const REAL_SHAPE_LIST = `Active Profiles:
 PROFILE          PRIO  EMAIL                       CONFIG  PATH
 esp (default)    0     esp-account@example.com     (-)     ~/.agys/profiles/esp
@@ -921,12 +1107,12 @@ test('resolveAgyProfileSync threads the job model through so selection is quota-
   // esp is the default/active profile but its Claude/GPT group is exhausted
   // (remainingFraction 0) -> a claude job must resolve to ita instead.
   resetSyncProfileCache()
-  const claudeRes = resolveAgyProfileSync({ env: { AGENT_HUB_AGYS: 'auto' }, execFn, model: 'claude-sonnet-4-6' })
+  const claudeRes = resolveAgyProfileSync({ env: { AGENT_HUB_AGYS: 'auto' }, execFn, model: 'claude-sonnet-4-6', listJobsFn: () => [] })
   assert.equal(claudeRes.profile, 'ita')
 
   // A gemini job still prefers esp (more Gemini headroom than ita).
   resetSyncProfileCache()
-  const geminiRes = resolveAgyProfileSync({ env: { AGENT_HUB_AGYS: 'auto' }, execFn, model: 'gemini-3.8-flash-low' })
+  const geminiRes = resolveAgyProfileSync({ env: { AGENT_HUB_AGYS: 'auto' }, execFn, model: 'gemini-3.8-flash-low', listJobsFn: () => [] })
   assert.equal(geminiRes.profile, 'esp')
 })
 
@@ -940,19 +1126,22 @@ test('resolveAgyProfileSync cache key includes the model group, so a cached Gemi
     return ''
   }
   const env = { AGENT_HUB_AGYS: 'auto' }
+  const listJobsFn = () => []
 
-  const geminiRes = resolveAgyProfileSync({ env, execFn, model: 'gemini-3.8-flash-low' })
+  const geminiRes = resolveAgyProfileSync({ env, execFn, model: 'gemini-3.8-flash-low', listJobsFn })
   assert.equal(geminiRes.profile, 'esp')
   assert.equal(callCount, 2)
 
   // Different model GROUP -> must not reuse the Gemini-cached result; esp is
   // exhausted for Claude/GPT, so a cache leak would wrongly keep returning esp.
-  const claudeRes = resolveAgyProfileSync({ env, execFn, model: 'claude-sonnet-4-6' })
+  const claudeRes = resolveAgyProfileSync({ env, execFn, model: 'claude-sonnet-4-6', listJobsFn })
   assert.equal(claudeRes.profile, 'ita')
   assert.equal(callCount, 4, 'a distinct model group must re-resolve, not reuse the other group cache entry')
 
-  // Same model group again within TTL -> memoized, no further execFn calls.
-  const claudeAgain = resolveAgyProfileSync({ env, execFn, model: 'claude-sonnet-4-6' })
+  // Same model group again within TTL -> memoized (list/quota snapshot reused);
+  // the pick itself is recomputed on every call (T2), but with no job-store
+  // activity between calls the same profile wins again.
+  const claudeAgain = resolveAgyProfileSync({ env, execFn, model: 'claude-sonnet-4-6', listJobsFn })
   assert.equal(claudeAgain.profile, 'ita')
   assert.equal(callCount, 4)
 })
@@ -974,6 +1163,7 @@ test('resolveAgyProfile (async) threads the job model through selectFn for quota
     listFn: fakeList,
     quotaFn: fakeQuota,
     model: 'claude-sonnet-4-6',
+    listJobsFn: () => [],
   })
   assert.equal(claudeRes.profile, 'ita', 'esp is exhausted for Claude/GPT quota')
 
@@ -983,8 +1173,57 @@ test('resolveAgyProfile (async) threads the job model through selectFn for quota
     listFn: fakeList,
     quotaFn: fakeQuota,
     model: 'gemini-3.8-flash-low',
+    listJobsFn: () => [],
   })
   assert.equal(geminiRes.profile, 'esp', 'esp still has the most Gemini headroom')
+})
+
+test('resolveAgyProfileSync recomputes the load-aware pick on every call even though the list/quota snapshot is cached, and (with reserve:true) spreads a same-tick burst across distinct profiles', () => {
+  resetSyncProfileCache()
+  const reservations = new Map()
+  const execFn = (cmd, args) => {
+    if (args[0] === 'list') return REAL_SHAPE_LIST // esp, ita, equal priority 0
+    if (args[0] === 'quota') return JSON.stringify(REAL_SHAPE_QUOTA_EQUAL_GEMINI)
+    return ''
+  }
+
+  const picks = []
+  for (let i = 0; i < 2; i++) {
+    const res = resolveAgyProfileSync({
+      env: { AGENT_HUB_AGYS: 'auto' },
+      execFn,
+      model: 'gemini-3.8-flash-low',
+      listJobsFn: () => [], // no job-store activity: only the reservation map tracks the burst
+      reservations,
+      reserve: true,
+    })
+    picks.push(res.profile)
+  }
+
+  assert.equal(new Set(picks).size, 2, 'esp and ita have equal Gemini headroom; reserve:true must spread the 2 picks across both')
+})
+
+test('resolveAgyProfileSync: without reserve:true (the default), consecutive calls do not self-bias via reservations', () => {
+  resetSyncProfileCache()
+  const execFn = (cmd, args) => {
+    if (args[0] === 'list') return REAL_SHAPE_LIST
+    if (args[0] === 'quota') return JSON.stringify(REAL_SHAPE_QUOTA_EQUAL_GEMINI)
+    return ''
+  }
+
+  const picks = []
+  for (let i = 0; i < 2; i++) {
+    const res = resolveAgyProfileSync({
+      env: { AGENT_HUB_AGYS: 'auto' },
+      execFn,
+      model: 'gemini-3.8-flash-low',
+      listJobsFn: () => [],
+      reservations: new Map(), // fresh map every call: no reservation carries over even if reserve were true
+    })
+    picks.push(res.profile)
+  }
+
+  assert.deepEqual(picks, [picks[0], picks[0]], 'identical inputs and no shared reservation -> the same deterministic pick both times')
 })
 
 test('getAgysMode respects precedence: env profile -> env auto -> env off -> setting -> default auto', () => {
