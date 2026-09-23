@@ -49,6 +49,13 @@ instead, which `jobrunner.mjs` sets explicitly to the target worktree before eve
   classifies as `errorKind:'billing'` (not retriable) — a single occurrence opens the circuit
   breaker immediately for that agent+model pair, unlike `quota`/`canceled` which need two failures
   within 30 minutes. Measured live against `deepseek/deepseek-v4-pro`.
+- opencode 2.x runs one shared background service (`opencode serve --service`) that every `run`
+  attaches to. When the binary auto-updates, the next client replaces that service
+  (`reason=version-mismatch` in `~/.local/share/opencode/log/opencode.log`) and every in-flight run
+  receives an `error` event with message `Transport` at the same instant. That event, and
+  connection-level messages (`ECONNRESET`, `ECONNREFUSED`, `socket hang up`, `fetch failed`),
+  classify as `errorKind:'transport'` (retriable): `dispatch` retries per the transport policy and
+  the `transport` breaker class tolerates a burst, instead of a `crash` penalizing the model.
 - Exit codes are meaningful: `0` ok, `1` failure, `130` interrupt. The adapter treats exit `130` as
   `errorKind:'canceled'` (retriable), not a crash — reachable in normal operation since the hub's
   own kill ladder sends SIGINT first (see Cancellation below), not just from an external Ctrl-C.
