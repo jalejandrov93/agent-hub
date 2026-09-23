@@ -260,3 +260,30 @@ test('sessionIdFrom recovers the session id from partial NDJSON stdout', () => {
   assert.equal(sessionIdFrom(partial), 'ses_abc')
   assert.equal(sessionIdFrom(''), null)
 })
+
+test('classifyError maps a "Transport" error event to a retriable transport failure, not a crash', () => {
+  // Real capture (2026-09-23): opencode 2.x replaced its shared background
+  // service (version-mismatch 2.0.14 -> 2.0.15) and every attached `run`
+  // session received this event at the same instant.
+  const stdout = [
+    JSON.stringify({ type: 'step_start', sessionID: 'ses_t', part: { messageID: 'm1' } }),
+    JSON.stringify({ type: 'error', timestamp: 1790169947641, sessionID: 'ses_t', error: { type: 'unknown', message: 'Transport' } }),
+  ].join('\n')
+
+  const result = classifyError(stdout)
+  assert.equal(result.kind, 'transport')
+  assert.equal(result.retriable, true)
+  assert.match(result.message, /transport/i)
+})
+
+test('classifyError treats connection-level error messages as transport', () => {
+  for (const message of ['ECONNRESET', 'socket hang up', 'fetch failed', 'connect ECONNREFUSED 127.0.0.1:4096']) {
+    const stdout = JSON.stringify({ type: 'error', sessionID: 'ses_t', error: { type: 'unknown', message } })
+    assert.equal(classifyError(stdout).kind, 'transport', message)
+  }
+})
+
+test('classifyError still reports an unrecognised error event as a crash', () => {
+  const stdout = JSON.stringify({ type: 'error', sessionID: 'ses_t', error: { type: 'unknown', message: 'Tool execution exploded' } })
+  assert.equal(classifyError(stdout).kind, 'crash')
+})

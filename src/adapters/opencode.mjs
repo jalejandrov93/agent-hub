@@ -153,6 +153,15 @@ export function classifyError(stdout, exitInfo = {}) {
     }
     if (/429|rate limit|quota/.test(msg)) return { kind: 'quota', retriable: true, message: 'opencode quota/rate-limit error event' }
     if (/401|unauthorized|not authenticated/.test(msg)) return { kind: 'auth', retriable: false, message: 'opencode auth error event' }
+    // Real capture: opencode 2.x replaces its shared `serve --service`
+    // process on a version mismatch (auto-update), and every attached run
+    // gets {error:{message:"Transport"}} at once. The model did nothing
+    // wrong, so this must not count as a crash against it; the transport
+    // policy retries and the transport breaker class tolerates bursts.
+    const errorMessage = String(errorEvent.error?.message ?? '').toLowerCase()
+    if (/^transport$|econnreset|econnrefused|socket hang up|fetch failed/.test(errorMessage)) {
+      return { kind: 'transport', retriable: true, message: 'opencode lost its connection to the opencode service (transport error)' }
+    }
     return { kind: 'crash', retriable: false, message: 'opencode reported an error event' }
   }
 
