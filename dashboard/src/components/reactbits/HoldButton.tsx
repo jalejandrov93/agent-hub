@@ -1,3 +1,5 @@
+// Adapted from React Bits (HoldButton) — https://github.com/DavidHDev/react-bits
+// Copyright (c) 2026 David Haz. MIT + Commons Clause, see ./LICENSE.md.
 import React, { useEffect, useId, useLayoutEffect, useRef, useState, type CSSProperties, type ReactNode } from 'react';
 import './HoldButton.css';
 

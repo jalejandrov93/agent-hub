@@ -1,3 +1,5 @@
+// Adapted from React Bits (LetterGlitch) — https://github.com/DavidHDev/react-bits
+// Copyright (c) 2026 David Haz. MIT + Commons Clause, see ./LICENSE.md.
 import { useRef, useEffect } from 'react';
 
 interface Rgb {
