@@ -28,6 +28,8 @@ import {
 import { TONE_BADGE_CLASS, type Tone } from "@/lib/tone"
 import { cn } from "@/lib/utils"
 import type { HubEventT, DerivedState, ProposalT, LearningT } from "@/lib/types"
+import PixelCard from "@/components/reactbits/PixelCard"
+import { CountUpValue } from "@/components/CountUpValue"
 
 const TWENTY_FOUR_HOURS_MS = 24 * 60 * 60 * 1000
 
@@ -35,6 +37,7 @@ type KpiCardSpec = {
   key: string
   label: string
   value: string
+  numericValue?: number
   to: string
   search?: Record<string, unknown>
   tone: Tone
@@ -109,6 +112,7 @@ export function OverviewView() {
       key: "jobs",
       label: "Running jobs",
       value: String(running.length),
+      numericValue: running.length,
       to: "/jobs",
       tone: running.length > 0 ? "running" : "muted",
       badge: running.length > 0 ? "running" : "idle",
@@ -117,6 +121,7 @@ export function OverviewView() {
       key: "failed",
       label: "Failed last 24h",
       value: String(failed24h.length),
+      numericValue: failed24h.length,
       to: "/history",
       search: { status: "failed", agent: "", q: "" },
       tone: failed24h.length > 0 ? "destructive" : "muted",
@@ -126,6 +131,7 @@ export function OverviewView() {
       key: "breakers",
       label: "Breakers open",
       value: String(breakers.length),
+      numericValue: breakers.length,
       to: "/agents",
       search: { filter: "breaker", q: "" },
       tone: breakers.length > 0 ? "destructive" : "muted",
@@ -135,6 +141,7 @@ export function OverviewView() {
       key: "holds",
       label: "Holds",
       value: String(holds.length),
+      numericValue: holds.length,
       to: "/agents",
       search: { filter: "held", q: "" },
       tone: holds.length > 0 ? "warning" : "muted",
@@ -144,6 +151,7 @@ export function OverviewView() {
       key: "unresolved",
       label: "Unresolved CLIs",
       value: String(unresolved.length),
+      numericValue: unresolved.length,
       to: "/config",
       search: { section: "process" },
       tone: unresolved.length > 0 ? "warning" : "muted",
@@ -153,6 +161,7 @@ export function OverviewView() {
       key: "approvals",
       label: "Pending approvals",
       value: String(pendingApprovals),
+      numericValue: pendingApprovals,
       to: "/approvals",
       search: { tab: "proposals" },
       tone: pendingApprovals > 0 ? "warning" : "muted",
@@ -331,20 +340,28 @@ export function OverviewView() {
                   search={card.search}
                   className="block rounded-xl focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring transition-colors"
                 >
-                  <Card className="h-full hover:bg-muted/50 hover:border-foreground/20 transition-all">
-                    <CardHeader className="flex flex-row items-center justify-between pb-2">
-                      <CardDescription className="text-sm font-medium">{card.label}</CardDescription>
-                      <Badge
-                        variant="outline"
-                        className={cn("border-transparent text-xs", TONE_BADGE_CLASS[card.tone])}
-                      >
-                        {card.badge}
-                      </Badge>
-                    </CardHeader>
-                    <CardContent>
-                      <CardTitle className="text-2xl font-bold tracking-tight">{card.value}</CardTitle>
-                    </CardContent>
-                  </Card>
+                  <PixelCard noFocus className="rounded-xl">
+                    <Card className="h-full bg-transparent border-0 ring-0 shadow-none hover:bg-muted/50 hover:border-foreground/20 transition-all">
+                      <CardHeader className="flex flex-row items-center justify-between pb-2">
+                        <CardDescription className="text-sm font-medium">{card.label}</CardDescription>
+                        <Badge
+                          variant="outline"
+                          className={cn("border-transparent text-xs", TONE_BADGE_CLASS[card.tone])}
+                        >
+                          {card.badge}
+                        </Badge>
+                      </CardHeader>
+                      <CardContent>
+                        <CardTitle className="text-2xl font-bold tracking-tight">
+                          {typeof card.numericValue === "number" ? (
+                            <CountUpValue value={card.numericValue} />
+                          ) : (
+                            card.value
+                          )}
+                        </CardTitle>
+                      </CardContent>
+                    </Card>
+                  </PixelCard>
                 </Link>
               ))}
         </div>

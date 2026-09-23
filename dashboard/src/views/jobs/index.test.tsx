@@ -1,6 +1,13 @@
-import { describe, it, expect, vi, beforeEach } from "vitest"
-import { render, screen, fireEvent, waitFor, within } from "@testing-library/react"
+import { describe, it, expect, vi, beforeEach, afterEach } from "vitest"
+import { render, screen, fireEvent, waitFor, within, act } from "@testing-library/react"
 import { QueryClient, QueryClientProvider } from "@tanstack/react-query"
+import {
+  RouterProvider,
+  createMemoryHistory,
+  createRootRoute,
+  createRoute,
+  createRouter,
+} from "@tanstack/react-router"
 import * as api from "@/lib/api"
 import type { Job } from "@/lib/types"
 import { JobsView } from "."
@@ -41,11 +48,29 @@ const RESULT_RESPONSE = {
   errorKind: null,
 }
 
+// The empty state renders <Button render={<Link to="/history" />}>, and a
+// TanStack Link crashes outside a router ("useLinkPropsFor" reads null state).
+// JobsView itself never reads search params, so a minimal tree (root =
+// JobsView, plus the /history target) is enough — same pattern as
+// overview.test.tsx's createTestRouter.
+function createTestRouter() {
+  const root = createRootRoute({ component: JobsView })
+  const historyRoute = createRoute({
+    getParentRoute: () => root,
+    path: "/history",
+    component: () => null,
+  })
+  return createRouter({
+    routeTree: root.addChildren([historyRoute]),
+    history: createMemoryHistory({ initialEntries: ["/"] }),
+  })
+}
+
 function renderView() {
   const client = new QueryClient({ defaultOptions: { queries: { retry: false } } })
   return render(
     <QueryClientProvider client={client}>
-      <JobsView />
+      <RouterProvider router={createTestRouter()} />
     </QueryClientProvider>
   )
 }
@@ -56,6 +81,10 @@ describe("JobsView", () => {
     vi.mocked(api.cancelJob).mockResolvedValue({})
     vi.mocked(api.fetchJson).mockResolvedValue(RESULT_RESPONSE)
     vi.mocked(api.getJobDiffStats).mockResolvedValue({ diffStats: null })
+  })
+
+  afterEach(() => {
+    vi.useRealTimers()
   })
 
   it("renders only queued and running jobs", async () => {
@@ -95,6 +124,11 @@ describe("JobsView", () => {
     renderView()
 
     expect(await screen.findByText("cloud-task")).toBeTruthy()
+
+    // Working dir is hidden by default; show it to inspect the location cell
+    fireEvent.click(screen.getByRole("button", { name: "Choose visible columns" }))
+    fireEvent.click(await screen.findByRole("menuitemcheckbox", { name: "Working dir" }))
+
     expect(screen.getAllByText("acme/widgets").length).toBeGreaterThan(0)
   })
 
@@ -102,11 +136,73 @@ describe("JobsView", () => {
     renderView()
 
     await screen.findByText("running-task")
-    fireEvent.click(screen.getByRole("button", { name: "Cancel" }))
+    const cancelBtn = screen.getByRole("button", { name: "Cancel" })
+
+    // 1) A quick click/tap on the row control does NOT open the dialog and does NOT call api.cancelJob
+    fireEvent.pointerDown(cancelBtn, { button: 0, isPrimary: true, pointerId: 1 })
+    fireEvent.pointerUp(cancelBtn, { pointerId: 1 })
+    fireEvent.click(cancelBtn)
+    expect(screen.queryByRole("dialog")).toBeNull()
+    expect(screen.queryByText("Cancel this job?")).toBeNull()
     expect(api.cancelJob).not.toHaveBeenCalled()
 
-    fireEvent.click(await screen.findByRole("button", { name: "Cancel job" }))
+    // 2) A sustained hold OPENS the ConfirmDialog
+    vi.useFakeTimers({
+      toFake: ["setTimeout", "clearTimeout", "requestAnimationFrame", "cancelAnimationFrame", "performance", "Date"],
+    })
+    try {
+      fireEvent.pointerDown(cancelBtn, { button: 0, isPrimary: true, pointerId: 1 })
+      act(() => {
+        vi.advanceTimersByTime(2150)
+      })
+      // Base UI's AlertDialog renders role="alertdialog" (not "dialog") and
+      // mounts its portal asynchronously; restore real timers first so
+      // findByRole's polling works, then await the element like the
+      // original test did.
+      vi.useRealTimers()
+      fireEvent.pointerUp(cancelBtn, { pointerId: 1 })
+      expect(await screen.findByRole("alertdialog")).toBeTruthy()
+      expect(screen.getByText("Cancel this job?")).toBeTruthy()
+    } finally {
+      vi.useRealTimers()
+    }
+
+    // 3) Confirming in the dialog still calls api.cancelJob with "job-1"
+    fireEvent.click(screen.getByRole("button", { name: "Cancel job" }))
     // React Query v5 calls mutationFn(variables, context); only the first arg is ours.
+    await waitFor(() => expect(vi.mocked(api.cancelJob).mock.calls[0]?.[0]).toBe("job-1"))
+  })
+
+  it("supports keyboard hold to open confirmation dialog via Space", async () => {
+    renderView()
+
+    await screen.findByText("running-task")
+    const cancelBtn = screen.getByRole("button", { name: "Cancel" })
+
+    // 4) Keyboard path: focusable and keydown Space starts hold and reaches dialog
+    cancelBtn.focus()
+    expect(document.activeElement).toBe(cancelBtn)
+
+    vi.useFakeTimers({
+      toFake: ["setTimeout", "clearTimeout", "requestAnimationFrame", "cancelAnimationFrame", "performance", "Date"],
+    })
+    try {
+      fireEvent.keyDown(cancelBtn, { key: " " })
+      act(() => {
+        vi.advanceTimersByTime(2150)
+      })
+      // Restore real timers before querying (see the comment in the test
+      // above): the AlertDialog portal needs real-timer polling to appear,
+      // and its role is "alertdialog".
+      vi.useRealTimers()
+      fireEvent.keyUp(cancelBtn, { key: " " })
+      expect(await screen.findByRole("alertdialog")).toBeTruthy()
+      expect(screen.getByText("Cancel this job?")).toBeTruthy()
+    } finally {
+      vi.useRealTimers()
+    }
+
+    fireEvent.click(screen.getByRole("button", { name: "Cancel job" }))
     await waitFor(() => expect(vi.mocked(api.cancelJob).mock.calls[0]?.[0]).toBe("job-1"))
   })
 
@@ -256,4 +352,85 @@ describe("JobsView", () => {
     await screen.findByText("ordinary-task")
     expect(screen.getByText("Running")).toBeTruthy()
   })
+
+  it("by default does not render headers for Timeout, Working dir and Profile, while Task, Status and Started are rendered", async () => {
+    renderView()
+
+    await screen.findByText("running-task")
+    const table = screen.getByRole("table")
+
+    expect(within(table).queryByRole("columnheader", { name: "Timeout" })).toBeNull()
+    expect(within(table).queryByRole("columnheader", { name: "Working dir" })).toBeNull()
+    expect(within(table).queryByRole("columnheader", { name: "Profile" })).toBeNull()
+
+    expect(within(table).getByRole("columnheader", { name: "Task" })).toBeTruthy()
+    expect(within(table).getByRole("columnheader", { name: "Status" })).toBeTruthy()
+    expect(within(table).getByRole("columnheader", { name: "Started" })).toBeTruthy()
+  })
+
+  it("opening the column menu and toggling Timeout makes its header appear and toggling again hides it", async () => {
+    renderView()
+
+    await screen.findByText("running-task")
+    const table = screen.getByRole("table")
+    expect(within(table).queryByRole("columnheader", { name: "Timeout" })).toBeNull()
+
+    const trigger = screen.getByRole("button", { name: "Choose visible columns" })
+    fireEvent.click(trigger)
+
+    const timeoutItem = await screen.findByRole("menuitemcheckbox", { name: "Timeout" })
+    expect(timeoutItem.getAttribute("aria-checked")).toBe("false")
+
+    // Toggle on -> Timeout column header appears
+    fireEvent.click(timeoutItem)
+    expect(within(table).getByRole("columnheader", { name: "Timeout" })).toBeTruthy()
+
+    // Toggle off -> Timeout column header disappears again
+    let timeoutToggle = screen.queryByRole("menuitemcheckbox", { name: "Timeout" })
+    if (!timeoutToggle) {
+      fireEvent.click(trigger)
+      timeoutToggle = await screen.findByRole("menuitemcheckbox", { name: "Timeout" })
+    }
+    fireEvent.click(timeoutToggle)
+    expect(within(table).queryByRole("columnheader", { name: "Timeout" })).toBeNull()
+  })
+
+  it("does not offer Actions as hideable and still renders HoldButton Cancel when other columns are hidden", async () => {
+    renderView()
+
+    await screen.findByText("running-task")
+
+    const trigger = screen.getByRole("button", { name: "Choose visible columns" })
+    fireEvent.click(trigger)
+
+    await screen.findByRole("menu")
+    expect(screen.queryByRole("menuitemcheckbox", { name: "Actions" })).toBeNull()
+
+    // HoldButton "Cancel" renders under default hidden columns
+    expect(screen.getByRole("button", { name: "Cancel" })).toBeTruthy()
+
+    // Hide another column (e.g. Task)
+    const taskItem = screen.getByRole("menuitemcheckbox", { name: "Task" })
+    fireEvent.click(taskItem)
+
+    // HoldButton "Cancel" still renders
+    expect(screen.getByRole("button", { name: "Cancel" })).toBeTruthy()
+  })
+
+  it("renders empty-state correctly with hidden columns (the DataTable empty message row shows once)", async () => {
+    vi.mocked(api.getState).mockResolvedValue(stateWith([]))
+
+    renderView()
+
+    expect(await screen.findByText("No jobs running")).toBeTruthy()
+    expect(screen.getByText("Jobs you delegate show up here while they are queued or running.")).toBeTruthy()
+    // Base UI's `render={<Link />}` swaps the button element for an <a>, so
+    // the accessible role is "link", not "button".
+    expect(screen.getByRole("link", { name: "View job history" })).toBeTruthy()
+
+    const emptyCells = screen.getAllByRole("cell")
+    expect(emptyCells).toHaveLength(1)
+    expect(emptyCells[0].getAttribute("colspan")).toBe("9")
+  })
 })
+

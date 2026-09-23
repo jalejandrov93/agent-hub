@@ -10,6 +10,8 @@ import { formatDuration, formatModel, formatNumber } from "@/lib/format"
 import { Alert, AlertDescription, AlertTitle } from "@/components/ui/alert"
 import { Badge } from "@/components/ui/badge"
 import { Card, CardContent, CardHeader, CardTitle } from "@/components/ui/card"
+import PixelCard from "@/components/reactbits/PixelCard"
+import { CountUpValue } from "@/components/CountUpValue"
 import {
   ChartContainer,
   ChartTooltip,
@@ -238,30 +240,43 @@ export function MetricsView() {
       ) : (
         <>
           <div className="grid gap-4 md:grid-cols-3">
-            <Card>
-              <CardHeader>
-                <CardTitle>Total samples</CardTitle>
-              </CardHeader>
-              <CardContent className="text-2xl font-semibold tabular-nums">
-                {formatNumber(totalSamples)}
-              </CardContent>
-            </Card>
-            <Card>
-              <CardHeader>
-                <CardTitle>Overall success rate</CardTitle>
-              </CardHeader>
-              <CardContent className="text-2xl font-semibold tabular-nums">
-                {overallSuccessRate == null ? "—" : `${overallSuccessRate.toFixed(1)}%`}
-              </CardContent>
-            </Card>
-            <Card>
-              <CardHeader>
-                <CardTitle>Pairs with low samples</CardTitle>
-              </CardHeader>
-              <CardContent className="text-2xl font-semibold tabular-nums">
-                {formatNumber(lowSamplePairs)}
-              </CardContent>
-            </Card>
+            <PixelCard noFocus className="rounded-xl">
+              <Card className="h-full bg-transparent border-0 ring-0 shadow-none">
+                <CardHeader>
+                  <CardTitle>Total samples</CardTitle>
+                </CardHeader>
+                <CardContent className="text-2xl font-semibold">
+                  <CountUpValue value={totalSamples} format={(v) => formatNumber(Math.round(v))} />
+                </CardContent>
+              </Card>
+            </PixelCard>
+            <PixelCard noFocus className="rounded-xl">
+              <Card className="h-full bg-transparent border-0 ring-0 shadow-none">
+                <CardHeader>
+                  <CardTitle>Overall success rate</CardTitle>
+                </CardHeader>
+                <CardContent className="text-2xl font-semibold">
+                  {overallSuccessRate == null ? (
+                    <span className="tabular-nums">—</span>
+                  ) : (
+                    <CountUpValue
+                      value={overallSuccessRate}
+                      format={(v) => `${v.toFixed(1)}%`}
+                    />
+                  )}
+                </CardContent>
+              </Card>
+            </PixelCard>
+            <PixelCard noFocus className="rounded-xl">
+              <Card className="h-full bg-transparent border-0 ring-0 shadow-none">
+                <CardHeader>
+                  <CardTitle>Pairs with low samples</CardTitle>
+                </CardHeader>
+                <CardContent className="text-2xl font-semibold">
+                  <CountUpValue value={lowSamplePairs} format={(v) => formatNumber(Math.round(v))} />
+                </CardContent>
+              </Card>
+            </PixelCard>
           </div>
 
           <Card>

@@ -13,6 +13,8 @@ import { Sheet, SheetContent, SheetHeader, SheetTitle, SheetDescription } from "
 import { ToggleGroup, ToggleGroupItem } from "@/components/ui/toggle-group"
 import { formatDuration, formatNumber, formatModel } from "@/lib/format"
 import { useStateQuery } from "@/lib/queries"
+import PixelCard from "@/components/reactbits/PixelCard"
+import { CountUpValue } from "@/components/CountUpValue"
 
 export type SubagentRun = {
   agentId: string
@@ -285,26 +287,39 @@ export function SubagentsView() {
         ) : (
           <>
             <div className="grid grid-cols-1 gap-4 sm:grid-cols-3">
-              <Card size="sm">
-                <CardHeader>
-                  <CardDescription>Running now</CardDescription>
-                  <CardTitle className="text-2xl font-semibold">{summary.runningNow}</CardTitle>
-                </CardHeader>
-              </Card>
-              <Card size="sm">
-                <CardHeader>
-                  <CardDescription>Finished (last 24h)</CardDescription>
-                  <CardTitle className="text-2xl font-semibold">{summary.finished24h}</CardTitle>
-                </CardHeader>
-              </Card>
-              <Card size="sm">
-                <CardHeader>
-                  <CardDescription>Total tokens (last 24h)</CardDescription>
-                  <CardTitle className="text-2xl font-semibold">
-                    {formatNumber(summary.totalTokens24h)}
-                  </CardTitle>
-                </CardHeader>
-              </Card>
+              <PixelCard noFocus className="rounded-xl">
+                <Card size="sm" className="h-full bg-transparent border-0 ring-0 shadow-none">
+                  <CardHeader>
+                    <CardDescription>Running now</CardDescription>
+                    <CardTitle className="text-2xl font-semibold">
+                      <CountUpValue value={summary.runningNow} />
+                    </CardTitle>
+                  </CardHeader>
+                </Card>
+              </PixelCard>
+              <PixelCard noFocus className="rounded-xl">
+                <Card size="sm" className="h-full bg-transparent border-0 ring-0 shadow-none">
+                  <CardHeader>
+                    <CardDescription>Finished (last 24h)</CardDescription>
+                    <CardTitle className="text-2xl font-semibold">
+                      <CountUpValue value={summary.finished24h} />
+                    </CardTitle>
+                  </CardHeader>
+                </Card>
+              </PixelCard>
+              <PixelCard noFocus className="rounded-xl">
+                <Card size="sm" className="h-full bg-transparent border-0 ring-0 shadow-none">
+                  <CardHeader>
+                    <CardDescription>Total tokens (last 24h)</CardDescription>
+                    <CardTitle className="text-2xl font-semibold">
+                      <CountUpValue
+                        value={summary.totalTokens24h}
+                        format={(v) => formatNumber(Math.round(v))}
+                      />
+                    </CardTitle>
+                  </CardHeader>
+                </Card>
+              </PixelCard>
             </div>
 
             <div className="flex flex-wrap items-center gap-3">

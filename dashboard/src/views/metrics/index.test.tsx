@@ -1,4 +1,4 @@
-import { cleanup, fireEvent, render, screen, within } from "@testing-library/react"
+import { cleanup, fireEvent, render, screen, waitFor, within } from "@testing-library/react"
 import { beforeEach, describe, expect, it, vi } from "vitest"
 import type { MetricsRowT } from "@/lib/types"
 import { MetricsView } from "./index"
@@ -135,5 +135,51 @@ describe("MetricsView", () => {
     expect(opencodeCells[10]?.textContent).toBe("—")
     expect(opencodeCells[11]?.textContent).toContain("—")
   })
+
+  it("renders summary cards inside PixelCard without double tab stop and animates CountUpValue", async () => {
+    const { container } = render(<MetricsView />)
+
+    // PixelCards wrap summary cards
+    const pixelCards = container.querySelectorAll(".pixel-card")
+    expect(pixelCards.length).toBeGreaterThanOrEqual(3)
+
+    // noFocus means no tabindex
+    pixelCards.forEach((card) => {
+      expect(card.getAttribute("tabindex")).toBeNull()
+      expect(card.querySelector(".pixel-canvas")).toBeTruthy()
+    })
+
+    // Zero style elements in container or injected in head
+    expect(container.querySelector("style")).toBeNull()
+
+    // Assert final animated values
+    await waitFor(() => {
+      expect(screen.getByText("15")).toBeTruthy()
+      expect(screen.getByText("86.7%")).toBeTruthy()
+    })
+  })
+
+  it("renders summary card values immediately under prefers-reduced-motion", () => {
+    vi.stubGlobal(
+      "matchMedia",
+      vi.fn().mockImplementation((query: string) => ({
+        matches: query.includes("prefers-reduced-motion: reduce"),
+        media: query,
+        onchange: null,
+        addListener: vi.fn(),
+        removeListener: vi.fn(),
+        addEventListener: vi.fn(),
+        removeEventListener: vi.fn(),
+        dispatchEvent: vi.fn(),
+      }))
+    )
+
+    render(<MetricsView />)
+
+    // Immediate render under reduced motion (no count-up delay)
+    expect(screen.getByText("15")).toBeTruthy()
+    expect(screen.getByText("86.7%")).toBeTruthy()
+  })
 })
+
 

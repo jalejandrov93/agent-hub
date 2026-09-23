@@ -4,6 +4,7 @@ import { useQueryClient } from "@tanstack/react-query"
 import { SidebarProvider, SidebarInset } from "@/components/ui/sidebar"
 import { AppSidebar } from "./app-sidebar"
 import { Topbar } from "./topbar"
+import { AppBackground } from "@/components/AppBackground"
 import { ROUTE_LABELS, groupLabelFor, type RouteName } from "@/lib/nav"
 import { qk } from "@/lib/query-keys"
 
@@ -38,7 +39,8 @@ export function AppShell() {
   return (
     <SidebarProvider>
       <AppSidebar />
-      <SidebarInset className="min-w-0">
+      <SidebarInset className="min-w-0 isolate">
+        <AppBackground />
         <Topbar title={groupLabelFor(routeName) || ROUTE_LABELS[routeName]} />
         <main id="main-content" className="flex flex-1 flex-col gap-4 overflow-auto p-4">
           <Outlet />
