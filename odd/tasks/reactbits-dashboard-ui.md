@@ -38,7 +38,7 @@ while passing every hard constraint in `dashboard/AGENTS.md`.
 |---|---|---|---|
 | PixelCard | TS-CSS | none | props: `variant`, `gap`, `speed`, `colors` (comma string), `noFocus`, `className`, `children`. No pixel-size prop. Glow color only via `--pixel-card-active-color`. Honors reduced-motion; animates on hover/focus only. Baked classes `h-[400px] w-[300px] aspect-[4/5] rounded-[25px] border-[#27272a]` must be overridden. |
 | LetterGlitch | TS-TW | none | props required in TS: `glitchColors[]`, `glitchSpeed` (ms), `centerVignette`, `outerVignette`, `smooth`, `characters`; optional `lightMode`, `backgroundColor`, `className`. rAF never stops while mounted; NO reduced-motion handling; effect deps `[glitchSpeed, smooth]` only (colors do not re-init → remount via `key={theme}`). |
-| GlareHover | TS-TW | none | shine sweep for summary cards; hardcoded default colors must be tokenized. |
+| GlareHover | TS-TW | none | (removed: never used; summary cards use PixelCard) shine sweep for summary cards. |
 | BorderGlow | TS-TW | none | one instance only (pointermove setState + rAF) → topbar "Live" badge. |
 | Magnet | TS-TW | none | window mousemove per instance → max 1-2 dashboard-wide. |
 

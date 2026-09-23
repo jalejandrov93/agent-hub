@@ -1,3 +1,5 @@
+// Adapted from React Bits (PixelCard) — https://github.com/DavidHDev/react-bits
+// Copyright (c) 2026 David Haz. MIT + Commons Clause, see ./LICENSE.md.
 import { useEffect, useRef } from 'react';
 import { type JSX } from 'react';
 import './PixelCard.css';
