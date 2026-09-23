@@ -41,6 +41,12 @@ import {
   AGY_LOAD_RESERVATION_TTL_MS,
 } from '../src/providers/agys.mjs'
 
+// Resolution reads persisted hub state (e.g. agys-exhaustion.json). Without
+// an AGENT_HUB_HOME the tests would read the real ~/.local/share/agent-hub,
+// so a genuinely exhausted profile on this machine would flip the expected
+// pick. Every env handed to the resolver gets its own empty home.
+const isolatedEnv = (vars) => ({ AGENT_HUB_HOME: fs.mkdtempSync(path.join(os.tmpdir(), 'agent-hub-agys-iso-')), ...vars })
+
 const FIXTURE_AGYS_LIST = `Active Profiles:
 PROFILE          PRIO  EMAIL                CONFIG  PATH
 work (default)   2     work@company.com     (-)     ~/.agys/profiles/work
@@ -815,7 +821,7 @@ test('resolveAgyProfile returns explicit profile without calling agys CLI', asyn
   }
 
   const res = await resolveAgyProfile({
-    env: { AGENT_HUB_AGYS_PROFILE: 'personal' },
+    env: isolatedEnv({ AGENT_HUB_AGYS_PROFILE: 'personal' }),
     runCommandFn
   })
 
@@ -841,7 +847,7 @@ test('resolveAgyProfile in auto mode selects active or fallback profile using in
 
   // Active profile picked
   const res1 = await resolveAgyProfile({
-    env: { AGENT_HUB_AGYS: 'auto' },
+    env: isolatedEnv({ AGENT_HUB_AGYS: 'auto' }),
     runCommandFn: fakeRunner,
     listFn: fakeList,
     quotaFn: fakeQuota
@@ -854,7 +860,7 @@ test('resolveAgyProfile in auto mode selects active or fallback profile using in
     backup: { profileName: 'backup' }
   })
   const res2 = await resolveAgyProfile({
-    env: { AGENT_HUB_AGYS: 'auto' },
+    env: isolatedEnv({ AGENT_HUB_AGYS: 'auto' }),
     runCommandFn: fakeRunner,
     listFn: fakeList,
     quotaFn: exhaustedActiveQuota
@@ -866,7 +872,7 @@ test('resolveAgyProfile returns status unavailable when agys CLI is unavailable'
   const failRunner = async () => ({ code: 1, stdout: '', stderr: 'command not found' })
 
   const res = await resolveAgyProfile({
-    env: { AGENT_HUB_AGYS: 'auto' },
+    env: isolatedEnv({ AGENT_HUB_AGYS: 'auto' }),
     runCommandFn: failRunner
   })
 
@@ -874,7 +880,7 @@ test('resolveAgyProfile returns status unavailable when agys CLI is unavailable'
 })
 
 test('resolveAgyProfile returns null profile and status when mode is off', async () => {
-  const res = await resolveAgyProfile({ env: { AGENT_HUB_AGYS: 'off' } })
+  const res = await resolveAgyProfile({ env: isolatedEnv({ AGENT_HUB_AGYS: 'off' }) })
   assert.deepEqual(res, { profile: null, status: null })
 })
 
@@ -895,15 +901,15 @@ test('resolveAgyProfile never throws on junk or errors', async () => {
   }
 
   // Explicit 'off' short-circuits without probing anything.
-  assert.deepEqual(await resolveAgyProfile({ env: { AGENT_HUB_AGYS: 'off' } }), { profile: null, status: null })
+  assert.deepEqual(await resolveAgyProfile({ env: isolatedEnv({ AGENT_HUB_AGYS: 'off' }) }), { profile: null, status: null })
   assert.deepEqual(await resolveAgyProfile({ env: null, runCommandFn: throwingRunner }), { profile: null, status: 'unavailable' })
   assert.deepEqual(await resolveAgyProfile({
-    env: { AGENT_HUB_AGYS: 'auto' },
+    env: isolatedEnv({ AGENT_HUB_AGYS: 'auto' }),
     runCommandFn: async () => ({ code: 0, stdout: 'agys v0.2.33', stderr: '' }),
     listFn: throwingRunner
   }), { profile: null, status: null })
   assert.deepEqual(await resolveAgyProfile({
-    env: { AGENT_HUB_AGYS: 'auto' },
+    env: isolatedEnv({ AGENT_HUB_AGYS: 'auto' }),
     runCommandFn: async () => ({ code: 0, stdout: 'agys v0.2.33', stderr: '' }),
     selectFn: () => { throw new Error('select failed') }
   }), { profile: null, status: null })
@@ -926,7 +932,7 @@ test('resolveAgyProfileSync resolves explicit AGENT_HUB_AGYS_PROFILE without cal
     return ''
   }
   const res = resolveAgyProfileSync({
-    env: { AGENT_HUB_AGYS_PROFILE: 'custom-prof' },
+    env: isolatedEnv({ AGENT_HUB_AGYS_PROFILE: 'custom-prof' }),
     execFn,
   })
   assert.equal(execCalled, false)
@@ -944,7 +950,7 @@ test('resolveAgyProfileSync in auto mode runs agys list and quota via execFn and
   }
   resetSyncProfileCache()
   const res = resolveAgyProfileSync({
-    env: { AGENT_HUB_AGYS: 'auto' },
+    env: isolatedEnv({ AGENT_HUB_AGYS: 'auto' }),
     execFn,
   })
   assert.equal(res.profile, 'work')
@@ -967,7 +973,7 @@ test('resolveAgyProfileSync handles execFn errors gracefully (unavailable on ENO
   const enoentErr = new Error('not found')
   enoentErr.code = 'ENOENT'
   const unavailRes = resolveAgyProfileSync({
-    env: { AGENT_HUB_AGYS: 'auto' },
+    env: isolatedEnv({ AGENT_HUB_AGYS: 'auto' }),
     execFn: () => {
       throw enoentErr
     },
@@ -977,7 +983,7 @@ test('resolveAgyProfileSync handles execFn errors gracefully (unavailable on ENO
   resetSyncProfileCache()
   const genericErr = new Error('generic failure')
   const genericRes = resolveAgyProfileSync({
-    env: { AGENT_HUB_AGYS: 'auto' },
+    env: isolatedEnv({ AGENT_HUB_AGYS: 'auto' }),
     execFn: () => {
       throw genericErr
     },
@@ -1107,12 +1113,12 @@ test('resolveAgyProfileSync threads the job model through so selection is quota-
   // esp is the default/active profile but its Claude/GPT group is exhausted
   // (remainingFraction 0) -> a claude job must resolve to ita instead.
   resetSyncProfileCache()
-  const claudeRes = resolveAgyProfileSync({ env: { AGENT_HUB_AGYS: 'auto' }, execFn, model: 'claude-sonnet-4-6', listJobsFn: () => [] })
+  const claudeRes = resolveAgyProfileSync({ env: isolatedEnv({ AGENT_HUB_AGYS: 'auto' }), execFn, model: 'claude-sonnet-4-6', listJobsFn: () => [] })
   assert.equal(claudeRes.profile, 'ita')
 
   // A gemini job still prefers esp (more Gemini headroom than ita).
   resetSyncProfileCache()
-  const geminiRes = resolveAgyProfileSync({ env: { AGENT_HUB_AGYS: 'auto' }, execFn, model: 'gemini-3.8-flash-low', listJobsFn: () => [] })
+  const geminiRes = resolveAgyProfileSync({ env: isolatedEnv({ AGENT_HUB_AGYS: 'auto' }), execFn, model: 'gemini-3.8-flash-low', listJobsFn: () => [] })
   assert.equal(geminiRes.profile, 'esp')
 })
 
@@ -1158,7 +1164,7 @@ test('resolveAgyProfile (async) threads the job model through selectFn for quota
   const fakeQuota = async () => ({ esp: REAL_SHAPE_QUOTA[0], ita: REAL_SHAPE_QUOTA[1] })
 
   const claudeRes = await resolveAgyProfile({
-    env: { AGENT_HUB_AGYS: 'auto' },
+    env: isolatedEnv({ AGENT_HUB_AGYS: 'auto' }),
     runCommandFn: fakeRunner,
     listFn: fakeList,
     quotaFn: fakeQuota,
@@ -1168,7 +1174,7 @@ test('resolveAgyProfile (async) threads the job model through selectFn for quota
   assert.equal(claudeRes.profile, 'ita', 'esp is exhausted for Claude/GPT quota')
 
   const geminiRes = await resolveAgyProfile({
-    env: { AGENT_HUB_AGYS: 'auto' },
+    env: isolatedEnv({ AGENT_HUB_AGYS: 'auto' }),
     runCommandFn: fakeRunner,
     listFn: fakeList,
     quotaFn: fakeQuota,
@@ -1190,7 +1196,7 @@ test('resolveAgyProfileSync recomputes the load-aware pick on every call even th
   const picks = []
   for (let i = 0; i < 2; i++) {
     const res = resolveAgyProfileSync({
-      env: { AGENT_HUB_AGYS: 'auto' },
+      env: isolatedEnv({ AGENT_HUB_AGYS: 'auto' }),
       execFn,
       model: 'gemini-3.8-flash-low',
       listJobsFn: () => [], // no job-store activity: only the reservation map tracks the burst
@@ -1214,7 +1220,7 @@ test('resolveAgyProfileSync: without reserve:true (the default), consecutive cal
   const picks = []
   for (let i = 0; i < 2; i++) {
     const res = resolveAgyProfileSync({
-      env: { AGENT_HUB_AGYS: 'auto' },
+      env: isolatedEnv({ AGENT_HUB_AGYS: 'auto' }),
       execFn,
       model: 'gemini-3.8-flash-low',
       listJobsFn: () => [],
