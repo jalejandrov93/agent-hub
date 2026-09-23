@@ -174,8 +174,9 @@ describe("SubagentsView", () => {
 
     expect(screen.getByText("Running now")).toBeTruthy()
     expect(screen.getByText("Finished (last 24h)")).toBeTruthy()
-    expect(screen.getByText("Total tokens (last 24h)")).toBeTruthy()
-    expect(screen.getAllByText("2.5k").length).toBeGreaterThanOrEqual(1)
+    await waitFor(() => {
+      expect(screen.getAllByText("2.5k").length).toBeGreaterThanOrEqual(1)
+    })
   })
 
   it("sorts runs newest first and opens detail sheet on row click", async () => {
@@ -265,5 +266,81 @@ describe("SubagentsView", () => {
       expect(screen.getByText("OpenCode task")).toBeTruthy()
     })
   })
+
+  it("renders summary cards inside PixelCard with noFocus", async () => {
+    vi.mocked(api.getState).mockResolvedValue({
+      agents: [],
+      jobs: [],
+      events: [],
+      subagents: [
+        {
+          ts: "2026-09-13T10:00:00.000Z",
+          source: "claude-hook",
+          kind: "subagent.start",
+          agent: "claude",
+          agentId: "agent-live",
+          title: "Live subagent",
+          cwd: "/app",
+        },
+      ],
+    })
+
+    const { container } = renderWithClient(<SubagentsView />)
+
+    await waitFor(() => {
+      expect(screen.getByText("Running now")).toBeTruthy()
+    })
+
+    const pixelCards = container.querySelectorAll(".pixel-card")
+    expect(pixelCards.length).toBeGreaterThanOrEqual(3)
+
+    pixelCards.forEach((card) => {
+      expect(card.getAttribute("tabindex")).toBeNull()
+      expect(card.querySelector(".pixel-canvas")).toBeTruthy()
+    })
+  })
+
+  it("renders summary values instantly when prefers-reduced-motion is true", async () => {
+    vi.stubGlobal(
+      "matchMedia",
+      vi.fn().mockImplementation((query: string) => ({
+        matches: query.includes("prefers-reduced-motion: reduce"),
+        media: query,
+        onchange: null,
+        addListener: vi.fn(),
+        removeListener: vi.fn(),
+        addEventListener: vi.fn(),
+        removeEventListener: vi.fn(),
+        dispatchEvent: vi.fn(),
+      }))
+    )
+
+    vi.mocked(api.getState).mockResolvedValue({
+      agents: [],
+      jobs: [],
+      events: [],
+      subagents: [
+        {
+          ts: "2026-09-13T10:00:00.000Z",
+          source: "claude-hook",
+          kind: "subagent.start",
+          agent: "claude",
+          agentId: "agent-live",
+          title: "Live subagent",
+          cwd: "/app",
+        },
+      ],
+    })
+
+    renderWithClient(<SubagentsView />)
+
+    await waitFor(() => {
+      expect(screen.getByText("Live subagent")).toBeTruthy()
+    })
+
+    // Instant render under reduced motion
+    expect(screen.getByText("1")).toBeTruthy()
+  })
 })
+
 

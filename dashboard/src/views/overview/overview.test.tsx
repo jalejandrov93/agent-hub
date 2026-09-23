@@ -146,23 +146,25 @@ describe("OverviewView", () => {
     expect(screen.getByText("Unresolved CLIs")).toBeTruthy()
     expect(screen.getByText("Pending approvals")).toBeTruthy()
 
-    const runningCard = screen.getByText("Running jobs").closest("a")
-    expect(runningCard?.textContent).toContain("0")
+    await waitFor(() => {
+      const runningCard = screen.getByText("Running jobs").closest("a")
+      expect(runningCard?.textContent).toContain("0")
 
-    const failedCard = screen.getByText("Failed last 24h").closest("a")
-    expect(failedCard?.textContent).toContain("1")
+      const failedCard = screen.getByText("Failed last 24h").closest("a")
+      expect(failedCard?.textContent).toContain("1")
 
-    const breakerCard = screen.getByText("Breakers open").closest("a")
-    expect(breakerCard?.textContent).toContain("0")
+      const breakerCard = screen.getByText("Breakers open").closest("a")
+      expect(breakerCard?.textContent).toContain("0")
 
-    const holdCard = screen.getByText("Holds").closest("a")
-    expect(holdCard?.textContent).toContain("0")
+      const holdCard = screen.getByText("Holds").closest("a")
+      expect(holdCard?.textContent).toContain("0")
 
-    const unresolvedCard = screen.getByText("Unresolved CLIs").closest("a")
-    expect(unresolvedCard?.textContent).toContain("0")
+      const unresolvedCard = screen.getByText("Unresolved CLIs").closest("a")
+      expect(unresolvedCard?.textContent).toContain("0")
 
-    const approvalsCard = screen.getByText("Pending approvals").closest("a")
-    expect(approvalsCard?.textContent).toContain("2")
+      const approvalsCard = screen.getByText("Pending approvals").closest("a")
+      expect(approvalsCard?.textContent).toContain("2")
+    })
   })
 
   it("links have the right hrefs", async () => {
@@ -254,4 +256,58 @@ describe("OverviewView", () => {
       expect(screen.getByRole("alert")).toBeTruthy()
     })
   })
+
+  it("renders PixelCard inside Link with value, badge, and label without double tab stop", async () => {
+    renderOverview()
+
+    await waitFor(() => {
+      expect(screen.getByText("Running jobs")).toBeTruthy()
+    })
+
+    const link = screen.getByText("Running jobs").closest("a")
+    expect(link).toBeTruthy()
+
+    // PixelCard is inside the Link
+    const pixelCard = link?.querySelector(".pixel-card")
+    expect(pixelCard).toBeTruthy()
+    // noFocus means pixel-card does not add a tab stop
+    expect(pixelCard?.getAttribute("tabindex")).toBeNull()
+
+    // Canvas exists inside pixelCard
+    expect(pixelCard?.querySelector(".pixel-canvas")).toBeTruthy()
+
+    // Label, badge, and value all remain inside the link
+    expect(link?.textContent).toContain("Running jobs")
+    expect(link?.textContent).toContain("idle")
+    await waitFor(() => {
+      expect(link?.textContent).toContain("0")
+    })
+  })
+
+  it("renders final KPI values instantly under prefers-reduced-motion", async () => {
+    vi.stubGlobal(
+      "matchMedia",
+      vi.fn().mockImplementation((query: string) => ({
+        matches: query.includes("prefers-reduced-motion: reduce"),
+        media: query,
+        onchange: null,
+        addListener: vi.fn(),
+        removeListener: vi.fn(),
+        addEventListener: vi.fn(),
+        removeEventListener: vi.fn(),
+        dispatchEvent: vi.fn(),
+      }))
+    )
+
+    renderOverview()
+
+    await waitFor(() => {
+      expect(screen.getByText("Pending approvals")).toBeTruthy()
+    })
+
+    const approvalsCard = screen.getByText("Pending approvals").closest("a")
+    // Immediate render with reduced motion (no rAF count-up delay)
+    expect(approvalsCard?.textContent).toContain("2")
+  })
 })
+

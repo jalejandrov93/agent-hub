@@ -1,17 +1,25 @@
 import * as React from "react"
 import { Link } from "@tanstack/react-router"
-import { AlertTriangle, PlayCircle } from "lucide-react"
+import { AlertTriangle, Columns3, PlayCircle } from "lucide-react"
 import { PageHeader } from "@/components/PageHeader"
 import { ProviderMark } from "@/components/ProviderMark"
 import { StatusBadge } from "@/components/StatusBadge"
 import { EmptyState } from "@/components/EmptyState"
 import { DataTable, type DataTableColumn } from "@/components/DataTable"
 import { ConfirmDialog } from "@/components/ConfirmDialog"
+import { HoldButton } from "@/components/reactbits/HoldButton"
 import { DiffStatsSummary } from "@/components/DiffStatsSummary"
 import { RelativeTime } from "@/components/RelativeTime"
 import { Alert, AlertDescription, AlertTitle } from "@/components/ui/alert"
 import { Badge } from "@/components/ui/badge"
 import { Button } from "@/components/ui/button"
+import {
+  DropdownMenu,
+  DropdownMenuCheckboxItem,
+  DropdownMenuContent,
+  DropdownMenuGroup,
+  DropdownMenuTrigger,
+} from "@/components/ui/dropdown-menu"
 import { Skeleton } from "@/components/ui/skeleton"
 import { Toaster, toast } from "@/components/ui/toast"
 import { Tooltip, TooltipContent, TooltipProvider, TooltipTrigger } from "@/components/ui/tooltip"
@@ -73,11 +81,15 @@ function CwdCell({ location }: { location: string }) {
   )
 }
 
+const DEFAULT_HIDDEN_COLUMNS: ReadonlySet<string> = new Set(["timeout", "cwd", "profile"])
+const MANDATORY_COLUMNS: readonly string[] = ["actions"]
+
 export function JobsView() {
   const stateQuery = useStateQuery()
   const cancelJob = useCancelJobMutation()
   const [selected, setSelected] = React.useState<Job | null>(null)
   const [pendingCancel, setPendingCancel] = React.useState<Job | null>(null)
+  const [hidden, setHidden] = React.useState<Set<string>>(() => new Set(DEFAULT_HIDDEN_COLUMNS))
 
   const jobs = React.useMemo(() => {
     const data = stateQuery.data
@@ -185,19 +197,31 @@ export function JobsView() {
       header: <span className="sr-only">Actions</span>,
       className: "text-right",
       cell: (job) => (
-        <Button
-          variant="destructive"
-          size="xs"
-          onClick={(event) => {
-            event.stopPropagation()
-            setPendingCancel(job)
-          }}
+        <HoldButton
+          size="sm"
+          holdTime={2000}
+          onHold={() => setPendingCancel(job)}
+          backgroundColor="var(--card)"
+          fillColor="var(--destructive)"
+          textColor="var(--destructive)"
+          fillTextColor="var(--destructive-foreground)"
+          className="text-xs"
         >
           Cancel
-        </Button>
+        </HoldButton>
       ),
     },
   ]
+
+  const visibleColumns = React.useMemo(
+    () => columns.filter((c) => !hidden.has(c.key) || MANDATORY_COLUMNS.includes(c.key)),
+    [columns, hidden]
+  )
+
+  const hideableColumns = React.useMemo(
+    () => columns.filter((c) => !MANDATORY_COLUMNS.includes(c.key)),
+    [columns]
+  )
 
   return (
     <TooltipProvider>
@@ -210,18 +234,66 @@ export function JobsView() {
           <AlertTitle>Could not load jobs</AlertTitle>
           <AlertDescription>{stateQuery.error.message}</AlertDescription>
         </Alert>
-      ) : jobs.length === 0 ? (
-        <EmptyState
-          icon={PlayCircle}
-          title="No jobs running"
-          description="Jobs you delegate show up here while they are queued or running."
-        >
-          <Button variant="outline" size="sm" render={<Link to="/history" />}>
-            View job history
-          </Button>
-        </EmptyState>
       ) : (
-        <DataTable columns={columns} rows={jobs} getRowId={(job) => job.jobId} onRowClick={setSelected} />
+        <div className="flex flex-col gap-4">
+          <div className="flex justify-end">
+            <DropdownMenu>
+              <DropdownMenuTrigger
+                render={
+                  <Button
+                    variant="outline"
+                    size="sm"
+                    aria-label="Choose visible columns"
+                  />
+                }
+              >
+                <Columns3 data-icon="inline-start" />
+                Columns
+              </DropdownMenuTrigger>
+              <DropdownMenuContent align="end">
+                <DropdownMenuGroup>
+                  {hideableColumns.map((col) => (
+                    <DropdownMenuCheckboxItem
+                      key={col.key}
+                      checked={!hidden.has(col.key)}
+                      onCheckedChange={(checked) => {
+                        setHidden((prev) => {
+                          const next = new Set(prev)
+                          if (checked) {
+                            next.delete(col.key)
+                          } else {
+                            next.add(col.key)
+                          }
+                          return next
+                        })
+                      }}
+                    >
+                      {typeof col.header === "string" ? col.header : col.key}
+                    </DropdownMenuCheckboxItem>
+                  ))}
+                </DropdownMenuGroup>
+              </DropdownMenuContent>
+            </DropdownMenu>
+          </div>
+
+          <DataTable
+            columns={visibleColumns}
+            rows={jobs}
+            getRowId={(job) => job.jobId}
+            onRowClick={setSelected}
+            emptyMessage={
+              <EmptyState
+                icon={PlayCircle}
+                title="No jobs running"
+                description="Jobs you delegate show up here while they are queued or running."
+              >
+                <Button variant="outline" size="sm" render={<Link to="/history" />}>
+                  View job history
+                </Button>
+              </EmptyState>
+            }
+          />
+        </div>
       )}
 
       {pendingCancel ? (

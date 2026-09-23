@@ -66,3 +66,40 @@ test('executeWithPolicy on billing fails fast to human escalation without retryi
 test('classifyError maps an adapter-reported incomplete turn to the non-retried quality category, like empty', () => {
   assert.equal(classifyError('agy yielded with 1 background task(s) still running', { errorKind: 'incomplete' }), 'quality')
 })
+
+test('transport retries once, after a delay long enough for a replaced service to come back', () => {
+  const policy = policyFor('transport')
+  assert.equal(policy.retry, 1)
+  assert.ok(policy.retryDelayMs >= 5000, `retryDelayMs too short: ${policy.retryDelayMs}`)
+  assert.equal(policy.fallback, true)
+})
+
+test('executeWithPolicy waits retryDelayMs before a retry, then falls back instead of retrying again', async () => {
+  const sleeps = []
+  const attempts = []
+  const result = await executeWithPolicy(
+    async (ctx) => {
+      attempts.push(ctx.candidate)
+      if (ctx.candidate === 'fallback') return { status: 'succeeded' }
+      return { status: 'failed', errorKind: 'transport', error: 'Transport' }
+    },
+    { retry: 1, retryDelayMs: 10_000, resume: false, fallback: true, escalation: 'human' },
+    { candidate: 'primary', fallbacks: ['fallback'], sleep: async (ms) => { sleeps.push(ms) } }
+  )
+
+  assert.equal(result.status, 'succeeded')
+  assert.deepEqual(attempts, ['primary', 'primary', 'fallback'])
+  assert.deepEqual(sleeps, [10_000])
+})
+
+test('executeWithPolicy does not sleep when the policy has no retryDelayMs', async () => {
+  const sleeps = []
+  let calls = 0
+  await executeWithPolicy(
+    async () => (++calls === 1 ? { status: 'failed', errorKind: 'crash' } : { status: 'succeeded' }),
+    { retry: 1, resume: false, fallback: false, escalation: 'human' },
+    { sleep: async (ms) => { sleeps.push(ms) } }
+  )
+  assert.equal(calls, 2)
+  assert.deepEqual(sleeps, [])
+})
