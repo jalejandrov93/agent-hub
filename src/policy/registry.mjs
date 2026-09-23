@@ -16,7 +16,11 @@ export const POLICY_TABLE = {
   // (next chain candidate / next Jules account), then escalate.
   quota: { retry: 2, resume: false, fallback: true, escalation: 'human' },
   timeout: { retry: true, resume: true, fallback: false, escalation: 'verifier' },
-  transport: { retry: true, resume: false, fallback: true, escalation: 'human' },
+  // A dropped connection (e.g. opencode replacing its shared service after an
+  // auto-update, ~3-9s) usually recovers on its own: wait, retry once, then
+  // fall back. Retrying immediately or repeatedly would re-run a write task
+  // over partial edits while the service is still coming back.
+  transport: { retry: 1, retryDelayMs: 10_000, resume: false, fallback: true, escalation: 'human' },
   // A crashed CLI may be transient: one bounded retry, then alternate adapter.
   crash: { retry: 1, resume: false, fallback: true, escalation: 'human' },
   quality: { retry: false, resume: false, fallback: true, escalation: 'verifier' },

@@ -19,6 +19,10 @@ const RECOVERY_STAGES = [
     },
     async execute(policy, ctx, state, err) {
       state.retryCount++
+      if (policy.retryDelayMs > 0) {
+        const sleep = ctx?.sleep ?? ((ms) => new Promise((resolve) => setTimeout(resolve, ms)))
+        await sleep(policy.retryDelayMs)
+      }
       if (ctx?.onRetry) {
         await ctx.onRetry({ ...ctx, attempt: state.retryCount, error: err })
       }
