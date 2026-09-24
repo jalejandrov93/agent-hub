@@ -254,6 +254,18 @@ export const JobRecord = z
     // D2 (agy-hub-verification): hub-run verification result, present only
     // when the job/dispatch call was given a `verify` array.
     verification: Verification.nullable().optional(),
+    // job-project-branch: the git repo a local-cwd job runs in (any mode,
+    // unlike diffBase which is write-only) — root/name/branch for the
+    // dashboard's "Project" column. Null/absent for a non-git cwd or a
+    // remote (Jules) job that has no local cwd at all.
+    repo: z
+      .object({
+        root: z.string(),
+        name: z.string(),
+        branch: z.string().nullable(),
+      })
+      .nullable()
+      .optional(),
   })
   .passthrough()
 

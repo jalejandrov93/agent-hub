@@ -151,6 +151,85 @@ test('startJob records no diffBase for a write-mode job in a non-git cwd, withou
   assert.equal(finalRecord.diffBase ?? null, null)
 })
 
+test('startJob captures repo (name + branch) for a write-mode job in a git work tree', async (t) => {
+  const home = tmpHome()
+  t.after(() => fs.rmSync(home, { recursive: true, force: true }))
+  const { startJob, jobstore } = await freshModules(home)
+  const { secondary } = makeRepoWithSecondaryWorktree()
+
+  const { spawn, runWithTimeout, finish } = fakeSpawnAndTimeout()
+  const { job, done } = startJob({
+    agent: 'fake',
+    model: 'm',
+    task: 't',
+    cwd: secondary,
+    mode: 'write',
+    adapterFor: () => noopAdapter(),
+    spawn,
+    runWithTimeout,
+  })
+
+  assert.deepEqual(job.repo, { root: secondary, name: 'secondary', branch: 'wt-branch' })
+
+  finish(0)
+  await done
+  const finalRecord = jobstore.readResult(job.jobId)
+  assert.deepEqual(finalRecord.repo, { root: secondary, name: 'secondary', branch: 'wt-branch' })
+})
+
+test('startJob captures repo for a read-mode job too (unlike diffBase, which is write-only)', async (t) => {
+  const home = tmpHome()
+  t.after(() => fs.rmSync(home, { recursive: true, force: true }))
+  const { startJob, jobstore } = await freshModules(home)
+  const { secondary } = makeRepoWithSecondaryWorktree()
+
+  const { spawn, runWithTimeout, finish } = fakeSpawnAndTimeout()
+  const { job, done } = startJob({
+    agent: 'fake',
+    model: 'm',
+    task: 't',
+    cwd: secondary,
+    mode: 'read',
+    adapterFor: () => noopAdapter(),
+    spawn,
+    runWithTimeout,
+  })
+
+  assert.deepEqual(job.repo, { root: secondary, name: 'secondary', branch: 'wt-branch' })
+  finish(0)
+  await done
+  const finalRecord = jobstore.readResult(job.jobId)
+  assert.deepEqual(finalRecord.repo, { root: secondary, name: 'secondary', branch: 'wt-branch' })
+})
+
+test('startJob records no repo for a job in a non-git cwd, without failing the job', async (t) => {
+  const home = tmpHome()
+  t.after(() => fs.rmSync(home, { recursive: true, force: true }))
+  const { startJob, jobstore } = await freshModules(home)
+  const nonGitDir = fs.mkdtempSync(path.join(os.tmpdir(), 'agent-hub-nongit-repo-'))
+  t.after(() => fs.rmSync(nonGitDir, { recursive: true, force: true }))
+
+  const { spawn, runWithTimeout, finish } = fakeSpawnAndTimeout()
+  const { job, done } = startJob({
+    agent: 'fake',
+    model: 'm',
+    task: 't',
+    cwd: nonGitDir,
+    mode: 'write',
+    adapterFor: () => noopAdapter(),
+    spawn,
+    runWithTimeout,
+    allowlist: [nonGitDir],
+  })
+
+  assert.equal(job.repo ?? null, null)
+  finish(0)
+  await done
+  const finalRecord = jobstore.readResult(job.jobId)
+  assert.equal(finalRecord.status, 'succeeded')
+  assert.equal(finalRecord.repo ?? null, null)
+})
+
 test('finishJob persists a final diffStats snapshot on a succeeded write-mode job', async (t) => {
   const home = tmpHome()
   t.after(() => fs.rmSync(home, { recursive: true, force: true }))

@@ -4,7 +4,7 @@ import fs from 'node:fs'
 import path from 'node:path'
 import os from 'node:os'
 import { execFileSync } from 'node:child_process'
-import { captureDiffBase, computeDiffStats, computeChangedFilesMismatch, createDiffStatsCache } from '../src/diffstats.mjs'
+import { captureDiffBase, captureRepoInfo, computeDiffStats, computeChangedFilesMismatch, createDiffStatsCache } from '../src/diffstats.mjs'
 
 function tmpDir(prefix) {
   return fs.mkdtempSync(path.join(os.tmpdir(), prefix))
@@ -67,6 +67,80 @@ test('captureDiffBase', async (t) => {
     }
     const base = captureDiffBase({ cwd: repo, execFn: throwingExec })
     assert.equal(base, null)
+  })
+})
+
+test('captureRepoInfo', async (t) => {
+  let repo
+
+  t.beforeEach(() => {
+    repo = tmpDir('agent-hub-repoinfo-')
+  })
+
+  t.afterEach(() => {
+    fs.rmSync(repo, { recursive: true, force: true })
+  })
+
+  await t.test('returns root, name, and branch for a git work tree on a named branch', () => {
+    initRepo(repo)
+    fs.writeFileSync(path.join(repo, 'a.txt'), 'x')
+    commitAll(repo, 'init')
+    git(['branch', '-m', 'main'], repo)
+    const expectedRoot = git(['rev-parse', '--show-toplevel'], repo).trim()
+
+    const info = captureRepoInfo({ cwd: repo })
+    assert.deepEqual(info, { root: expectedRoot, name: path.basename(expectedRoot), branch: 'main' })
+  })
+
+  await t.test('resolves the toplevel root when cwd is a subdirectory', () => {
+    initRepo(repo)
+    fs.writeFileSync(path.join(repo, 'a.txt'), 'x')
+    commitAll(repo, 'init')
+    const expectedRoot = git(['rev-parse', '--show-toplevel'], repo).trim()
+    const sub = path.join(repo, 'nested', 'dir')
+    fs.mkdirSync(sub, { recursive: true })
+
+    const info = captureRepoInfo({ cwd: sub })
+    assert.equal(info.root, expectedRoot)
+  })
+
+  await t.test('falls back to the short SHA as branch on detached HEAD', () => {
+    initRepo(repo)
+    fs.writeFileSync(path.join(repo, 'a.txt'), 'x')
+    commitAll(repo, 'init')
+    const head = git(['rev-parse', 'HEAD'], repo).trim()
+    git(['checkout', '-q', head], repo)
+    const expectedShort = git(['rev-parse', '--short', 'HEAD'], repo).trim()
+
+    const info = captureRepoInfo({ cwd: repo })
+    assert.equal(info.branch, expectedShort)
+  })
+
+  await t.test('falls back to symbolic-ref for a repo with no commits yet', () => {
+    initRepo(repo)
+    const expectedRoot = git(['rev-parse', '--show-toplevel'], repo).trim()
+    const expectedBranch = git(['symbolic-ref', '--short', 'HEAD'], repo).trim()
+
+    const info = captureRepoInfo({ cwd: repo })
+    assert.equal(info.root, expectedRoot)
+    assert.equal(info.branch, expectedBranch)
+  })
+
+  await t.test('returns null for a non-git cwd, without throwing', () => {
+    const info = captureRepoInfo({ cwd: repo }) // repo dir exists but `git init` never ran
+    assert.equal(info, null)
+  })
+
+  await t.test('returns null when the git binary is unavailable, without throwing', () => {
+    initRepo(repo)
+    fs.writeFileSync(path.join(repo, 'a.txt'), 'x')
+    commitAll(repo, 'init')
+
+    const throwingExec = () => {
+      throw new Error('ENOENT: git not found')
+    }
+    const info = captureRepoInfo({ cwd: repo, execFn: throwingExec })
+    assert.equal(info, null)
   })
 })
 
