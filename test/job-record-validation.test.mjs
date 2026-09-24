@@ -62,3 +62,51 @@ test('buildState drops a malformed job record instead of blanking the whole payl
   const { StateResponse } = await import('../src/schemas.mjs?t=' + Date.now() + Math.random())
   assert.equal(StateResponse.safeParse(state).success, true)
 })
+
+/**
+ * job-project-branch: `repo` is optional/nullable so existing records (and a
+ * remote job with no local cwd) still validate, but when present it must
+ * carry the shape the dashboard's Project column reads.
+ */
+test('JobRecord validates a job with a repo field, without it, and with it explicitly null', async () => {
+  const { JobRecord } = await import('../src/schemas.mjs?t=' + Date.now() + Math.random())
+
+  const base = {
+    jobId: 'j1',
+    agent: 'agy',
+    model: 'm',
+    title: null,
+    cwd: '/tmp/repo',
+    mode: 'write',
+    status: 'succeeded',
+    errorKind: null,
+    error: null,
+    timeoutS: null,
+    variant: null,
+    sessionId: null,
+    parentJobId: null,
+    tokens: null,
+    costUsd: null,
+    pid: null,
+    pgid: null,
+    createdAt: '2026-09-21T00:00:00.000Z',
+    updatedAt: '2026-09-21T00:00:00.000Z',
+  }
+
+  const withRepo = JobRecord.safeParse({ ...base, repo: { root: '/tmp/repo', name: 'repo', branch: 'main' } })
+  assert.equal(withRepo.success, true)
+
+  const withNullBranch = JobRecord.safeParse({ ...base, repo: { root: '/tmp/repo', name: 'repo', branch: null } })
+  assert.equal(withNullBranch.success, true)
+
+  const withNullRepo = JobRecord.safeParse({ ...base, repo: null })
+  assert.equal(withNullRepo.success, true)
+
+  const withoutRepo = JobRecord.safeParse({ ...base })
+  assert.equal(withoutRepo.success, true)
+
+  // A malformed repo shape must actually be rejected -- proves `repo` has a
+  // real schema, not just passthrough acceptance of whatever's there.
+  const withInvalidRepo = JobRecord.safeParse({ ...base, repo: { root: 123, name: 'repo', branch: 'main' } })
+  assert.equal(withInvalidRepo.success, false)
+})

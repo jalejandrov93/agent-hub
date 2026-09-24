@@ -14,6 +14,7 @@ import { resolveAgyCommand, profileFromEnv, resolveAgyProfileSync as defaultReso
 import { modelGroupFor } from './providers/profiles.mjs'
 import {
   captureDiffBase as defaultCaptureDiffBase,
+  captureRepoInfo as defaultCaptureRepoInfo,
   computeDiffStats as defaultComputeDiffStats,
   computeChangedFilesMismatch as defaultComputeChangedFilesMismatch,
 } from './diffstats.mjs'
@@ -156,6 +157,8 @@ export function startJob({
   waitMode = null,
   // job-diff-stats: injectable so tests never shell out to a real git binary.
   captureDiffBaseFn = defaultCaptureDiffBase,
+  // job-project-branch: injectable so tests never shell out to a real git binary.
+  captureRepoInfoFn = defaultCaptureRepoInfo,
   // D2 (agy-hub-verification): optional hub-run verification checks (same
   // shapes as src/verify.mjs's normalizeVerifyCheck). Validated synchronously
   // below, before any job record exists — "fails fast before dispatch".
@@ -324,6 +327,16 @@ export function startJob({
   if (mode === 'write') {
     diffBase = captureDiffBaseFn({ cwd, env })
     if (diffBase) updateResult(job.jobId, { diffBase }, env)
+  }
+
+  // job-project-branch: which repo/branch a job's cwd lives in, for the
+  // dashboard's "Project" column. Unlike diffBase this is captured for
+  // every local-cwd mode (read AND write) -- it's purely informational, not
+  // a diff baseline -- and silently stays null for a non-git cwd. A remote
+  // (Jules) job has already returned above and never reaches this line.
+  if (cwd) {
+    const repoInfo = captureRepoInfoFn({ cwd, env })
+    if (repoInfo) updateResult(job.jobId, { repo: repoInfo }, env)
   }
 
   const adapterArgs = { model, prompt: effectiveTask, cwd, mode, title, variant: effectiveVariant, timeoutS: effectiveTimeoutS, sessionId, env }

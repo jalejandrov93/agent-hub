@@ -353,7 +353,7 @@ describe("JobsView", () => {
     expect(screen.getByText("Running")).toBeTruthy()
   })
 
-  it("by default does not render headers for Timeout, Working dir and Profile, while Task, Status and Started are rendered", async () => {
+  it("by default does not render headers for Timeout, Working dir and Profile, while Task, Status, Started and Project are rendered", async () => {
     renderView()
 
     await screen.findByText("running-task")
@@ -366,6 +366,104 @@ describe("JobsView", () => {
     expect(within(table).getByRole("columnheader", { name: "Task" })).toBeTruthy()
     expect(within(table).getByRole("columnheader", { name: "Status" })).toBeTruthy()
     expect(within(table).getByRole("columnheader", { name: "Started" })).toBeTruthy()
+    expect(within(table).getByRole("columnheader", { name: "Project" })).toBeTruthy()
+  })
+
+  it("shows the project name and branch for a local git job, without toggling column visibility", async () => {
+    vi.mocked(api.getState).mockResolvedValue(
+      stateWith([
+        makeJob({
+          jobId: "j-git",
+          title: "running-task",
+          cwd: "/home/user/agent-hub-worktrees/agent-hub-project-branch",
+          repo: { root: "/home/user/agent-hub-worktrees/agent-hub-project-branch", name: "agent-hub", branch: "feat/job-project-branch" },
+        }),
+      ])
+    )
+
+    renderView()
+
+    expect(await screen.findByText("agent-hub")).toBeTruthy()
+    expect(screen.getByText("feat/job-project-branch")).toBeTruthy()
+  })
+
+  it("falls back to the remote source and branch for a Jules job with no repo", async () => {
+    vi.mocked(api.getState).mockResolvedValue(
+      stateWith([
+        makeJob({
+          jobId: "j-jules-project",
+          title: "cloud-task",
+          cwd: undefined,
+          remote: { provider: "jules", sessionId: "sess-1", source: "sources/github/acme/widgets", branch: "feature/x" },
+        }),
+      ])
+    )
+
+    renderView()
+
+    expect(await screen.findByText("acme/widgets")).toBeTruthy()
+    expect(screen.getByText("feature/x")).toBeTruthy()
+  })
+
+  it("falls back to remote startingBranch when a Jules job has no branch yet", async () => {
+    vi.mocked(api.getState).mockResolvedValue(
+      stateWith([
+        makeJob({
+          jobId: "j-jules-starting",
+          title: "cloud-task",
+          cwd: undefined,
+          remote: { provider: "jules", sessionId: "sess-2", source: "sources/github/acme/widgets", startingBranch: "main" },
+        }),
+      ])
+    )
+
+    renderView()
+
+    expect(await screen.findByText("acme/widgets")).toBeTruthy()
+    expect(screen.getByText("main")).toBeTruthy()
+  })
+
+  it("falls back to the cwd basename when a local job has no repo info", async () => {
+    vi.mocked(api.getState).mockResolvedValue(
+      stateWith([
+        makeJob({
+          jobId: "j-nogit",
+          title: "running-task",
+          cwd: "/home/user/scratch-project",
+          repo: undefined,
+        }),
+      ])
+    )
+
+    renderView()
+
+    expect(await screen.findByText("scratch-project")).toBeTruthy()
+  })
+
+  it("shows a dash in the Project column when there is no repo, remote source, or cwd", async () => {
+    vi.mocked(api.getState).mockResolvedValue(
+      stateWith([
+        makeJob({
+          jobId: "j-nothing",
+          title: "running-task",
+          cwd: undefined,
+          repo: undefined,
+          remote: undefined,
+        }),
+      ])
+    )
+
+    renderView()
+
+    await screen.findByText("running-task")
+    const table = screen.getByRole("table")
+    const headers = within(table).getAllByRole("columnheader")
+    const projectIndex = headers.findIndex((h) => h.textContent === "Project")
+    expect(projectIndex).toBeGreaterThanOrEqual(0)
+
+    const row = within(table).getByText("running-task").closest("tr") as HTMLElement
+    const cells = within(row).getAllByRole("cell")
+    expect(cells[projectIndex].textContent).toBe("—")
   })
 
   it("opening the column menu and toggling Timeout makes its header appear and toggling again hides it", async () => {
@@ -430,7 +528,7 @@ describe("JobsView", () => {
 
     const emptyCells = screen.getAllByRole("cell")
     expect(emptyCells).toHaveLength(1)
-    expect(emptyCells[0].getAttribute("colspan")).toBe("9")
+    expect(emptyCells[0].getAttribute("colspan")).toBe("10")
   })
 })
 

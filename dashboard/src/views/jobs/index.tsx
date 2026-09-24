@@ -1,6 +1,6 @@
 import * as React from "react"
 import { Link } from "@tanstack/react-router"
-import { AlertTriangle, Columns3, PlayCircle } from "lucide-react"
+import { AlertTriangle, Columns3, GitBranch, PlayCircle } from "lucide-react"
 import { PageHeader } from "@/components/PageHeader"
 import { ProviderMark } from "@/components/ProviderMark"
 import { StatusBadge } from "@/components/StatusBadge"
@@ -81,6 +81,49 @@ function CwdCell({ location }: { location: string }) {
   )
 }
 
+/** name + branch for the "Project" column, plus a full-path tooltip. Preference
+ * order: the job's own captured repo (any local-cwd mode) -> a remote (Jules)
+ * job's GitHub source -> the cwd basename for a local job with no git repo. */
+type ProjectInfo = { name: string; branch: string | null; tooltip: string }
+
+function projectOf(job: Job): ProjectInfo | null {
+  if (job.repo) {
+    return { name: job.repo.name, branch: job.repo.branch, tooltip: job.repo.root }
+  }
+  const source = job.remote?.source
+  if (source) {
+    return {
+      name: source.replace(/^sources\/github\//, ""),
+      branch: job.remote?.branch ?? job.remote?.startingBranch ?? null,
+      tooltip: source,
+    }
+  }
+  if (job.cwd) {
+    const name = job.cwd.split("/").filter(Boolean).pop() ?? job.cwd
+    return { name, branch: null, tooltip: job.cwd }
+  }
+  return null
+}
+
+function ProjectCell({ job }: { job: Job }) {
+  const info = projectOf(job)
+  if (!info) return <span className="text-muted-foreground">—</span>
+  return (
+    <Tooltip>
+      <TooltipTrigger render={<div className="flex max-w-[14rem] flex-col gap-0.5 text-left" />}>
+        <span className="truncate font-medium">{info.name}</span>
+        {info.branch ? (
+          <span className="flex items-center gap-1 truncate text-xs text-muted-foreground">
+            <GitBranch className="size-3 shrink-0" />
+            {info.branch}
+          </span>
+        ) : null}
+      </TooltipTrigger>
+      <TooltipContent className="max-w-md break-all">{info.tooltip}</TooltipContent>
+    </Tooltip>
+  )
+}
+
 const DEFAULT_HIDDEN_COLUMNS: ReadonlySet<string> = new Set(["timeout", "cwd", "profile"])
 const MANDATORY_COLUMNS: readonly string[] = ["actions"]
 
@@ -112,6 +155,11 @@ export function JobsView() {
           </div>
         </div>
       ),
+    },
+    {
+      key: "project",
+      header: "Project",
+      cell: (job) => <ProjectCell job={job} />,
     },
     {
       key: "title",

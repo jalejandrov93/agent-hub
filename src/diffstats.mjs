@@ -35,6 +35,46 @@ export function captureDiffBase({ cwd, env = process.env, execFn = execFileSync,
   }
 }
 
+/**
+ * Capture the git repo a job's cwd lives in, synchronously, for ANY job mode
+ * (unlike captureDiffBase, which is write-mode only) — this is purely
+ * informational for the dashboard's "Project" column, not a diff baseline.
+ * Returns `{ root, name, branch }` or null — never throws — when `cwd` is
+ * not inside a git work tree or git itself is unavailable.
+ *
+ * `branch` resolution: `git rev-parse --abbrev-ref HEAD` normally; on a
+ * detached HEAD that prints the literal string "HEAD", so fall back to the
+ * short commit SHA (`git rev-parse --short HEAD`). On a fresh repo with no
+ * commits yet, `--abbrev-ref HEAD` itself fails (HEAD doesn't resolve to any
+ * commit) — fall back to `git symbolic-ref --short HEAD` (works pre-first-
+ * commit too); if that also fails, `branch` is null while `root`/`name`
+ * still resolve.
+ */
+export function captureRepoInfo({ cwd, env = process.env, execFn = execFileSync, timeoutMs = DEFAULT_TIMEOUT_MS }) {
+  const opts = { cwd, encoding: 'utf8', timeout: timeoutMs, env: gitEnv(env) }
+  try {
+    const root = execFn('git', ['rev-parse', '--show-toplevel'], opts).trim()
+    if (!root) return null
+    const name = path.basename(root)
+
+    let branch = null
+    try {
+      const abbrev = execFn('git', ['rev-parse', '--abbrev-ref', 'HEAD'], opts).trim()
+      branch = abbrev === 'HEAD' ? execFn('git', ['rev-parse', '--short', 'HEAD'], opts).trim() || null : abbrev || null
+    } catch {
+      try {
+        branch = execFn('git', ['symbolic-ref', '--short', 'HEAD'], opts).trim() || null
+      } catch {
+        branch = null
+      }
+    }
+
+    return { root, name, branch }
+  } catch {
+    return null
+  }
+}
+
 /** `-\t-\t<path>` (numstat's own marker) or a numeric add/del pair. */
 function parseNumstatLine(line) {
   const match = line.match(/^(-|\d+)\t(-|\d+)\t(.+)$/)
