@@ -49,7 +49,7 @@ Forecast ~250 authored lines, strategy `ask-on-risk` (under budget, single PR).
 - [x] T1 Backend: `captureRepoInfo` helper + `repo` field in `JobRecord` +
   capture/persist in `startJob`; tests with real temp git repos.
   Route: delegated direct (writer trigger: 2+ non-trivial files).
-- [ ] T2 Dashboard: "Project" column (name + branch, fallbacks) in
+- [x] T2 Dashboard: "Project" column (name + branch, fallbacks) in
   `dashboard/src/views/jobs/index.tsx` + tests.
   Route: delegated direct (same writer, sequential after T1).
 
@@ -99,6 +99,52 @@ GREEN evidence:
 - `node --test test/diffstats.test.mjs test/job-record-validation.test.mjs test/jobrunner-diffstats.test.mjs`: 45/45 pass.
 - `npm test` (root, full node:test suite): 1543/1543 pass.
 
+### T2 Dashboard (commit: pending — recorded after commit below)
+
+- `dashboard/src/views/jobs/index.tsx`: new `Project` column, visible by
+  default, placed right after "Agent & model" (identity columns grouped
+  together, ahead of "Task"). `projectOf(job)` resolves, in order:
+  `job.repo` (name + branch, from T1) -> a remote (Jules) job's
+  `remote.source` (stripped of the `sources/github/` prefix) with
+  `remote.branch ?? remote.startingBranch` -> the `cwd` basename for a
+  local job with no repo info -> null ("—"). `ProjectCell` renders name
+  (primary) + branch (muted, `GitBranch` icon from the already-installed
+  `lucide-react` dep — no new deps) in a `Tooltip` showing the full
+  root/source/cwd path, truncated like `CwdCell`. `Job` type is untouched
+  (`z.infer<typeof JobRecord>` in `dashboard/src/lib/types.ts` already
+  picks up T1's `repo` field).
+- Tests (`dashboard/src/views/jobs/index.test.tsx`): Project header
+  renders by default; local git job shows name + branch without toggling
+  column visibility; remote job falls back to `remote.source` +
+  `remote.branch`; remote job with no `branch` yet falls back to
+  `startingBranch`; local job with no repo falls back to the `cwd`
+  basename; a job with no repo/remote/cwd shows "—" in the Project cell
+  specifically (matched by column index, not just any "—" in the row,
+  since the unrelated `taskType` column also renders "—" when unset).
+  Updated the pre-existing empty-state colspan assertion (9 -> 10) and the
+  "default visible headers" test title/assertions for the new column.
+
+RED evidence: `npm run -w dashboard test -- src/views/jobs/index.test.tsx`
+before adding the column: 7/20 failing — "Project" header not found,
+`findByText("scratch-project")`/branch text timeouts, empty-state colspan
+`'9' !== '10'`.
+
+GREEN evidence:
+- `npm run -w dashboard test -- src/views/jobs/index.test.tsx`: 20/20 pass.
+- `npm run -w dashboard test` (full suite): 233/233 pass (one unrelated
+  flake in `src/views/approvals/index.test.tsx` on the first full-suite
+  run, reproduced as passing both in isolation and on a full-suite rerun
+  with no code changes in between — pre-existing test-runner flake, not
+  caused by this change).
+- `npm run -w dashboard typecheck`: clean, no errors.
+- `npm run build`: succeeds (`dashboard/dist` built).
+- CSP grep (`rg` unavailable on this host; used `grep` as the equivalent —
+  same regex, same recursive search) for `<style|style="|data:font` over
+  `dashboard/dist`: no matches (exit 1 / empty output), as required.
+
 ## Next step
 
-T2.
+None — both tasks complete. Acceptance criteria met: a running job started
+in a git repo shows its project name and branch in the Running jobs table
+without toggling column visibility; non-git and remote jobs render sensible
+fallbacks; no crashes; all applicable checks pass.
