@@ -99,7 +99,7 @@ GREEN evidence:
 - `node --test test/diffstats.test.mjs test/job-record-validation.test.mjs test/jobrunner-diffstats.test.mjs`: 45/45 pass.
 - `npm test` (root, full node:test suite): 1543/1543 pass.
 
-### T2 Dashboard (commit: pending — recorded after commit below)
+### T2 Dashboard (commit: 31af1db)
 
 - `dashboard/src/views/jobs/index.tsx`: new `Project` column, visible by
   default, placed right after "Agent & model" (identity columns grouped
