@@ -62,7 +62,7 @@ Forecast ~250 authored lines, strategy `ask-on-risk` (under budget, single PR).
 
 ## Progress / evidence
 
-### T1 Backend (commit: pending — recorded after commit below)
+### T1 Backend (commit: 0f35d6c)
 
 - `src/diffstats.mjs`: new `captureRepoInfo({ cwd, env, execFn, timeoutMs })`
   — mirrors `captureDiffBase`'s injectable/never-throws shape. Returns
