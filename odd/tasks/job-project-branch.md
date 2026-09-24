@@ -142,6 +142,17 @@ GREEN evidence:
   same regex, same recursive search) for `<style|style="|data:font` over
   `dashboard/dist`: no matches (exit 1 / empty output), as required.
 
+### Review (RDD)
+
+- Assess `--base-ref main --committed-only` (unrelated untracked files
+  excluded): medium, `slice_budget_reached` (570 lines). Consent: granted.
+- Lineage `review-ba004cd9858f1010`, lens reliability: approved and
+  acknowledged (authority burned).
+- Advisory, non-blocking follow-ups: `R3-sync-git-read-mode` (WARNING,
+  `src/jobrunner.mjs` synchronous git calls now also run for read-mode jobs
+  at start); `R3-cwd-basename-posix-only` (SUGGESTION, cwd basename fallback
+  splits only on `/`).
+
 ## Next step
 
 None — both tasks complete. Acceptance criteria met: a running job started
