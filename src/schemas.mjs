@@ -326,6 +326,13 @@ export const AgentStatusRow = z
     binPath: nullableString,
     cliVersion: nullableString,
     quota: QuotaInfo.nullable().optional(),
+    // Live-catalog pricing tier (src/catalog.mjs effectiveTier): 'free'/'paid'
+    // from the live catalog when fresh and listed, else MODEL_REGISTRY's
+    // hand-written tier, or null when neither knows the model. tierSource
+    // says which one it is, so the UI never presents a stale registry value
+    // as a live fact.
+    tier: nullableString,
+    tierSource: z.enum(['catalog', 'registry']).nullable().optional(),
   })
   .passthrough()
 
@@ -528,8 +535,24 @@ export const ProposalsFile = z.object({ version: z.literal(1), proposals: z.arra
 /** A catalog model computeModelGaps() could not safely map to any taskType (no family/registry match). */
 export const UnmappedModel = z.object({ agent: z.string(), model: z.string() }).passthrough()
 
+/**
+ * One catalog-vs-registry drift item (src/catalog.mjs computeCatalogDrift):
+ * report-only, never mutates routing. `variant` is present only for
+ * `variant_unavailable`.
+ */
+export const CatalogDriftItem = z
+  .object({
+    type: z.enum(['vanished', 'now_paid', 'new_free', 'variant_unavailable']),
+    agent: z.string(),
+    model: z.string(),
+    variant: z.string().optional(),
+  })
+  .passthrough()
+
 /** GET /api/proposals and POST /api/proposals/refresh response shape. */
-export const ProposalsResponse = z.object({ proposals: z.array(Proposal), unmapped: z.array(UnmappedModel).optional() }).passthrough()
+export const ProposalsResponse = z
+  .object({ proposals: z.array(Proposal), unmapped: z.array(UnmappedModel).optional(), drift: z.array(CatalogDriftItem).optional() })
+  .passthrough()
 
 export const LearningStatus = z.enum(['pending', 'approved', 'rejected'])
 
