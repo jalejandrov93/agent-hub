@@ -126,8 +126,7 @@ incompatible with the opencode v2 plugin API. They are not agent-hub code.
     succeeded; `grep -rn '<style\|style="\|data:font' dashboard/dist`
     printed nothing (CSP-safe). Full `npm test` 1548/1548 (unchanged, T2 is
     dashboard-only).
-  - Route: delegated writer (5 dashboard files). Commit `<T2_HASH>` (see
-    Progress; this commit's own hash isn't known until after it's made).
+  - Route: delegated writer (5 dashboard files). Commit `931cd70`.
 - [ ] T2 — Dashboard: show the free/paid badge for opencode catalog models and
   list drift items. Route: delegated writer.
 - [ ] T3 — Variant validation: when the fresh catalog knows the model, an
@@ -153,7 +152,7 @@ incompatible with the opencode v2 plugin API. They are not agent-hub code.
 - Branch created.
 - T1 done. Commit `7357ae3`. Authored changed lines: 450 (src 425+/-25 test
   included; see T1 entry above for the per-file breakdown).
-- T2 done. Commit `<T2_HASH>` (recorded below once known). Authored changed
+- T2 done. Commit `931cd70`. Authored changed
   lines: dashboard 123 insertions / 1 deletion (`dashboard/src/lib/types.ts`
   +2, `dashboard/src/views/agents/agents.test.tsx` +38,
   `dashboard/src/views/agents/index.tsx` +17,
