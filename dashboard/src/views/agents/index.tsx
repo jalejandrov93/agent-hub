@@ -224,6 +224,23 @@ export function AgentsView() {
       cell: (row) => formatLatency(row.latencyMs),
     },
     {
+      key: "tier",
+      header: "Tier",
+      cell: (row) => {
+        if (!row.tier) return <span className="text-muted-foreground">—</span>
+        const title = row.tierSource ? `source: ${row.tierSource}` : undefined
+        return (
+          <Badge
+            variant="outline"
+            title={title}
+            className={row.tier === "free" ? cn("border-transparent", TONE_BADGE_CLASS.ready) : undefined}
+          >
+            {row.tier}
+          </Badge>
+        )
+      },
+    },
+    {
       key: "dataPolicy",
       header: "Data policy",
       cell: (row) => <Badge variant="outline">{row.dataPolicy || "—"}</Badge>,

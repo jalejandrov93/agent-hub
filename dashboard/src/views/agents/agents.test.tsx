@@ -194,4 +194,42 @@ describe("AgentsView", () => {
       })
     )
   })
+
+  it("renders a free tier badge sourced from the live catalog", async () => {
+    vi.mocked(api.getState).mockResolvedValue(
+      state([
+        agent({
+          agent: "opencode",
+          model: "opencode/big-pickle",
+          tier: "free",
+          tierSource: "catalog",
+        }),
+      ])
+    )
+    vi.mocked(api.getConfig).mockResolvedValue(config())
+
+    renderAgents("/agents")
+
+    const badge = await screen.findByText("free")
+    expect(badge.getAttribute("title")).toMatch(/catalog/)
+  })
+
+  it("renders a paid tier badge falling back to the registry when there is no live catalog source", async () => {
+    vi.mocked(api.getState).mockResolvedValue(
+      state([
+        agent({
+          agent: "opencode",
+          model: "deepseek/deepseek-v4-pro",
+          tier: "paid",
+          tierSource: "registry",
+        }),
+      ])
+    )
+    vi.mocked(api.getConfig).mockResolvedValue(config())
+
+    renderAgents("/agents")
+
+    const badge = await screen.findByText("paid")
+    expect(badge.getAttribute("title")).toMatch(/registry/)
+  })
 })

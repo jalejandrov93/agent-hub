@@ -103,9 +103,31 @@ incompatible with the opencode v2 plugin API. They are not agent-hub code.
     test/dashboard-api-v2.test.mjs test/catalog.test.mjs` 106/106. Full
     `npm test`: 1548/1548 (baseline 1526 + 22 new).
   - Route: delegated writer (touched `src/catalog.mjs`, `src/schemas.mjs`,
-    `src/tools/agents.mjs`, `src/dashboard.mjs` — 4+ files). Commit hash
-    recorded in T2's commit (this commit's own hash isn't known until after
-    it's made, and amending is not allowed).
+    `src/tools/agents.mjs`, `src/dashboard.mjs` — 4+ files). Commit `7357ae3`.
+
+- [x] T2 — Dashboard: show the free/paid badge for opencode catalog models and
+  list drift items. Route: delegated writer.
+  - `dashboard/src/views/agents/index.tsx`: new "Tier" column, a `Badge`
+    (`variant="outline"`, `title="source: catalog|registry"`) reading
+    `row.tier`/`row.tierSource`; `tier === 'free'` gets the existing
+    `TONE_BADGE_CLASS.ready` tone (no new colors/styles, CSP-safe).
+  - `dashboard/src/views/approvals/proposals-panel.tsx`: new `DriftCard`
+    (same shape as the existing `UnmappedModelsCard`) rendering
+    `data.drift` with a per-item type badge and a human-readable summary
+    per drift `type`.
+  - `dashboard/src/lib/types.ts`: exported `CatalogDriftItemT` from the
+    shared `CatalogDriftItem` zod schema (no hand-rolled type).
+  - TDD: RED observed — `npx vitest run src/views/agents/agents.test.tsx
+    src/views/approvals/index.test.tsx` before the UI changes: 3 failed
+    (`renders a free tier badge...`, `renders a paid tier badge...`,
+    `lists catalog drift items reported for opencode`), 14 passed. GREEN
+    after implementing: same command 17/17. Full `npm run -w dashboard
+    test` 201/201; `npm run -w dashboard typecheck` clean; `npm run build`
+    succeeded; `grep -rn '<style\|style="\|data:font' dashboard/dist`
+    printed nothing (CSP-safe). Full `npm test` 1548/1548 (unchanged, T2 is
+    dashboard-only).
+  - Route: delegated writer (5 dashboard files). Commit `<T2_HASH>` (see
+    Progress; this commit's own hash isn't known until after it's made).
 - [ ] T2 — Dashboard: show the free/paid badge for opencode catalog models and
   list drift items. Route: delegated writer.
 - [ ] T3 — Variant validation: when the fresh catalog knows the model, an
@@ -129,16 +151,26 @@ incompatible with the opencode v2 plugin API. They are not agent-hub code.
 ## Progress
 
 - Branch created.
-- T1 done (see above). Running authored-changed-lines count (git diff
-  --numstat, excluding lockfiles and dashboard/dist): src 425 insertions / 25
-  deletions across `src/catalog.mjs` (new, 113), `src/schemas.mjs` (+24/-1),
-  `src/tools/agents.mjs` (+25/-16), `src/dashboard.mjs` (+16/-8); tests
-  `test/catalog.test.mjs` (new, 145), `test/tools-agents.test.mjs` (+45),
-  `test/dashboard.test.mjs` (+26), `test/dashboard-api-v2.test.mjs` (+31).
-  Total ≈ 450 authored changed lines. This already consumes most of the
-  ~350-450 line forecast for the whole feature in T1 alone (T1 needed a real
-  new module + schema + two call sites + proportionate tests). Continuing to
-  T2 per the ~500-line stop threshold; will reassess after T2 and flag a
-  chain-strategy decision to the user if the running count clearly exceeds
-  ~500.
-- Next: T2 (dashboard free/paid badge + drift list).
+- T1 done. Commit `7357ae3`. Authored changed lines: 450 (src 425+/-25 test
+  included; see T1 entry above for the per-file breakdown).
+- T2 done. Commit `<T2_HASH>` (recorded below once known). Authored changed
+  lines: dashboard 123 insertions / 1 deletion (`dashboard/src/lib/types.ts`
+  +2, `dashboard/src/views/agents/agents.test.tsx` +38,
+  `dashboard/src/views/agents/index.tsx` +17,
+  `dashboard/src/views/approvals/index.test.tsx` +17,
+  `dashboard/src/views/approvals/proposals-panel.tsx` +49/-1).
+- **Running authored-changed-lines total: 450 + 124 ≈ 574** (git diff
+  --numstat, excluding lockfiles and dashboard/dist). This clearly exceeds
+  the ~500-line stop threshold given to this writer, so implementation
+  **stops here** per instruction, after finishing and committing T2 (T1 and
+  T2 are each already independent, verified work units). T3 (variant
+  validation before spawn) and T4 (hygiene: empty-list label, classifyError
+  kinds, TESTED_VERSIONS bump) are NOT started.
+- Decision needed from the user/orchestrator before continuing: which chain
+  strategy to use for the remaining T3+T4 work — `stacked-to-main` (each PR
+  merges to main in order) or `feature-branch-chain` (PRs stack on the
+  feature branch, only the tracker merges to main) — per the feature
+  document's `ask-on-risk` delivery strategy. This writer does not choose a
+  chain strategy on the user's behalf.
+- Next: T3 (variant validation before spawn), then T4 (hygiene), once a
+  chain strategy is chosen.
