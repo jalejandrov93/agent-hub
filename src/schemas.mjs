@@ -327,12 +327,17 @@ export const AgentStatusRow = z
     cliVersion: nullableString,
     quota: QuotaInfo.nullable().optional(),
     // Live-catalog pricing tier (src/catalog.mjs effectiveTier): 'free'/'paid'
-    // from the live catalog when fresh and listed, else MODEL_REGISTRY's
-    // hand-written tier, or null when neither knows the model. tierSource
-    // says which one it is, so the UI never presents a stale registry value
-    // as a live fact.
+    // from the last successful catalog fetch when it lists this model
+    // (regardless of its age -- discovery.json is only refreshed at startup
+    // or on an explicit dashboard refresh, never on a fixed interval), else
+    // MODEL_REGISTRY's hand-written tier, or null when neither knows the
+    // model. tierSource says which one it is, so the UI never presents a
+    // stale registry value as a live fact. catalogCheckedAt is the catalog
+    // row's checkedAt when tierSource is 'catalog' (null otherwise), so the
+    // UI can show how old that evidence is.
     tier: nullableString,
     tierSource: z.enum(['catalog', 'registry']).nullable().optional(),
+    catalogCheckedAt: nullableString,
   })
   .passthrough()
 
@@ -538,7 +543,8 @@ export const UnmappedModel = z.object({ agent: z.string(), model: z.string() }).
 /**
  * One catalog-vs-registry drift item (src/catalog.mjs computeCatalogDrift):
  * report-only, never mutates routing. `variant` is present only for
- * `variant_unavailable`.
+ * `variant_unavailable`. `checkedAt` is the source discovery row's
+ * checkedAt, so the UI can show the age of the catalog evidence.
  */
 export const CatalogDriftItem = z
   .object({
@@ -546,6 +552,7 @@ export const CatalogDriftItem = z
     agent: z.string(),
     model: z.string(),
     variant: z.string().optional(),
+    checkedAt: nullableString,
   })
   .passthrough()
 

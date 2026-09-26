@@ -195,7 +195,7 @@ describe("AgentsView", () => {
     )
   })
 
-  it("renders a free tier badge sourced from the live catalog", async () => {
+  it("renders a free tier badge sourced from the live catalog, with its checked-at age in the title", async () => {
     vi.mocked(api.getState).mockResolvedValue(
       state([
         agent({
@@ -203,6 +203,7 @@ describe("AgentsView", () => {
           model: "opencode/big-pickle",
           tier: "free",
           tierSource: "catalog",
+          catalogCheckedAt: new Date(Date.now() - 5000).toISOString(),
         }),
       ])
     )
@@ -212,6 +213,11 @@ describe("AgentsView", () => {
 
     const badge = await screen.findByText("free")
     expect(badge.getAttribute("title")).toMatch(/catalog/)
+    // Proves the badge surfaces catalogCheckedAt (not just tierSource) -- an
+    // hours-old catalog row must be visible to the user, not silently
+    // presented as if it were a live read (see the T1 correction: tier/drift
+    // no longer gate on the 15-minute preflight TTL).
+    expect(badge.getAttribute("title")).toMatch(/checked.*ago/)
   })
 
   it("renders a paid tier badge falling back to the registry when there is no live catalog source", async () => {

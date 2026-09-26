@@ -48,7 +48,7 @@ export async function agentsStatusTool({ refresh = false, cwd = process.cwd(), e
   const usageByProvider = await fetchUsage({ providers: [...providers], refresh, env, mode: 'cached' })
 
   return results.map((r) => {
-    const { tier, tierSource } = effectiveTier({ agent: r.agent, model: r.model, discovery, registry: MODEL_REGISTRY })
+    const { tier, tierSource, catalogCheckedAt } = effectiveTier({ agent: r.agent, model: r.model, discovery, registry: MODEL_REGISTRY })
     return {
       agent: r.agent,
       model: r.model,
@@ -64,11 +64,13 @@ export async function agentsStatusTool({ refresh = false, cwd = process.cwd(), e
       binPath: discovery[r.agent]?.binPath ?? null,
       cliVersion: discovery[r.agent]?.version ?? null,
       quota: quotaFor({ agent: r.agent, model: r.model }, usageByProvider),
-      // Live-catalog pricing tier (src/catalog.mjs): 'catalog' when a fresh,
-      // error-free discovery row for this agent lists the model, else the
-      // MODEL_REGISTRY fallback.
+      // Live-catalog pricing tier (src/catalog.mjs): 'catalog' when the last
+      // successful discovery row for this agent lists the model (regardless
+      // of age), else the MODEL_REGISTRY fallback. catalogCheckedAt is that
+      // row's checkedAt when tierSource is 'catalog', else null.
       tier,
       tierSource,
+      catalogCheckedAt,
     }
   })
 }

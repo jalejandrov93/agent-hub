@@ -1,5 +1,3 @@
-import { PREFLIGHT_TTL_MS } from './config.mjs'
-
 /**
  * Pure derivation of an agent CLI's live pricing tier from its catalog
  * (discovery.json), plus report-only drift between that catalog and
@@ -12,9 +10,22 @@ import { PREFLIGHT_TTL_MS } from './config.mjs'
  * persist or expose.
  */
 
-function isFreshRow(entry) {
-  if (!entry?.checkedAt) return false
-  return Date.now() - new Date(entry.checkedAt).getTime() < PREFLIGHT_TTL_MS
+/**
+ * True when a discovery.json row for one agent reflects a successful catalog
+ * fetch: no error, and a non-empty models list.
+ *
+ * Deliberately NOT a freshness/TTL check. discovery.json is only refreshed
+ * at MCP startup (src/startup.mjs) and on an explicit dashboard "Rediscover
+ * CLIs" action (src/dashboard.mjs) -- there is no periodic background
+ * refresh -- so gating on PREFLIGHT_TTL_MS (15 minutes, meant for CLI
+ * *readiness* in preflight.mjs/discovery.mjs) made catalog-derived tier/
+ * drift silently fall back to the registry almost all the time, defeating
+ * the whole point of this module. A row hours old is still the best
+ * evidence available; only "never fetched successfully" (error, or no
+ * models) should fall back.
+ */
+function isGoodCatalogRow(entry) {
+  return Boolean(entry) && !entry.error && Array.isArray(entry.models) && entry.models.length > 0
 }
 
 /**
@@ -33,19 +44,22 @@ export function catalogTier(entry) {
 }
 
 /**
- * Effective tier for one agent:model pair: the live catalog's tier when a
- * fresh, error-free discovery row for `agent` actually lists `model`;
- * otherwise MODEL_REGISTRY's hand-written tier (or null if neither knows the
- * model). `tierSource` records which one won, so callers/UI can show
- * provenance instead of presenting a stale registry value as live fact.
+ * Effective tier for one agent:model pair: the last good catalog's tier when
+ * `agent`'s discovery row actually lists `model` (regardless of how long ago
+ * it was fetched -- see isGoodCatalogRow); otherwise MODEL_REGISTRY's
+ * hand-written tier (or null if neither knows the model). `tierSource`
+ * records which one won, so callers/UI can show provenance instead of
+ * presenting a stale registry value as live fact. `catalogCheckedAt` is the
+ * catalog row's `checkedAt` when the catalog won (null otherwise), so
+ * consumers can show the age of that evidence.
  */
 export function effectiveTier({ agent, model, discovery = {}, registry = {} }) {
   const row = discovery?.[agent]
-  if (isFreshRow(row) && !row.error) {
-    const entry = (row.models ?? []).find((m) => m.id === model)
-    if (entry) return { tier: catalogTier(entry), tierSource: 'catalog' }
+  if (isGoodCatalogRow(row)) {
+    const entry = row.models.find((m) => m.id === model)
+    if (entry) return { tier: catalogTier(entry), tierSource: 'catalog', catalogCheckedAt: row.checkedAt ?? null }
   }
-  return { tier: registry?.[agent]?.[model]?.tier ?? null, tierSource: 'registry' }
+  return { tier: registry?.[agent]?.[model]?.tier ?? null, tierSource: 'registry', catalogCheckedAt: null }
 }
 
 /**
@@ -55,20 +69,24 @@ export function effectiveTier({ agent, model, discovery = {}, registry = {} }) {
  * Report-only: this never mutates routing or the registry, mirroring
  * model-gaps.mjs's unmapped/versionBumps split.
  *
- * Only computed when that agent's discovery row is fresh and error-free --
- * a stale, missing, or errored row would otherwise report every pinned id
- * as "vanished", which is not evidence of anything.
+ * Only computed when that agent's discovery row is a successful catalog
+ * fetch (see isGoodCatalogRow) -- a missing, errored, or empty row would
+ * otherwise report every pinned id as "vanished", which is not evidence of
+ * anything. Age alone does NOT disqualify a row (see isGoodCatalogRow).
  *
  * Returns an array of:
- *   {type: 'vanished', agent, model}            -- pinned id no longer in the catalog
- *   {type: 'now_paid', agent, model}             -- registry tier:'free', catalog cost > 0
- *   {type: 'new_free', agent, model}             -- catalog free model, absent from the registry
- *   {type: 'variant_unavailable', agent, model, variant} -- pinned registry variant not in catalog variants[]
+ *   {type: 'vanished', agent, model, checkedAt}            -- pinned id no longer in the catalog
+ *   {type: 'now_paid', agent, model, checkedAt}             -- registry tier:'free', catalog cost > 0
+ *   {type: 'new_free', agent, model, checkedAt}             -- catalog free model, absent from the registry
+ *   {type: 'variant_unavailable', agent, model, variant, checkedAt} -- pinned registry variant not in catalog variants[]
+ * `checkedAt` is the source discovery row's `checkedAt`, so consumers can
+ * show the age of the catalog evidence a drift item is based on.
  */
 export function computeCatalogDrift({ discovery = {}, map = {}, registry = {}, agent = 'opencode' } = {}) {
   const row = discovery?.[agent]
-  if (!isFreshRow(row) || row.error) return []
+  if (!isGoodCatalogRow(row)) return []
 
+  const checkedAt = row.checkedAt ?? null
   const catalog = row.models ?? []
   const catalogById = new Map(catalog.filter((m) => m?.id).map((m) => [m.id, m]))
   const items = []
@@ -89,16 +107,16 @@ export function computeCatalogDrift({ discovery = {}, map = {}, registry = {}, a
   for (const [id, variant] of pinnedVariant) {
     const entry = catalogById.get(id)
     if (!entry) {
-      items.push({ type: 'vanished', agent, model: id })
+      items.push({ type: 'vanished', agent, model: id, checkedAt })
       continue
     }
     if (registry?.[agent]?.[id]?.tier === 'free' && catalogTier(entry) === 'paid') {
-      items.push({ type: 'now_paid', agent, model: id })
+      items.push({ type: 'now_paid', agent, model: id, checkedAt })
     }
     if (variant) {
       const variants = entry.variants ?? []
       if (!variants.some((v) => v?.id === variant)) {
-        items.push({ type: 'variant_unavailable', agent, model: id, variant })
+        items.push({ type: 'variant_unavailable', agent, model: id, variant, checkedAt })
       }
     }
   }
@@ -106,7 +124,7 @@ export function computeCatalogDrift({ discovery = {}, map = {}, registry = {}, a
   const registrySet = new Set(Object.keys(registry?.[agent] ?? {}))
   for (const entry of catalog) {
     if (!entry?.id || registrySet.has(entry.id)) continue
-    if (catalogTier(entry) === 'free') items.push({ type: 'new_free', agent, model: entry.id })
+    if (catalogTier(entry) === 'free') items.push({ type: 'new_free', agent, model: entry.id, checkedAt })
   }
 
   return items

@@ -253,7 +253,7 @@ let invalidJobsWarned = false
 export function buildState({ env = process.env } = {}) {
   const discovery = readDiscovery(env)
   const agents = Object.values(readCache(env)).map((a) => {
-    const { tier, tierSource } = effectiveTier({ agent: a.agent, model: a.model, discovery, registry: MODEL_REGISTRY })
+    const { tier, tierSource, catalogCheckedAt } = effectiveTier({ agent: a.agent, model: a.model, discovery, registry: MODEL_REGISTRY })
     return {
       ...a,
       dataPolicy: MODEL_REGISTRY[a.agent]?.[a.model]?.dataPolicy ?? 'unknown',
@@ -261,6 +261,7 @@ export function buildState({ env = process.env } = {}) {
       cliVersion: discovery[a.agent]?.version ?? null,
       tier,
       tierSource,
+      catalogCheckedAt,
     }
   })
   // `/api/state` is validated by the client as ONE payload (`StateResponse`,
