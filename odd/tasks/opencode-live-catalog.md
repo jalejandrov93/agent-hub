@@ -67,9 +67,13 @@ incompatible with the opencode v2 plugin API. They are not agent-hub code.
 
 ## Delivery
 
-- Forecast: ~350-450 authored changed lines across 4 tasks.
-- Strategy: `ask-on-risk` (default). Ask for a chain strategy only if the
-  running count clearly exceeds ~400 lines.
+- Forecast: ~350-450 authored changed lines across 4 tasks (actual: see
+  Progress — the T1 correction pushed the running total well past this).
+- Strategy: **`single-pr` with `size:exception`** (user decision, made after
+  the ~574-line checkpoint reached at the end of T1+T2, replacing the
+  original `ask-on-risk` default). No further line-budget stop applies to
+  this feature; the ~400-line-per-task heuristic remains advisory only —
+  work is not split or trimmed to fit it.
 
 ## Tasks
 
@@ -201,12 +205,49 @@ incompatible with the opencode v2 plugin API. They are not agent-hub code.
     printed nothing (CSP-safe). Full `npm test` 1548/1548 (unchanged, T2 is
     dashboard-only).
   - Route: delegated writer (5 dashboard files). Commit `931cd70`.
-- [ ] T2 — Dashboard: show the free/paid badge for opencode catalog models and
-  list drift items. Route: delegated writer.
-- [ ] T3 — Variant validation: when the fresh catalog knows the model, an
-  unsupported variant is dropped before spawning (the job runs at the model
-  default) and the job records a warning; unknown catalog keeps current
-  behavior. Route: delegated writer.
+
+- [x] T3 — Variant validation: when the last good catalog row knows the
+  model, an unsupported variant is dropped before spawning (the job runs at
+  the model default) and the job records a warning; missing/errored catalog
+  or unknown model keeps current behavior. Route: delegated writer.
+  - New `validateVariant({agent, model, variant, discovery})` in
+    `src/catalog.mjs`, reusing `isGoodCatalogRow` (no TTL, same semantics as
+    the T1 correction) — not a new freshness rule. Handles an explicit
+    `model#variant` id the same way as a separately-passed `variant`, with
+    the embedded one taking precedence (matches
+    `src/adapters/opencode.mjs`'s `buildArgv` convention exactly, so
+    validation can never diverge from what actually gets sent). Returns
+    `{model, variant, warning}`; `model` has an invalid embedded variant
+    stripped back to the bare id.
+  - Wired into `startJob` (`src/jobrunner.mjs`): right where
+    `resolveVariant` used to directly become `effectiveVariant`, it now goes
+    through `validateVariantFn` (default `validateVariant`) against
+    `readDiscoveryFn(env)` (default `readDiscovery`), both injectable for
+    tests. `model`/`effectiveVariant` are reassigned to the validated
+    result before `createJob`/`buildArgv`, so the (possibly normalized)
+    model and the (possibly nulled) variant are what actually gets spawned
+    and persisted.
+  - Added `warnings: string[]` to `JobRecord` (`src/schemas.mjs`) — no
+    existing warnings/notes field on the job record — and record the
+    dropped-variant message via `updateResult(job.jobId, {warnings: [...]},
+    env)` right after `createJob`.
+  - TDD: RED observed for `validateVariant` — `SyntaxError: ... does not
+    provide an export named 'validateVariant'`; GREEN
+    `node --test test/catalog.test.mjs` 29/29 (9 new `validateVariant`
+    cases). RED observed for the `startJob` wiring by stashing
+    `src/jobrunner.mjs` and re-running — exactly the 2 "drops the variant"
+    integration tests failed (`not ok`), the 3 "keeps today's behavior"
+    tests already passed unchanged (as expected, since those paths were
+    never broken); GREEN after popping the stash:
+    `node --test test/jobrunner.test.mjs` 36/36. Focused
+    `node --test test/catalog.test.mjs test/jobrunner.test.mjs
+    test/jobrunner-diffstats.test.mjs test/jobrunner-verify.test.mjs
+    test/config.test.mjs` 96/96. Full `npm test`: 1564/1564 (was 1550; +14
+    new). No dashboard files touched, so no dashboard verification required
+    for this task.
+  - Route: delegated writer (`src/catalog.mjs`, `src/jobrunner.mjs`,
+    `src/schemas.mjs` — 3+ files). Commit `<T3_HASH>`.
+
 - [ ] T4 — Hygiene: empty model list labelled distinctly from a timeout;
   `classifyError` gets retriable `transport` and non-retriable
   `invalid_variant`/`no_route` kinds; `TESTED_VERSIONS.opencode` bumped to
@@ -247,18 +288,17 @@ incompatible with the opencode v2 plugin API. They are not agent-hub code.
   guard — a transient `discoverCli` failure after the (now irrelevant to
   catalog.mjs, but still real for CLI-readiness callers) 15-minute TTL could
   still replace a good catalog row with an errored one.
+- User delivery decision recorded (see Delivery section): **`single-pr` with
+  `size:exception`**, replacing `ask-on-risk`, made after the ~574-line
+  checkpoint at the end of T1+T2. No further line-budget stop applies to
+  this feature — implementation continues through T3 and T4 to completion.
+- T3 done. Commit `<T3_HASH>`. Authored changed lines: 248 (additions 246 /
+  deletions 2) across `src/catalog.mjs` (+47), `src/jobrunner.mjs` (+24/-1),
+  `src/schemas.mjs` (+5), `test/catalog.test.mjs` (+66/-1),
+  `test/jobrunner.test.mjs` (+104).
 - **Running authored-changed-lines total: 450 (T1) + 124 (T2) + 176
-  (correction) ≈ 750** (git diff --numstat, excluding lockfiles and
-  dashboard/dist). Per the coordinator's explicit instruction, implementation
-  **stops here again** after this scoped correction — T3 (variant validation
-  before spawn) and T4 (hygiene: empty-list label, classifyError kinds,
-  TESTED_VERSIONS bump) are NOT started.
-- Decision needed from the user/orchestrator before continuing: which chain
-  strategy to use for the remaining T3+T4 work (and this correction) —
-  `stacked-to-main` (each PR merges to main in order) or
-  `feature-branch-chain` (PRs stack on the feature branch, only the tracker
-  merges to main) — per the feature document's `ask-on-risk` delivery
-  strategy. This writer does not choose a chain strategy on the user's
-  behalf.
-- Next: T3 (variant validation before spawn), then T4 (hygiene), once a
-  chain strategy is chosen and the coordinator authorizes continuing.
+  (T1 correction) + 248 (T3) ≈ 998** (git diff --numstat, excluding
+  lockfiles and dashboard/dist). Advisory only per the `single-pr` /
+  `size:exception` delivery decision — not a stop condition.
+- Next: T4 (hygiene: empty-list label, classifyError kinds, TESTED_VERSIONS
+  bump), the last task.

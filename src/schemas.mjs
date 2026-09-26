@@ -266,6 +266,11 @@ export const JobRecord = z
       })
       .nullable()
       .optional(),
+    // T3 (opencode-live-catalog): non-fatal warnings recorded on a job, e.g.
+    // a requested reasoning-effort variant dropped because the live catalog
+    // no longer offers it (src/catalog.mjs validateVariant). Absent/empty
+    // when nothing was worth flagging.
+    warnings: z.array(z.string()).optional(),
   })
   .passthrough()
 

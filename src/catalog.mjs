@@ -129,3 +129,50 @@ export function computeCatalogDrift({ discovery = {}, map = {}, registry = {}, a
 
   return items
 }
+
+/**
+ * Validate a requested reasoning-effort variant against the last good
+ * catalog row (see isGoodCatalogRow) before a job spawns (T3 of
+ * odd/tasks/opencode-live-catalog.md). An unsupported variant must never
+ * reach the provider as `provider.no-route: Variant unavailable for
+ * <model>: <variant>` -- it is dropped here instead, and the caller gets a
+ * human-readable warning to record on the job.
+ *
+ * `model` may already carry an explicit `<model>#<variant>` id (the same
+ * convention src/adapters/opencode.mjs's buildArgv uses to fold a variant
+ * into the model id): that embedded variant is validated the same way, and
+ * takes precedence over a separately-passed `variant`, mirroring buildArgv's
+ * own `variant && !model.includes('#')` precedence -- otherwise this
+ * function could "validate" a variant that never actually reaches the CLI.
+ *
+ * Missing/errored/empty catalog, or a model the catalog doesn't list, keeps
+ * today's behavior unchanged (model/variant returned as given, no warning):
+ * there is no live evidence to validate against, so nothing is second-guessed.
+ *
+ * Returns {model, variant, warning}: `model` has any invalid embedded
+ * variant stripped back to the bare id; `variant` is null when dropped;
+ * `warning` is a message to surface on the job, or null when nothing changed.
+ */
+export function validateVariant({ agent, model, variant, discovery = {} }) {
+  const hashIndex = typeof model === 'string' ? model.indexOf('#') : -1
+  const baseModel = hashIndex === -1 ? model : model.slice(0, hashIndex)
+  const embeddedVariant = hashIndex === -1 ? null : model.slice(hashIndex + 1)
+  const requestedVariant = embeddedVariant ?? variant
+
+  if (!requestedVariant) return { model, variant, warning: null }
+
+  const row = discovery?.[agent]
+  if (!isGoodCatalogRow(row)) return { model, variant, warning: null }
+
+  const entry = row.models.find((m) => m?.id === baseModel)
+  if (!entry) return { model, variant, warning: null }
+
+  const variants = entry.variants ?? []
+  if (variants.some((v) => v?.id === requestedVariant)) return { model, variant, warning: null }
+
+  return {
+    model: baseModel,
+    variant: null,
+    warning: `Variant unavailable for ${baseModel}: ${requestedVariant} (dropped; running at the model default)`,
+  }
+}

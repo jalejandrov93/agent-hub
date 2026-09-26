@@ -1,6 +1,6 @@
 import { test } from 'node:test'
 import assert from 'node:assert/strict'
-import { catalogTier, effectiveTier, computeCatalogDrift } from '../src/catalog.mjs'
+import { catalogTier, effectiveTier, computeCatalogDrift, validateVariant } from '../src/catalog.mjs'
 
 const FRESH = new Date().toISOString()
 // Well past PREFLIGHT_TTL_MS (15m). discovery.json is only refreshed at MCP
@@ -163,4 +163,69 @@ test('computeCatalogDrift: returns nothing for an errored discovery row', () => 
 
 test('computeCatalogDrift: returns nothing when there is no discovery row for the agent at all', () => {
   assert.deepEqual(computeCatalogDrift({ discovery: {}, map: {}, registry: { opencode: {} } }), [])
+})
+
+// --- validateVariant ---
+
+const GOOD_DISCOVERY = {
+  opencode: {
+    checkedAt: OLD, // deliberately old -- validation must use isGoodCatalogRow semantics, not a TTL
+    error: null,
+    models: [{ id: 'opencode/nemotron-3-ultra-free', variants: [] }, { id: 'opencode/muse-spark-1.3-contributor-free', variants: [{ id: 'low' }, { id: 'medium' }] }],
+  },
+}
+
+test('validateVariant: passes through unchanged when no variant is requested', () => {
+  const result = validateVariant({ agent: 'opencode', model: 'opencode/muse-spark-1.3-contributor-free', variant: undefined, discovery: GOOD_DISCOVERY })
+  assert.deepEqual(result, { model: 'opencode/muse-spark-1.3-contributor-free', variant: undefined, warning: null })
+})
+
+test('validateVariant: passes through unchanged when the requested variant IS in the catalog variants[]', () => {
+  const result = validateVariant({ agent: 'opencode', model: 'opencode/muse-spark-1.3-contributor-free', variant: 'low', discovery: GOOD_DISCOVERY })
+  assert.deepEqual(result, { model: 'opencode/muse-spark-1.3-contributor-free', variant: 'low', warning: null })
+})
+
+test('validateVariant: drops an unsupported variant and returns a warning, using the model default (bare model id)', () => {
+  const result = validateVariant({ agent: 'opencode', model: 'opencode/nemotron-3-ultra-free', variant: 'high', discovery: GOOD_DISCOVERY })
+  assert.equal(result.model, 'opencode/nemotron-3-ultra-free')
+  assert.equal(result.variant, null)
+  assert.match(result.warning, /nemotron-3-ultra-free/)
+  assert.match(result.warning, /high/)
+})
+
+test('validateVariant: validates an explicit model#variant id the same way -- valid variant kept as-is', () => {
+  const result = validateVariant({ agent: 'opencode', model: 'opencode/muse-spark-1.3-contributor-free#low', variant: undefined, discovery: GOOD_DISCOVERY })
+  assert.deepEqual(result, { model: 'opencode/muse-spark-1.3-contributor-free#low', variant: undefined, warning: null })
+})
+
+test('validateVariant: validates an explicit model#variant id the same way -- invalid variant stripped from the model id', () => {
+  const result = validateVariant({ agent: 'opencode', model: 'opencode/nemotron-3-ultra-free#high', variant: undefined, discovery: GOOD_DISCOVERY })
+  assert.equal(result.model, 'opencode/nemotron-3-ultra-free')
+  assert.equal(result.variant, null)
+  assert.match(result.warning, /high/)
+})
+
+test('validateVariant: an embedded model#variant wins over a separately-passed variant (matches buildArgv precedence)', () => {
+  // opencode/nemotron-3-ultra-free has no variants at all: 'low' (embedded) is invalid.
+  // If the separate 'medium' argument were used instead, this would incorrectly pass.
+  const result = validateVariant({ agent: 'opencode', model: 'opencode/nemotron-3-ultra-free#low', variant: 'medium', discovery: GOOD_DISCOVERY })
+  assert.equal(result.model, 'opencode/nemotron-3-ultra-free')
+  assert.equal(result.variant, null)
+  assert.match(result.warning, /low/)
+})
+
+test('validateVariant: keeps todays behavior (no warning) when the catalog does not list the model', () => {
+  const result = validateVariant({ agent: 'opencode', model: 'opencode/unknown-model', variant: 'high', discovery: GOOD_DISCOVERY })
+  assert.deepEqual(result, { model: 'opencode/unknown-model', variant: 'high', warning: null })
+})
+
+test('validateVariant: keeps todays behavior (no warning) when the discovery row has an error', () => {
+  const discovery = { opencode: { checkedAt: FRESH, error: 'model list timed out', models: [] } }
+  const result = validateVariant({ agent: 'opencode', model: 'opencode/nemotron-3-ultra-free', variant: 'high', discovery })
+  assert.deepEqual(result, { model: 'opencode/nemotron-3-ultra-free', variant: 'high', warning: null })
+})
+
+test('validateVariant: keeps todays behavior (no warning) when there is no discovery row for the agent at all', () => {
+  const result = validateVariant({ agent: 'opencode', model: 'opencode/nemotron-3-ultra-free', variant: 'high', discovery: {} })
+  assert.deepEqual(result, { model: 'opencode/nemotron-3-ultra-free', variant: 'high', warning: null })
 })
