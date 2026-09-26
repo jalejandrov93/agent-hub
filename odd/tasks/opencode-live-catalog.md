@@ -246,7 +246,7 @@ incompatible with the opencode v2 plugin API. They are not agent-hub code.
     new). No dashboard files touched, so no dashboard verification required
     for this task.
   - Route: delegated writer (`src/catalog.mjs`, `src/jobrunner.mjs`,
-    `src/schemas.mjs` — 3+ files). Commit `<T3_HASH>`.
+    `src/schemas.mjs` — 3+ files). Commit `a889409`.
 
 - [ ] T4 — Hygiene: empty model list labelled distinctly from a timeout;
   `classifyError` gets retriable `transport` and non-retriable
@@ -292,7 +292,7 @@ incompatible with the opencode v2 plugin API. They are not agent-hub code.
   `size:exception`**, replacing `ask-on-risk`, made after the ~574-line
   checkpoint at the end of T1+T2. No further line-budget stop applies to
   this feature — implementation continues through T3 and T4 to completion.
-- T3 done. Commit `<T3_HASH>`. Authored changed lines: 248 (additions 246 /
+- T3 done. Commit `a889409`. Authored changed lines: 248 (additions 246 /
   deletions 2) across `src/catalog.mjs` (+47), `src/jobrunner.mjs` (+24/-1),
   `src/schemas.mjs` (+5), `test/catalog.test.mjs` (+66/-1),
   `test/jobrunner.test.mjs` (+104).
