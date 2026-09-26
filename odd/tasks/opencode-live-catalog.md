@@ -177,7 +177,7 @@ incompatible with the opencode v2 plugin API. They are not agent-hub code.
     nothing (CSP-safe).
   - Route: delegated writer (touched `src/catalog.mjs`, `src/schemas.mjs`,
     `src/tools/agents.mjs`, `src/dashboard.mjs`,
-    `dashboard/src/views/agents/index.tsx` — 5 files). Commit `<CORRECTION_HASH>`.
+    `dashboard/src/views/agents/index.tsx` — 5 files). Commit `0f456c2`.
 
 - [x] T2 — Dashboard: show the free/paid badge for opencode catalog models and
   list drift items. Route: delegated writer.
@@ -235,7 +235,7 @@ incompatible with the opencode v2 plugin API. They are not agent-hub code.
 - T1 correction done (real defect the parent found via live evidence against
   commit `7357ae3`: TTL-gated tier/drift, inert almost all the time —
   fixed to use the last good catalog regardless of age; see the T1 entry
-  above for full detail). Commit `<CORRECTION_HASH>`. Authored changed
+  above for full detail). Commit `0f456c2`. Authored changed
   lines: 176 (additions 120 / deletions 56) across `src/catalog.mjs`
   (+44/-26), `src/schemas.mjs` (+12/-5), `src/tools/agents.mjs` (+6/-4),
   `src/dashboard.mjs` (+2/-1), `test/catalog.test.mjs` (+38/-17),
