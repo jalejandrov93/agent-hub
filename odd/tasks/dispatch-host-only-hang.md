@@ -44,17 +44,21 @@ models (`agent: 'agy'`, `model: 'claude-*'`) are unaffected.
   candidates), plus a bounded-iteration guard that rethrows the last error. Tests in
   `test/policy.test.mjs` reproduce the infinite loop (RED) with `onFallback` set and empty fallbacks.
   Route: delegated direct (writer trigger: executor + tests).
-- [ ] T2 — Dispatch: host-only `claude` candidates are filtered out of primary/fallbacks; when none
+- [x] T2 — Dispatch: host-only `claude` candidates are filtered out of primary/fallbacks; when none
   remain, reject before `acquireWriteLockFn` with `errorKind: 'host_only'` and a message telling the
   caller to run it through the host Agent tool; no lock file left behind. Tests in
   `test/dispatch.test.mjs`. Route: delegated direct.
 
 ## Acceptance criteria
-- A dispatch whose only candidate is `claude` returns/throws promptly with a host-only error and
+- [x] A dispatch whose only candidate is `claude` returns/throws promptly with a host-only error and
   leaves no worktree lock.
-- A chain `[claude, agy]` runs on agy.
-- `executeWithPolicy` with `onFallback` and no fallbacks terminates with the original error.
-- `npm test` passes (record any pre-existing failures).
+- [x] A chain `[claude, agy]` runs on agy.
+- [x] `executeWithPolicy` with `onFallback` and no fallbacks terminates with the original error (in
+  this codebase's semantics: it escalates per the classified error's policy, e.g. `crash` ->
+  "Escalated to human: <original message>" with `.cause` set to the original error — fallback is
+  simply never attempted when there are no candidates; see T1's design note).
+- [x] `npm test` passes (baseline 1543/1543 before this feature; 1549/1549 after T1+T2, no
+  pre-existing failures).
 
 ## Progress
 - Branch: `fix/dispatch-host-only-hang`.
@@ -72,6 +76,33 @@ models (`agent: 'agy'`, `model: 'claude-*'`) are unaffected.
     non-empty `fallbacks` arrays) and matches the objective's wording exactly ("stop being applicable
     once there are no remaining fallback candidates").
   - Full suite: `npm test` → `tests 1545, pass 1545, fail 0` (baseline was 1543/1543 before T1).
+- T2 commit: `bb842a1` — `fix(dispatch): reject host-only claude candidates before reserving worktree`.
+  - RED: `node --test test/dispatch.test.mjs` (filtered to the 3 new `T2:` tests that exercise the
+    fix, before the dispatch.mjs change) failed:
+    - "rejects fast with errorKind host_only..." → `AssertionError: expected 'host_only', got
+      undefined` (dispatch threw the generic "unknown agent: claude" escalation instead).
+    - "leaves no worktree lock on disk" → rejected with `Escalated to human: unknown agent: claude`
+      instead of a `host_only` error (worktree lock was reserved and released by existing cleanup,
+      but only after the crash, not before it).
+    - "chain [claude, agy] drops the host-only candidate..." → `'claude' !== 'agy'`, i.e. startJobFn
+      was invoked with the host-only candidate instead of skipping to agy.
+    - The 4th new test (agy with a Claude model name) already passed pre-fix, as expected (it is a
+      non-regression guard).
+  - GREEN: `node --test test/dispatch.test.mjs` → `tests 20, pass 20, fail 0`.
+  - Full suite: `npm test` → `tests 1549, pass 1549, fail 0`.
+  - Design choice: the host-only filter/reject only applies to the `routeFn`-produced
+    primary+fallback chain (the actual source of `agent: 'claude'` candidates via
+    `DELEGATION_MAP`), not to a directly-injected `restDeps.candidate` — out of scope per this
+    feature's "route() output unchanged" constraint and no real caller passes `candidate: {agent:
+    'claude'}` directly.
+  - Open note: the dispatch-key store reservation (step 0, before candidate discovery) is still
+    taken before the host-only check runs, since candidate discovery happens after it in
+    `dispatch()`'s existing structure — reordering that was out of scope. The existing `finally`
+    block already releases that reservation (`dispatchReservationOwned && !jobProduced`) and never
+    acquires the worktree write lock in this path, so the acceptance criterion ("no lock file left
+    behind") holds; only the dispatch-key store row is briefly touched and released, not any
+    worktree lock file.
 
 ## Next step
-T2.
+None — both tasks complete. Ready for review/PR at the user's discretion (no push/PR/merge was
+performed per this task's constraints).
