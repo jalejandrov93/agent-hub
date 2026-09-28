@@ -47,7 +47,14 @@ const RECOVERY_STAGES = [
     name: 'fallback',
     isApplicable(policy, ctx, state) {
       if (!policy?.fallback) return false
-      return Boolean((ctx?.fallbacks && ctx.fallbacks.length > 0) || ctx?.onFallback)
+      // Applicable only while there is an actual candidate left to switch
+      // to. ctx?.onFallback alone (dispatch.mjs always sets it, to
+      // re-validate a popped candidate) must NOT keep this stage applicable
+      // once ctx.fallbacks is exhausted -- that let the while(true) loop
+      // below spin forever on already-resolved promises with nothing to do,
+      // starving the event loop (2026-09-28 incident). A fallback with no
+      // remaining candidates is never attempted.
+      return Boolean(ctx?.fallbacks && ctx.fallbacks.length > 0)
     },
     async execute(policy, ctx, state, err) {
       if (Array.isArray(ctx?.fallbacks) && ctx.fallbacks.length > 0) {
@@ -106,6 +113,15 @@ export function recoveryStageOrder(ctx = {}) {
   return ordered.map((name) => RECOVERY_STAGES.find((s) => s.name === name))
 }
 
+// Hard safety net for the recovery loop below. Every normal path already
+// terminates through a stage becoming non-applicable (see RECOVERY_STAGES,
+// notably the fallback fix above), so this should never trip in practice --
+// it exists only so a future stage/policy combination can never reintroduce
+// an unbounded spin. Generous on purpose: retry/resume/fallback each bound
+// themselves well under this, so tripping it means a real bug, not a slow
+// but legitimate recovery.
+const MAX_RECOVERY_ITERATIONS = 1000
+
 export async function executeWithPolicy(taskFn, policy, ctx = {}) {
   const stages = recoveryStageOrder(ctx)
 
@@ -118,7 +134,12 @@ export async function executeWithPolicy(taskFn, policy, ctx = {}) {
     lastError: null,
   }
 
+  let iterations = 0
   while (true) {
+    iterations++
+    if (iterations > MAX_RECOVERY_ITERATIONS) {
+      throw state.lastError ?? new Error('executeWithPolicy: exceeded max recovery iterations')
+    }
     try {
       const activeCtx = {
         ...ctx,
