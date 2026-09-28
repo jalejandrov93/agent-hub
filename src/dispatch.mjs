@@ -342,7 +342,10 @@ async function waitForJobByExecutionId({ executionId, env, listJobsFn, waitMs, p
 }
 
 async function isCandidateUsable(candidate, { cwd, env, runPreflightFn, circuitBreakerOpenFn }) {
-  if (candidate.agent === 'claude') return true
+  // 'claude' is host-only (see the filter in dispatch() above, which drops
+  // it before this preflight ever runs) and never dispatchable: no adapter
+  // exists for it (adapters/index.mjs), so it must never be reported usable.
+  if (candidate.agent === 'claude') return false
   if (circuitBreakerOpenFn({ agent: candidate.agent, model: candidate.model, env })) return false
   try {
     const pf = await runPreflightFn({ agent: candidate.agent, model: candidate.model, cwd, env, level: 'L2' })
@@ -640,8 +643,20 @@ export async function dispatch({
       }
 
       const allCandidates = [routeResult.primary, ...(routeResult.fallbacks || [])]
+
+      // Host-only: `agent: 'claude'` is routed by DELEGATION_MAP for the
+      // host's own Agent tool -- there is no 'claude' entry in
+      // adapters/index.mjs, so startJobFn would throw deep inside startJob,
+      // after the worktree lock and dispatch-key reservation are already
+      // held (2026-09-28 incident: combined with the pre-fix fallback bug in
+      // executeWithPolicy, this froze the whole MCP process). Drop these
+      // candidates from the executable chain up front, before any usability
+      // preflight or reservation runs.
+      const executableCandidates = allCandidates.filter((c) => c.agent !== 'claude')
+      const onlyHostOnlyCandidates = allCandidates.length > 0 && executableCandidates.length === 0
+
       const usableCandidates = []
-      for (const c of allCandidates) {
+      for (const c of executableCandidates) {
         const usable = await isCandidateUsable(c, { cwd, env, runPreflightFn, circuitBreakerOpenFn })
         if (usable) {
           usableCandidates.push(c)
@@ -649,6 +664,16 @@ export async function dispatch({
       }
 
       if (usableCandidates.length === 0) {
+        if (onlyHostOnlyCandidates) {
+          const routedModel = allCandidates[0]?.model ?? 'unknown'
+          const err = new Error(
+            `Task "${taskType}" routes to Claude Code itself (model ${routedModel}) and must be run ` +
+            `through the host's Agent tool, not dispatched.`
+          )
+          err.errorKind = 'host_only'
+          err.category = 'host_only'
+          throw err
+        }
         throw new Error(`Every candidate for "${taskType}" is unavailable at execution time`)
       }
 

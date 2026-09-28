@@ -599,6 +599,141 @@ test('reserva honesta: token stale → error limpio (locked), nunca robo', async
 })
 
 
+// T2 (dispatch-host-only-hang): `agent: 'claude'` candidates route to the
+// host's own Agent tool (see src/router.mjs's DELEGATION_MAP) -- there is no
+// 'claude' entry in src/adapters/index.mjs, so starting one here used to
+// reserve the worktree lock and then crash deep inside startJob. Combined
+// with the pre-T1 fallback bug, a route with only a claude candidate froze
+// the whole MCP process (2026-09-28 incident). dispatch() must now drop
+// host-only candidates before reserving anything.
+test('T2: a dispatch that only routes to host-only claude rejects fast with errorKind host_only, before reserving the worktree', async () => {
+  let acquireLockCalled = false
+  let startJobCalled = false
+
+  await assert.rejects(
+    dispatch({
+      task: 'host-only-task',
+      taskType: 'implementation-with-repo-rules',
+      cwd: '/tmp/test-host-only',
+      mode: 'write',
+      routeFn: async () => ({ primary: { agent: 'claude', model: 'opus' }, fallbacks: [] }),
+      circuitBreakerOpenFn: () => false,
+      runPreflightFn: async () => ({ status: 'ready' }),
+      acquireWriteLockFn: () => {
+        acquireLockCalled = true
+        return { acquired: true, file: '/tmp/lock.file', token: 'should-not-happen' }
+      },
+      startJobFn: async () => {
+        startJobCalled = true
+        throw new Error('startJobFn must never be called for a host-only route')
+      },
+    }),
+    (err) => {
+      assert.equal(err.errorKind, 'host_only')
+      assert.match(err.message, /claude code|host/i)
+      assert.match(err.message, /opus/, 'error must name the routed model')
+      return true
+    }
+  )
+
+  assert.equal(acquireLockCalled, false, 'acquireWriteLockFn must never be called for a host-only route')
+  assert.equal(startJobCalled, false, 'startJobFn must never be called for a host-only route')
+})
+
+test('T2: a host-only-only dispatch in write mode leaves no worktree lock on disk', async () => {
+  const { home, env, cleanup } = makeTempHome()
+  try {
+    const cwd = path.join(home, 'worktree-host-only')
+    fs.mkdirSync(cwd, { recursive: true })
+    const { readWriteLock } = await import('../src/worktree.mjs')
+
+    await assert.rejects(
+      dispatch({
+        task: 'host-only-task',
+        taskType: 'implementation-with-repo-rules',
+        cwd,
+        mode: 'write',
+        env,
+        routeFn: async () => ({ primary: { agent: 'claude', model: 'opus' }, fallbacks: [] }),
+        circuitBreakerOpenFn: () => false,
+        runPreflightFn: async () => ({ status: 'ready' }),
+      }),
+      (err) => err.errorKind === 'host_only'
+    )
+
+    assert.equal(readWriteLock({ cwd, env }), null, 'no worktree lock file must remain after a host-only rejection')
+  } finally {
+    cleanup()
+  }
+})
+
+test('T2: a chain [claude, agy] drops the host-only candidate and dispatches on the executable fallback', async () => {
+  let startJobAgent = null
+
+  const res = await dispatch({
+    task: 'chain-task',
+    taskType: 'implementation-with-repo-rules',
+    cwd: '/tmp/test-chain',
+    routeFn: async () => ({
+      primary: { agent: 'claude', model: 'opus' },
+      fallbacks: [{ agent: 'agy', model: 'claude-opus-4-6-thinking' }],
+    }),
+    circuitBreakerOpenFn: () => false,
+    runPreflightFn: async () => ({ status: 'ready' }),
+    startJobFn: async (args) => {
+      startJobAgent = args.agent
+      return {
+        job: {
+          jobId: 'job-chain-1',
+          agent: args.agent,
+          model: args.model,
+          status: 'queued',
+          createdAt: new Date().toISOString(),
+          dispatchKey: args.dispatchKey,
+        },
+        done: Promise.resolve(),
+      }
+    },
+  })
+
+  assert.equal(startJobAgent, 'agy', 'the first executable candidate (agy) must become primary')
+  assert.equal(res.job.agent, 'agy')
+})
+
+test('T2: an agy candidate using a Claude model name is unaffected by the host-only claude filter', async () => {
+  let startJobArgs = null
+
+  const res = await dispatch({
+    task: 'agy-claude-model-task',
+    taskType: 'implementation-with-repo-rules',
+    cwd: '/tmp/test-agy-claude-model',
+    routeFn: async () => ({
+      primary: { agent: 'agy', model: 'claude-sonnet-4-6' },
+      fallbacks: [],
+    }),
+    circuitBreakerOpenFn: () => false,
+    runPreflightFn: async () => ({ status: 'ready' }),
+    startJobFn: async (args) => {
+      startJobArgs = args
+      return {
+        job: {
+          jobId: 'job-agy-claude-model-1',
+          agent: args.agent,
+          model: args.model,
+          status: 'queued',
+          createdAt: new Date().toISOString(),
+          dispatchKey: args.dispatchKey,
+        },
+        done: Promise.resolve(),
+      }
+    },
+  })
+
+  assert.equal(startJobArgs.agent, 'agy')
+  assert.equal(startJobArgs.model, 'claude-sonnet-4-6')
+  assert.equal(res.job.agent, 'agy')
+})
+
 test('computeDispatchKey scopes by workflowId without breaking the legacy hash', () => {
   const legacy = computeDispatchKey({ task: 'foo', cwd: '/bar', taskType: 'triage', workflowStep: 'step-1' })
   const same = computeDispatchKey({ task: 'foo', cwd: '/bar', taskType: 'triage', workflowStep: 'step-1', workflowId: null })

@@ -103,3 +103,65 @@ test('executeWithPolicy does not sleep when the policy has no retryDelayMs', asy
   assert.equal(calls, 2)
   assert.deepEqual(sleeps, [])
 })
+
+// Reproduces the 2026-09-28 incident: dispatch.mjs always sets ctx.onFallback
+// (it re-validates a popped candidate), and the fallback stage used to stay
+// applicable forever on that alone, even with an empty fallbacks array — the
+// while(true) loop in executeWithPolicy then spins on already-resolved
+// promises with no real candidate to switch to, starving the event loop
+// (this froze the whole MCP process, not just this call). A real infinite
+// loop cannot be safely awaited by a test (it also starves setTimeout, so a
+// timer-based race would never fire either), so onFallback here counts its
+// own calls and throws a distinct "bailout" error once it has run far more
+// times than any correct implementation should need — that turns an
+// unbounded spin into a bounded, fast assertion failure instead of a frozen
+// test process.
+test('executeWithPolicy stops offering the fallback stage once no fallback candidates remain', async () => {
+  let taskCalls = 0
+  let fallbackCalls = 0
+  const bailout = new Error('test bailout: fallback stage kept running with no candidates left')
+  const taskFn = async () => {
+    taskCalls++
+    throw new Error('boom')
+  }
+  const ctx = {
+    fallbacks: [],
+    onFallback: async () => {
+      fallbackCalls++
+      if (fallbackCalls > 5) throw bailout
+    },
+  }
+
+  await assert.rejects(executeWithPolicy(taskFn, null, ctx), (err) => {
+    assert.notEqual(err, bailout, `fallback stage ran ${fallbackCalls} times with no candidates instead of stopping`)
+    assert.match(err.message, /boom|Escalated to human/)
+    return true
+  })
+  assert.ok(taskCalls <= 3, `expected prompt termination, taskFn was called ${taskCalls} times`)
+})
+
+test('executeWithPolicy uses a single fallback candidate once, then escalates per existing semantics', async () => {
+  const attempts = []
+  const fallbackCandidate = { agent: 'agy', model: 'x' }
+  let fallbackCalls = 0
+  const bailout = new Error('test bailout: fallback stage ran more than once for a single candidate')
+  const taskFn = async (activeCtx) => {
+    attempts.push(activeCtx.candidate ?? null)
+    throw new Error('boom')
+  }
+  const ctx = {
+    candidate: null,
+    fallbacks: [fallbackCandidate],
+    onFallback: async () => {
+      fallbackCalls++
+      if (fallbackCalls > 1) throw bailout
+    },
+  }
+
+  await assert.rejects(executeWithPolicy(taskFn, null, ctx), (err) => {
+    assert.notEqual(err, bailout, `fallback stage ran ${fallbackCalls} times for a single candidate instead of stopping after one swap`)
+    assert.match(err.message, /Escalated to human/)
+    return true
+  })
+  assert.deepEqual(attempts, [null, null, fallbackCandidate], 'expected two attempts on the primary candidate then one on the fallback')
+})
