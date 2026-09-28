@@ -103,6 +103,12 @@ models (`agent: 'agy'`, `model: 'claude-*'`) are unaffected.
     behind") holds; only the dispatch-key store row is briefly touched and released, not any
     worktree lock file.
 
+- Parent spot check: `node --test test/policy.test.mjs test/dispatch.test.mjs` → `tests 31, pass 31,
+  fail 0`. `onFallback` has no other caller besides `dispatch.mjs`, so the executor change is local.
+- RDD assessment (`--base-ref main --committed-only`, untracked `.atl/` and unrelated odd docs
+  excluded): risk `medium` (`executable_change` src/dispatch.mjs), 357 changed lines,
+  `review_due: false`, reason `under_budget`. Native review not yet run for this slice.
+
 ## Next step
 None — both tasks complete. Ready for review/PR at the user's discretion (no push/PR/merge was
 performed per this task's constraints).
