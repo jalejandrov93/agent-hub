@@ -3,6 +3,13 @@
 Branch: `feat/opencode-live-catalog` (from `dev` @ `fd010aa`)
 Engram mirror: `odd/opencode-live-catalog/tasks` (project `agent-hub`)
 
+Rebased onto `main` @ `1f42aa0` (21 new upstream commits) between T3 and T4.
+New SHAs after the rebase: `a27f52d` (T1), `2538cae` (T2), `0e1c1a8` (docs),
+`c11aeec` (T1 correction), `942eada` (docs), `a6767d2` (T3), `fee108c`
+(docs). The only conflict was additive, in the `JobRecord` schema
+(`src/schemas.mjs`): upstream added a `repo` field, this branch added
+`warnings` — both kept. Every hash below is the post-rebase SHA.
+
 ## Objective
 
 Make agent-hub detect opencode models, especially free ones, from the live
@@ -109,9 +116,9 @@ incompatible with the opencode v2 plugin API. They are not agent-hub code.
     test/dashboard-api-v2.test.mjs test/catalog.test.mjs` 106/106. Full
     `npm test`: 1548/1548 (baseline 1526 + 22 new).
   - Route: delegated writer (touched `src/catalog.mjs`, `src/schemas.mjs`,
-    `src/tools/agents.mjs`, `src/dashboard.mjs` — 4+ files). Commit `7357ae3`.
+    `src/tools/agents.mjs`, `src/dashboard.mjs` — 4+ files). Commit `a27f52d`.
 
-  **T1 correction (real defect found by parent review of commit `7357ae3`):**
+  **T1 correction (real defect found by parent review of commit `a27f52d`):**
   `isFreshRow` gated `effectiveTier`/`computeCatalogDrift` on
   `PREFLIGHT_TTL_MS` (15 minutes). `discovery.json` is only refreshed at MCP
   startup (`src/startup.mjs`) and by the dashboard's explicit "Rediscover
@@ -181,7 +188,7 @@ incompatible with the opencode v2 plugin API. They are not agent-hub code.
     nothing (CSP-safe).
   - Route: delegated writer (touched `src/catalog.mjs`, `src/schemas.mjs`,
     `src/tools/agents.mjs`, `src/dashboard.mjs`,
-    `dashboard/src/views/agents/index.tsx` — 5 files). Commit `0f456c2`.
+    `dashboard/src/views/agents/index.tsx` — 5 files). Commit `c11aeec`.
 
 - [x] T2 — Dashboard: show the free/paid badge for opencode catalog models and
   list drift items. Route: delegated writer.
@@ -204,7 +211,7 @@ incompatible with the opencode v2 plugin API. They are not agent-hub code.
     succeeded; `grep -rn '<style\|style="\|data:font' dashboard/dist`
     printed nothing (CSP-safe). Full `npm test` 1548/1548 (unchanged, T2 is
     dashboard-only).
-  - Route: delegated writer (5 dashboard files). Commit `931cd70`.
+  - Route: delegated writer (5 dashboard files). Commit `2538cae`.
 
 - [x] T3 — Variant validation: when the last good catalog row knows the
   model, an unsupported variant is dropped before spawning (the job runs at
@@ -246,12 +253,70 @@ incompatible with the opencode v2 plugin API. They are not agent-hub code.
     new). No dashboard files touched, so no dashboard verification required
     for this task.
   - Route: delegated writer (`src/catalog.mjs`, `src/jobrunner.mjs`,
-    `src/schemas.mjs` — 3+ files). Commit `a889409`.
+    `src/schemas.mjs` — 3+ files). Commit `a6767d2`.
 
-- [ ] T4 — Hygiene: empty model list labelled distinctly from a timeout;
+- [x] T4 — Hygiene: empty model list labelled distinctly from a timeout;
   `classifyError` gets retriable `transport` and non-retriable
   `invalid_variant`/`no_route` kinds; `TESTED_VERSIONS.opencode` bumped to
   `2.0.18`. Route: delegated writer.
+  - `src/discovery.mjs`: `discoverCli` now distinguishes `modelsResult.timedOut`
+    (`error: 'model list timed out'`) from an exit-0 empty stdout
+    (`error: 'model list empty (service starting?)'`) — previously both
+    collapsed into the same "timed out" label.
+  - `src/adapters/opencode.mjs` `classifyError`: extended the upstream
+    `transport` regex (added on `main` after this branch was cut, commits
+    `661a999`/`b489ec7`) from `/^transport$|econnreset|econnrefused|socket
+    hang up|fetch failed/` to
+    `/^transport(:|$)|econnreset|econnrefused|socket hang up|socket
+    connection was closed|fetch failed/` — the real captured message
+    (job `0ebdbb0a`) was `"Transport: The socket connection was closed
+    unexpectedly. For more information, pass \`verbose: true\` ..."`, which
+    the narrower upstream pattern did not match (anchored `^transport$`, and
+    "socket connection was closed" reads differently from "socket hang
+    up"). Extended the existing pattern in place, not a parallel branch.
+  - Added a new `no_route` kind: `errorEvent.error?.type ===
+    'provider.no-route'` OR the lowercased message matching
+    `/provider\.no-route|variant unavailable/` → `{kind: 'no_route',
+    retriable: false, message: <original error.message, preserved
+    verbatim>}`.
+  - Checked and updated the policy layer so `no_route` is never
+    mis-bucketed as `crash`: added `no_route: {retry: false}` to
+    `ERROR_TAXONOMY` (`src/policy/taxonomy.mjs`) and `no_route: {retry:
+    false, resume: false, fallback: true, escalation: 'human'}` to
+    `POLICY_TABLE` (`src/policy/registry.mjs`) — without an explicit
+    taxonomy entry, `classifyError`'s text heuristics would have fallen
+    through to the generic `crash` category. Checked
+    `CIRCUIT_BREAKER_BY_CLASS` (`src/config.mjs`): it already falls back to
+    its `default` entry for any class not explicitly listed
+    (`src/breakers.mjs`: `CIRCUIT_BREAKER_BY_CLASS[klass] ||
+    CIRCUIT_BREAKER_BY_CLASS.default || CIRCUIT_BREAKER`), so `no_route`
+    degrades safely with no code change needed there. `errorKind` in
+    `src/schemas.mjs` is `nullableString` (free string, no enum), and the
+    dashboard's `errorKindSeverity` (`dashboard/src/lib/badges.ts`) already
+    defaults an unrecognized kind to the `warning` tone — both verified
+    safe for a new kind with no dashboard changes required (not touched;
+    no dashboard verification run for this task).
+  - `TESTED_VERSIONS.opencode` (`src/index.mjs:50`) bumped `'2.0.10'` ->
+    `'2.0.18'`. No test asserts this literal (it only drives a `selftest`
+    CLI warning message), so no RED/GREEN cycle applies to it.
+  - TDD: RED for the discovery empty-list label was re-established this
+    session (the WIP predated a session interruption) by stashing
+    `src/discovery.mjs` and re-running `node --test test/discovery.test.mjs`
+    — exactly 1 failure (`discoverCli reports a distinct "model list
+    empty"...`); GREEN after popping the stash: 14/14. RED observed for the
+    3 new `classifyError` tests in `test/adapters/opencode.test.mjs`
+    (real-message transport, no_route x2) — `not ok` on exactly those 3,
+    35/38 passing; GREEN after implementing: 38/38. RED observed for the 2
+    new policy tests in `test/policy.test.mjs` — `not ok` on both; GREEN
+    after adding the taxonomy/policy entries: 13/13. Focused
+    `node --test test/discovery.test.mjs test/adapters/opencode.test.mjs
+    test/policy.test.mjs` 65/65. Full `npm test`: 1593/1593 (rebased-branch
+    baseline, WIP included, was 1588/1588 before any T4 edits this session
+    — confirmed clean before starting, no upstream-rebase fix needed; +5
+    new this session).
+  - Route: delegated writer (`src/discovery.mjs`, `src/adapters/opencode.mjs`,
+    `src/policy/taxonomy.mjs`, `src/policy/registry.mjs`, `src/index.mjs` —
+    5 files). Commit `<T4_HASH>`.
 
 ## Acceptance criteria
 
@@ -265,18 +330,18 @@ incompatible with the opencode v2 plugin API. They are not agent-hub code.
 ## Progress
 
 - Branch created.
-- T1 done. Commit `7357ae3`. Authored changed lines: 450 (src 425+/-25 test
+- T1 done. Commit `a27f52d`. Authored changed lines: 450 (src 425+/-25 test
   included; see T1 entry above for the per-file breakdown).
-- T2 done. Commit `931cd70`. Authored changed
+- T2 done. Commit `2538cae`. Authored changed
   lines: dashboard 123 insertions / 1 deletion (`dashboard/src/lib/types.ts`
   +2, `dashboard/src/views/agents/agents.test.tsx` +38,
   `dashboard/src/views/agents/index.tsx` +17,
   `dashboard/src/views/approvals/index.test.tsx` +17,
   `dashboard/src/views/approvals/proposals-panel.tsx` +49/-1).
 - T1 correction done (real defect the parent found via live evidence against
-  commit `7357ae3`: TTL-gated tier/drift, inert almost all the time —
+  commit `a27f52d`: TTL-gated tier/drift, inert almost all the time —
   fixed to use the last good catalog regardless of age; see the T1 entry
-  above for full detail). Commit `0f456c2`. Authored changed
+  above for full detail). Commit `c11aeec`. Authored changed
   lines: 176 (additions 120 / deletions 56) across `src/catalog.mjs`
   (+44/-26), `src/schemas.mjs` (+12/-5), `src/tools/agents.mjs` (+6/-4),
   `src/dashboard.mjs` (+2/-1), `test/catalog.test.mjs` (+38/-17),
@@ -292,13 +357,29 @@ incompatible with the opencode v2 plugin API. They are not agent-hub code.
   `size:exception`**, replacing `ask-on-risk`, made after the ~574-line
   checkpoint at the end of T1+T2. No further line-budget stop applies to
   this feature — implementation continues through T3 and T4 to completion.
-- T3 done. Commit `a889409`. Authored changed lines: 248 (additions 246 /
+- T3 done. Commit `a6767d2`. Authored changed lines: 248 (additions 246 /
   deletions 2) across `src/catalog.mjs` (+47), `src/jobrunner.mjs` (+24/-1),
   `src/schemas.mjs` (+5), `test/catalog.test.mjs` (+66/-1),
   `test/jobrunner.test.mjs` (+104).
-- **Running authored-changed-lines total: 450 (T1) + 124 (T2) + 176
-  (T1 correction) + 248 (T3) ≈ 998** (git diff --numstat, excluding
-  lockfiles and dashboard/dist). Advisory only per the `single-pr` /
-  `size:exception` delivery decision — not a stop condition.
-- Next: T4 (hygiene: empty-list label, classifyError kinds, TESTED_VERSIONS
-  bump), the last task.
+- Branch rebased onto `main` @ `1f42aa0` (see header) between T3 and T4;
+  commit hashes above updated to their post-rebase SHAs. Verified clean
+  before starting T4: full `npm test` on the rebased branch (T4 WIP
+  present) was 1588/1588 — no upstream-rebase fix needed.
+- T4 done. Commit `<T4_HASH>`. Authored changed lines: 110 (additions 107 /
+  deletions 3) across `src/discovery.mjs` (+9/-1),
+  `src/adapters/opencode.mjs` (+23/-1), `src/index.mjs` (+1/-1),
+  `src/policy/registry.mjs` (+4), `src/policy/taxonomy.mjs` (+5),
+  `test/discovery.test.mjs` (+17), `test/adapters/opencode.test.mjs` (+33),
+  `test/policy.test.mjs` (+15).
+- **All 4 tasks done.** Running authored-changed-lines total: 450 (T1) + 124
+  (T2) + 176 (T1 correction) + 248 (T3) + 110 (T4) ≈ 1108 (git diff
+  --numstat vs `main`, excluding lockfiles, `dashboard/dist`, and this doc
+  file itself). Delivered as a single PR under `size:exception`, per the
+  recorded delivery decision — not a stop condition. `.gitignore`'s
+  pre-existing unrelated change was left unstaged throughout, every task.
+- Not fixed (reported only, out of scope both times it was reported): the
+  `runDiscovery` (`src/discovery.mjs`) merge-overwrite gap noted in the T1
+  correction above.
+- Next: none — all 4 tasks (T1-T4) are complete. Remaining decision for the
+  user: open the PR (`single-pr`/`size:exception`) whenever ready; this
+  writer does not push or open PRs.
