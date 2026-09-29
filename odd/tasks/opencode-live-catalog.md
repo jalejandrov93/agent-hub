@@ -383,3 +383,24 @@ incompatible with the opencode v2 plugin API. They are not agent-hub code.
 - Next: none — all 4 tasks (T1-T4) are complete. Remaining decision for the
   user: open the PR (`single-pr`/`size:exception`) whenever ready; this
   writer does not push or open PRs.
+- Parent verification after T4 (rebased branch): `npm test` 1593/1593;
+  `npm run -w dashboard test` 236/236; `npm run -w dashboard typecheck`
+  clean; `npm run build` succeeded; CSP grep on `dashboard/dist` empty.
+- Native review (RDD): `review assess --base-ref main --committed-only` →
+  risk `medium`, `review_due` (`slice_budget_reached`). User granted consent.
+  Lineage `review-4f4a2eb692f3055d`, one lens (`review-reliability`):
+  **approved**, acknowledged (authority burned). Reviewed boundary advances
+  to `bf6d9dd`. Non-blocking advisory findings, left as follow-up work:
+  - R3-001 (WARNING) `effectiveTier` returns `tier: null` from the catalog
+    when the entry lists the model but has no usable cost, instead of
+    falling back to the registry tier; untested path.
+  - R3-002 (WARNING) `computeCatalogDrift` ignores a per-step variant on
+    `DELEGATION_MAP` chain steps, so map-only pins never yield
+    `variant_unavailable`.
+  - R3-003 (SUGGESTION) `/api/proposals` reads `discovery.json` twice per
+    request.
+  - R3-004 (SUGGESTION) Tier badge title assumes `catalogCheckedAt` is
+    non-null when `tierSource` is `catalog`.
+  - R3-005 (SUGGESTION) `buildState` test does not assert
+    `catalogCheckedAt`.
+  - R3-006 (SUGGESTION) this document's rebase header omits the T4 SHA.
