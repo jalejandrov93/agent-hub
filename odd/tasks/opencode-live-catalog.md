@@ -316,7 +316,7 @@ incompatible with the opencode v2 plugin API. They are not agent-hub code.
     new this session).
   - Route: delegated writer (`src/discovery.mjs`, `src/adapters/opencode.mjs`,
     `src/policy/taxonomy.mjs`, `src/policy/registry.mjs`, `src/index.mjs` —
-    5 files). Commit `<T4_HASH>`.
+    5 files). Commit `fc1682c`.
 
 ## Acceptance criteria
 
@@ -365,7 +365,7 @@ incompatible with the opencode v2 plugin API. They are not agent-hub code.
   commit hashes above updated to their post-rebase SHAs. Verified clean
   before starting T4: full `npm test` on the rebased branch (T4 WIP
   present) was 1588/1588 — no upstream-rebase fix needed.
-- T4 done. Commit `<T4_HASH>`. Authored changed lines: 110 (additions 107 /
+- T4 done. Commit `fc1682c`. Authored changed lines: 110 (additions 107 /
   deletions 3) across `src/discovery.mjs` (+9/-1),
   `src/adapters/opencode.mjs` (+23/-1), `src/index.mjs` (+1/-1),
   `src/policy/registry.mjs` (+4), `src/policy/taxonomy.mjs` (+5),
