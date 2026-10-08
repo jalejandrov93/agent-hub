@@ -58,6 +58,13 @@ Out of scope: copilot resume, a claude CLI adapter, long-lived CLI processes, ro
 - Forecast: ~1,100 authored changed lines (T1 ~250, T2 ~400, T3 ~150, T4 ~200, T5 ~100) — over the ~400 budget.
 - Strategy: `ask-on-risk` (default); chain strategy `feature-branch-chain` (user choice 2026-10-08): slice PRs merge into `feat/task-assignments`, one final PR to `main`.
 - Running count: ~654 (T1) + ~520 (T2) + ~375 (T3) + ~405 (T4) + ~79 (T5).
+- Slices (2026-10-08), each PR holds one work-unit commit; prerequisite #111 (`feat/opencode-live-catalog` → `main`, single-pr/size:exception) lands first:
+  - #112 `feat/task-assignments-01-store` → `feat/task-assignments` — `2a5fdf5` (T1, ~730, size:exception: dual backend)
+  - #113 `feat/task-assignments-02-tools` → `-01-store` — `5adc91c` (T2, ~927, size:exception: one tool unit)
+  - #114 `feat/task-assignments-03-budget` → `-02-tools` — `e983118` (T3, ~390)
+  - #115 `feat/task-assignments-04-rehydration` → `-03-budget` — `2f83884` (T4, ~414)
+  - #116 `feat/task-assignments-05-docs` → `-04-rehydration` — `cec5876` + this delivery record (T5)
+  - Tracker `feat/task-assignments` was reset to `509d65f` (base); its draft PR to `main` opens after #112 merges into it (an empty tracker PR cannot be opened).
 
 ## Tasks
 
@@ -73,4 +80,4 @@ Out of scope: copilot resume, a claude CLI adapter, long-lived CLI processes, ro
 
 ## Next step
 
-All tasks done. Follow-ups (not authorized yet): auto-detect expired sessions in adapter `classifyError`; `claude.messagingTurnBoundary`; Jules assignments; routing fallbacks from the 2026-10-08 free-model benchmark. Delivery: slice PRs into `feat/task-assignments`, final PR to `main` — user decision (and `feat/opencode-live-catalog` must land first).
+All tasks done. Follow-ups (not authorized yet): auto-detect expired sessions in adapter `classifyError`; `claude.messagingTurnBoundary`; Jules assignments; routing fallbacks from the 2026-10-08 free-model benchmark. Delivery: PRs #111–#116 open; merge order #111 → #112 → … → #116, then open the tracker PR `feat/task-assignments` → `main`. Merges are the user's decision.
