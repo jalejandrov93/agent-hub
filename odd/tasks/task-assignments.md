@@ -64,6 +64,7 @@ Out of scope: copilot resume, a claude CLI adapter, long-lived CLI processes, ro
   - #114 `feat/task-assignments-03-budget` → `-02-tools` — `e983118` (T3, ~390)
   - #115 `feat/task-assignments-04-rehydration` → `-03-budget` — `2f83884` (T4, ~414)
   - #116 `feat/task-assignments-05-docs` → `-04-rehydration` — `cec5876` + this delivery record (T5)
+  - #117 `feat/task-assignments-06-opencode-budget` → `-05-docs` — `4cb64fe` (T6, ~195)
   - Tracker `feat/task-assignments` was reset to `509d65f` (base); its draft PR to `main` opens after #112 merges into it (an empty tracker PR cannot be opened).
 
 ## Tasks
