@@ -20,6 +20,7 @@ import { computeMetrics } from './metrics.mjs'
 import { listProposals, refreshProposals, decideProposal } from './proposals.mjs'
 import { computeModelGaps } from './model-gaps.mjs'
 import { effectiveTier, computeCatalogDrift } from './catalog.mjs'
+import { policyView, setModelDecision, setModelOrder, POLICY_AGENTS } from './model-policy.mjs'
 import { listLearnings, proposeLearning, decideLearning, deleteLearning } from './learnings.mjs'
 import { jobResultTool } from './tools/jobs.mjs'
 import { JobRecord } from './schemas.mjs'
@@ -389,6 +390,16 @@ function sendJson(res, status, payload) {
 }
 
 /** Map a readJsonBody rejection (413/400) or a route-thrown error (500 default) to a JSON error response. */
+/** Run a validating setter; its thrown errors are the caller's fault (400), not the server's. */
+function asBadRequest(fn) {
+  try {
+    return fn()
+  } catch (error) {
+    error.statusCode ??= 400
+    throw error
+  }
+}
+
 function sendError(res, error) {
   const status = error?.statusCode ?? 500
   const message = error?.expose ?? String(error?.message ?? error)
@@ -717,6 +728,30 @@ export function createServer({ env = process.env, commandRunner = runCommand, di
         return sendJson(res, 400, { error: 'invalid URL encoding' })
       }
       sendJson(res, 200, clearOverride(overrideKey(agent, model), env))
+      return
+    }
+
+    // opencode-model-policy (S1): which catalog models agent-hub may use.
+    if (url.pathname === '/api/model-policy' && req.method === 'GET') {
+      const agent = url.searchParams.get('agent') ?? 'opencode'
+      if (!POLICY_AGENTS.includes(agent)) {
+        return sendJson(res, 400, { error: `model policy only covers ${POLICY_AGENTS.join(', ')}, not "${agent}"` })
+      }
+      sendJson(res, 200, policyView({ agent, env, discovery: readDiscovery(env) }))
+      return
+    }
+
+    if (url.pathname === '/api/model-policy' && req.method === 'POST') {
+      readJsonBody(req)
+        .then((body) => sendJson(res, 200, asBadRequest(() => setModelDecision({ agent: body.agent ?? 'opencode', model: body.model, allowed: body.allowed, env }))))
+        .catch((error) => sendError(res, error))
+      return
+    }
+
+    if (url.pathname === '/api/model-policy/order' && req.method === 'PUT') {
+      readJsonBody(req)
+        .then((body) => sendJson(res, 200, { order: asBadRequest(() => setModelOrder({ agent: body.agent ?? 'opencode', order: body.order, env })) }))
+        .catch((error) => sendError(res, error))
       return
     }
 
