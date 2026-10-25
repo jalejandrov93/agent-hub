@@ -321,7 +321,7 @@ export function buildConfig({ env = process.env } = {}) {
     ttlMs: PREFLIGHT_TTL_MS,
     agentHubHome: paths(env).home,
     writeAllowlist: WRITE_ALLOWLIST,
-    breakerState: defaultPairs().map((p) => breakerStatus({ agent: p.agent, model: p.model, env })),
+    breakerState: defaultPairs({ env }).map((p) => breakerStatus({ agent: p.agent, model: p.model, env })),
     overrides: readOverrides(env),
     // What THIS process (the dashboard, possibly a minimal systemd --user
     // PATH) actually sees — surfaced so a misconfigured PATH is diagnosable
@@ -612,7 +612,7 @@ export function createServer({ env = process.env, commandRunner = runCommand, di
             return { results: [entry] }
           }
 
-          let pairs = defaultPairs()
+          let pairs = defaultPairs({ env })
           if (body.agent) pairs = pairs.filter((p) => p.agent === body.agent)
           if (body.model) pairs = pairs.filter((p) => p.model === body.model)
 

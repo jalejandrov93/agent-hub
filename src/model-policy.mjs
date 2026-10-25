@@ -115,6 +115,35 @@ export function expandPool({ agent, pool, env = process.env, discovery = readDis
     .slice(0, limit)
 }
 
+/**
+ * Replace every pool step of `chain` (`{agent, model: '@free'}`) with one
+ * concrete step per allowed model (`{...step, model, pool}`). A pool with no
+ * allowed listed model is dropped and reported in `emptyPools` as
+ * `{agent, model: '@pool', reason: 'pool_empty'}`. A model already in the
+ * chain is not repeated. Steps without a pool are returned unchanged.
+ */
+export function expandChain(chain, { env = process.env, discovery = readDiscoveryFile(env), policy = readModelPolicy(env) } = {}) {
+  if (!chain.some((step) => isPoolModel(step?.model))) return { chain, emptyPools: [] }
+  const out = []
+  const emptyPools = []
+  const seen = new Set()
+  for (const step of chain) {
+    if (!isPoolModel(step?.model)) {
+      out.push(step)
+      seen.add(`${step.agent}:${step.model}`)
+      continue
+    }
+    const pool = poolOf(step.model)
+    const models = expandPool({ agent: step.agent, pool, env, discovery, policy }).filter((id) => !seen.has(`${step.agent}:${id}`))
+    if (models.length === 0) emptyPools.push({ agent: step.agent, model: step.model, reason: 'pool_empty' })
+    for (const id of models) {
+      seen.add(`${step.agent}:${id}`)
+      out.push({ ...step, model: id, pool })
+    }
+  }
+  return { chain: out, emptyPools }
+}
+
 /** Every catalog model of `agent` with its pool and decision, in policy order (dashboard view). */
 export function policyView({ agent, env = process.env, discovery = readDiscoveryFile(env) }) {
   const policy = readModelPolicy(env)
