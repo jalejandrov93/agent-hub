@@ -83,11 +83,29 @@ export function modelPool(entry) {
  */
 export function modelDecision({ agent, model, env = process.env, discovery = readDiscoveryFile(env), policy = readModelPolicy(env) }) {
   if (!POLICY_AGENTS.includes(agent)) return { allowed: true, source: 'not_applicable', pool: null }
-  const entry = catalogModels(discovery, agent).find((m) => m.id === model) ?? null
+  // A `model#variant` id (opencode reasoning variants) is judged by its base model.
+  const base = typeof model === 'string' ? model.split('#')[0] : model
+  const entry = catalogModels(discovery, agent).find((m) => m.id === base) ?? null
   const pool = entry ? modelPool(entry) : 'unknown'
-  const decision = agentPolicy(policy, agent).decisions[model]
+  const decision = agentPolicy(policy, agent).decisions[base]
   if (typeof decision?.allowed === 'boolean') return { allowed: decision.allowed, source: 'user', pool }
   return { allowed: pool === 'free', source: 'default', pool }
+}
+
+/**
+ * Throw (code 'model_blocked') when the policy does not allow agent:model.
+ * startJob calls this before any job record or process exists, so every path
+ * that launches a model (delegate, plans, assignments, replies) is covered.
+ */
+export function assertModelAllowed({ agent, model, env = process.env, discovery = readDiscoveryFile(env), policy = readModelPolicy(env) }) {
+  const { allowed, source, pool } = modelDecision({ agent, model, env, discovery, policy })
+  if (allowed) return
+  const why = source === 'user' ? 'blocked in the dashboard' : pool === 'unknown' ? 'not listed by the current catalog' : `${pool} models are blocked until allowed`
+  const error = new Error(
+    `${agent} model "${model}" is blocked by the model policy (${why}); allow it in the dashboard (Agents → ${agent}) or use an allowed model`
+  )
+  error.code = 'model_blocked'
+  throw error
 }
 
 /** Sort ids by their position in `order`, then alphabetically. */
@@ -119,16 +137,22 @@ export function expandPool({ agent, pool, env = process.env, discovery = readDis
  * Replace every pool step of `chain` (`{agent, model: '@free'}`) with one
  * concrete step per allowed model (`{...step, model, pool}`). A pool with no
  * allowed listed model is dropped and reported in `emptyPools` as
- * `{agent, model: '@pool', reason: 'pool_empty'}`. A model already in the
- * chain is not repeated. Steps without a pool are returned unchanged.
+ * `{agent, model: '@pool', reason: 'pool_empty'}`. A concrete step of a
+ * policy agent that is not allowed (e.g. appended by an accepted proposal) is
+ * dropped as `reason: 'model_blocked'`. A model already in the chain is not
+ * repeated. Other steps are returned unchanged.
  */
 export function expandChain(chain, { env = process.env, discovery = readDiscoveryFile(env), policy = readModelPolicy(env) } = {}) {
-  if (!chain.some((step) => isPoolModel(step?.model))) return { chain, emptyPools: [] }
+  if (!chain.some((step) => POLICY_AGENTS.includes(step?.agent))) return { chain, emptyPools: [] }
   const out = []
   const emptyPools = []
   const seen = new Set()
   for (const step of chain) {
     if (!isPoolModel(step?.model)) {
+      if (POLICY_AGENTS.includes(step.agent) && !modelDecision({ agent: step.agent, model: step.model, env, discovery, policy }).allowed) {
+        emptyPools.push({ agent: step.agent, model: step.model, reason: 'model_blocked' })
+        continue
+      }
       out.push(step)
       seen.add(`${step.agent}:${step.model}`)
       continue

@@ -19,3 +19,13 @@ export function seedOpencodeCatalog(home, models = [{ id: SEEDED_FREE_MODEL, cos
   fs.writeFileSync(file, JSON.stringify(current))
   return home
 }
+
+// startJob rejects an opencode model the policy does not allow (model_blocked).
+// Tests that launch opencode jobs for unrelated reasons record the user's
+// "allowed" decision for the models they use.
+export function allowOpencodeModels(home, models) {
+  const decidedAt = new Date().toISOString()
+  const decisions = Object.fromEntries(models.map((id) => [id, { allowed: true, decidedAt }]))
+  fs.writeFileSync(path.join(home, 'model-policy.json'), JSON.stringify({ opencode: { decisions } }))
+  return home
+}

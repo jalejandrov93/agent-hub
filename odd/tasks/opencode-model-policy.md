@@ -20,8 +20,8 @@ Assumptions (not stated by the user, chosen by the implementer):
 | ID | Specs | Route | Status | Evidence |
 |---|---|---|---|---|
 | T1 | S1, S4 | inline | done (83ec8e2) | `src/model-policy.mjs` storage, pool classification, allow decision + unit tests |
-| T2 | S2 | inline | done (see Log L6) | pool steps in `DELEGATION_MAP`, expansion in `route()` and in map consumers (discovery, agents_status, drift, gaps, proposals) + tests |
-| T3 | S3 | inline | pending | block in `delegate`/`dispatch` + errorKind + tests |
+| T2 | S2 | inline | done (0c647ec) | pool steps in `DELEGATION_MAP`, expansion in `route()` and in map consumers (discovery, agents_status, drift, gaps, proposals) + tests |
+| T3 | S3 | inline | done (see Log L7) | block in `delegate`/`dispatch` + errorKind + tests |
 | T4 | S1 | inline | pending | dashboard API (`GET/PUT /api/model-policy`) + Agents view toggles and order + tests |
 | T5 | S5 | inline | pending | docs, skill, CHANGELOG |
 
@@ -35,3 +35,4 @@ Route evidence: no Writer trigger (units are sequential: T2–T4 depend on T1's 
 - L4 (evidence): live catalog has 48 opencode models (`opencode/*` Zen, `opencode-go/*` 30, `deepseek/*` 2); 8 free by catalog cost; none of the 4 pinned ids (`router.mjs` recon/call-chain-trace/research/triage/mechanical-edit) is listed. `effectiveChainFor` only appends (proposals.mjs:43-57); `overrides.json` supports only hold/breakerReset.
 - L5 (T1): RED 9/9 failing (module missing) → GREEN 9/9; `npm test` 1834/1834. Commit 83ec8e2.
 - L6 (T2): RED 6/7 in test/router-model-policy.test.mjs → GREEN. Pools `@free`/`@go` in DELEGATION_MAP (A1); `route()` expands after proposals apply, reports `pool_empty`, keeps discovery rows from the declared chain. `defaultPairs`/`validPairKeys` expand pools; drift and model-gaps skip pool placeholders. 21 legacy tests pinned the old ids: seeded a free catalog via test/helpers/opencode-catalog.mjs; two agents_status tier tests rewritten (a catalog-priced model is now blocked by default; registry fallback proven on agy). `npm test` 1841/1841. One scheduler test (T7 heartbeat) failed once in a full run and passed alone: intermittent, unrelated.
+- L7 (T3): RED 4/6 (2 previous-behavior guards green) → GREEN. `assertModelAllowed` in startJob (before any job record; covers delegate, plans, assignments, probes, replies); `expandChain` drops concrete blocked opencode steps as `model_blocked` (accepted add_candidate proposals). Found and fixed a defect: `model#variant` ids were judged as unlisted; now judged by base id (RED test added). 8 legacy tests launching opencode jobs record an allow decision via `allowOpencodeModels`. `npm test` 1848/1848.
