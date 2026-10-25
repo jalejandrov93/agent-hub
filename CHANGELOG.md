@@ -8,6 +8,34 @@ and this project adheres to [Semantic Versioning](https://semver.org/).
 
 ### Added
 
+- opencode model policy: choose in the dashboard (Agents → opencode models) which opencode
+  catalog models agent-hub may use and in what order; stored in `model-policy.json`.
+  Undecided free models are allowed, Go and paid models are blocked until allowed (with a
+  confirmation, since they spend quota). `GET/POST /api/model-policy`,
+  `PUT /api/model-policy/order`.
+
+### Fixed
+
+- The `claude` capability row no longer claims `sessionResume`: the hub has no
+  claude CLI adapter (claude tiers are host-only routing hints), so it cannot
+  resume a host-run Claude subagent session. Routing with
+  `requirements: ['sessionResume']` now skips claude candidates.
+- agy jobs whose turn ended while the model was still "waiting" on a command
+  agy had auto-detached into the background (marker `terminating N background
+  task(s) on exit`) are now reported as `failed` with `errorKind: incomplete`
+  instead of an empty `succeeded`. The partial text and session id are kept so
+  `job_reply` can resume the conversation.
+
+### Changed
+
+- opencode chain steps name pools (`@free`, `@go`) instead of fixed model ids, which had
+  all been retired from the catalog. `route()` expands a pool to the allowed models the
+  live catalog lists (at most 2) and skips an empty one as `pool_empty`; a blocked concrete
+  opencode step is skipped as `model_blocked`. `mechanical-edit` now uses an allowed Go
+  model instead of `deepseek/deepseek-v4-flash`.
+- A job on an opencode model the policy does not allow is rejected before launch with
+  `code: model_blocked`.
+
 - Opt-in quota-aware routing (`AGENT_HUB_QUOTA_ROUTING=skip`, default `off`):
   `route`/`dispatch` skip a pair whose quota is used up (every eligible agys
   account for agy, the CodexBar windows otherwise; threshold
@@ -90,20 +118,6 @@ and this project adheres to [Semantic Versioning](https://semver.org/).
   brief, the tail of the last response and the new message, and reports
   `rehydrated`/`rehydrationReason`. An expired session behind a failed resumed
   run is not yet detected automatically.
-
-### Fixed
-
-- The `claude` capability row no longer claims `sessionResume`: the hub has no
-  claude CLI adapter (claude tiers are host-only routing hints), so it cannot
-  resume a host-run Claude subagent session. Routing with
-  `requirements: ['sessionResume']` now skips claude candidates.
-- agy jobs whose turn ended while the model was still "waiting" on a command
-  agy had auto-detached into the background (marker `terminating N background
-  task(s) on exit`) are now reported as `failed` with `errorKind: incomplete`
-  instead of an empty `succeeded`. The partial text and session id are kept so
-  `job_reply` can resume the conversation.
-
-### Changed
 
 - `dispatch`: an explicit `mode` now wins over the routed chain step's own
   mode on every step (adaptive timeout, `startJob`, per-cwd write-lock
