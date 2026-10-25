@@ -100,7 +100,7 @@ The choice is stored in `$AGENT_HUB_HOME/model-policy.json` and survives reinsta
 | Pool | Catalog models in it | Default for a model nobody decided yet |
 |---|---|---|
 | `@free` | catalog cost is zero (`opencode/*-free`, some `opencode-go/*`) | **allowed** |
-| `@go` | `opencode-go/*` with a price (the OpenCode Go subscription) | **blocked** until allowed |
+| `@go` | `opencode-go/*` with a price or no price data (the OpenCode Go subscription) | **blocked** until allowed |
 | — (paid) | any other priced model (`opencode/*`, `deepseek/*`) | **blocked**; never routed, only usable through an explicit `delegate` once allowed |
 
 - `route()` expands a pool to the allowed models the live catalog lists, in the order set in

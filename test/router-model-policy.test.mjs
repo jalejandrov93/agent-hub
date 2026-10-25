@@ -109,3 +109,22 @@ test('S2: catalog drift never reports a pool placeholder as a vanished model', a
   const drift = computeCatalogDrift({ discovery, map: DELEGATION_MAP, registry: {} })
   assert.equal(drift.some((d) => String(d.model ?? d.id ?? '').startsWith('@')), false)
 })
+
+test('verifier B2: reorder proposals aggregate the metrics of the concrete models behind a pool step', async () => {
+  const home = homeWithCatalog(CATALOG)
+  const { DELEGATION_MAP } = await fresh(home)
+  const { computeProposals } = await import('../src/proposals.mjs?t=' + Date.now())
+  const poolOfModel = (agent, model) => (agent === 'opencode' ? (model.endsWith('-free') ? 'free' : 'go') : null)
+  const row = (agent, model, succeeded, samples) => ({ agent, model, mode: 'read', taskType: 'triage', samples, succeeded, successRate: succeeded / samples })
+  const metrics = {
+    rows: [
+      row('opencode', 'opencode/mimo-v2.6-flash-free', 5, 30),
+      row('opencode', 'opencode/glm-5.3-flash-free', 5, 30),
+      row('copilot', 'auto', 60, 60),
+    ],
+  }
+  const proposals = computeProposals({ metrics, map: { triage: DELEGATION_MAP.triage }, poolOfModel })
+  assert.equal(proposals.length, 1)
+  assert.deepEqual(proposals[0].toOrder[0], { agent: 'copilot', model: 'auto' })
+  assert.equal(proposals[0].evidence['opencode:@free'].samples, 60)
+})

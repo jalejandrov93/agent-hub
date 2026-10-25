@@ -289,9 +289,21 @@ function pathEntries(env) {
   return pathVar.split(path.delimiter).filter(Boolean)
 }
 
-/** Every distinct real CLI agent (never 'claude') reachable from DELEGATION_MAP. */
+/**
+ * Every distinct real CLI agent (never 'claude') declared in DELEGATION_MAP.
+ * Read from the declared chains, not defaultPairs(): an opencode pool that
+ * resolves to no allowed model must not hide opencode from the Config panel.
+ */
 function delegationMapAgents() {
-  return [...new Set(defaultPairs().map((p) => p.agent))]
+  const agents = new Set()
+  for (const entry of Object.values(DELEGATION_MAP)) {
+    for (const step of entry.chain) {
+      for (const candidate of [step, step.parallelWith]) {
+        if (candidate && candidate.agent !== 'claude') agents.add(candidate.agent)
+      }
+    }
+  }
+  return [...agents]
 }
 
 /**

@@ -100,3 +100,17 @@ test('PUT /api/model-policy/order sets the priority order that GET returns first
     assert.equal(bad.status, 400)
   })
 })
+
+test('GET /api/config keeps opencode in resolvedBins whatever the process AGENT_HUB_HOME holds (verifier B1)', async () => {
+  const previous = process.env.AGENT_HUB_HOME
+  process.env.AGENT_HUB_HOME = fs.mkdtempSync(path.join(os.tmpdir(), 'agent-hub-dash-policy-empty-'))
+  try {
+    await withServer(async (port) => {
+      const res = await request(port, '/api/config')
+      assert.equal(res.status, 200)
+      assert.ok('opencode' in res.body.process.resolvedBins, 'opencode is a DELEGATION_MAP agent even when its pools resolve to nothing')
+    })
+  } finally {
+    process.env.AGENT_HUB_HOME = previous
+  }
+})
