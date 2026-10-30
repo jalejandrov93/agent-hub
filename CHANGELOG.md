@@ -8,6 +8,11 @@ and this project adheres to [Semantic Versioning](https://semver.org/).
 
 ### Added
 
+- `agent-hub watch --job/--root/--until-terminal`: filter events to specific
+  jobs or a root execution and exit 0 once all of them are terminal, so a
+  background watcher tells the orchestrator when delegated work ends. `job.canceled`
+  is now routed, and startup reconcile emits `job.failed` (`errorKind: orphaned`)
+  for orphaned jobs.
 - Opt-in quota-aware routing (`AGENT_HUB_QUOTA_ROUTING=skip`, default `off`):
   `route`/`dispatch` skip a pair whose quota is used up (every eligible agys
   account for agy, the CodexBar windows otherwise; threshold
