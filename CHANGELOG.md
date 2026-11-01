@@ -17,6 +17,9 @@ and this project adheres to [Semantic Versioning](https://semver.org/).
   `job_reply` resumes through `--fork`. Quota errors (429, usage limit,
   credit balance) classify as `quota`; `opencode-go/*` models on it share
   the opencode go CodexBar quota. See [docs/providers/gentle-shell.md](docs/providers/gentle-shell.md).
+- Dashboard background is now a subtle interactive dot grid (React Bits
+  `DotGrid`, WebGL) instead of the letter-glitch matrix; it follows the theme
+  and respects `prefers-reduced-motion`.
 - `agent-hub watch --job/--root/--until-terminal`: filter events to specific
   jobs or a root execution and exit 0 once all of them are terminal, so a
   background watcher tells the orchestrator when delegated work ends. `job.canceled`
@@ -107,6 +110,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/).
 
 ### Fixed
 
+- Dashboard no longer answers 431 when the browser sends large `localhost` cookies
+  from other dev apps (`maxHeaderSize` raised to 64 KiB).
 - The `claude` capability row no longer claims `sessionResume`: the hub has no
   claude CLI adapter (claude tiers are host-only routing hints), so it cannot
   resume a host-run Claude subagent session. Routing with
