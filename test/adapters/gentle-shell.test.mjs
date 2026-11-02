@@ -66,7 +66,8 @@ test('parseResult extracts the final text, session id, summed tokens and cost', 
   assert.equal(result.ok, true)
   assert.equal(result.text, 'hello')
   assert.equal(result.sessionId, '01a1992b-737c-75f3-9543-c6e6b0d806e5')
-  assert.deepEqual(result.tokens, { input: 37755, cachedInput: 18754, output: 235, reasoning: 138 })
+  // The hub contract is a number: input (cache reads and writes included) plus output (reasoning included).
+  assert.equal(result.tokens, 37990)
   assert.ok(Math.abs(result.costUsd - 0.0267959) < 1e-9)
 })
 
