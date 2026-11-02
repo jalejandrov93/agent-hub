@@ -54,21 +54,17 @@ function textOf(message) {
 }
 
 /**
- * Every turn's usage summed into the hub's token shape (codex's): input
- * includes cache reads and writes, so cachedInput is part of input; pi's
- * `reasoning` is part of `output`, as with Anthropic's output_tokens.
+ * Every turn's usage summed into the hub's token contract, a plain number
+ * (JobRecord/HubEvent `tokens`, like opencode): input plus cache reads and
+ * writes plus output. pi's `reasoning` is already part of `output`, as with
+ * Anthropic's output_tokens, so it is not added again.
  */
 function sumUsage(turns) {
   const usages = turns.map((t) => t.message.usage).filter(Boolean)
   if (usages.length === 0) return { tokens: null, costUsd: null }
   const sum = (pick) => usages.reduce((total, u) => total + (pick(u) ?? 0), 0)
   return {
-    tokens: {
-      input: sum((u) => (u.input ?? 0) + (u.cacheRead ?? 0) + (u.cacheWrite ?? 0)),
-      cachedInput: sum((u) => u.cacheRead),
-      output: sum((u) => u.output),
-      reasoning: sum((u) => u.reasoning),
-    },
+    tokens: sum((u) => (u.input ?? 0) + (u.cacheRead ?? 0) + (u.cacheWrite ?? 0) + (u.output ?? 0)),
     costUsd: sum((u) => u.cost?.total),
   }
 }
