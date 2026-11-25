@@ -72,6 +72,31 @@ and this project adheres to [Semantic Versioning](https://semver.org/).
   skipped, empty profile entries are replaced and non-empty ones are moved to
   `<path>.bak-<epoch>` first. `--mcp-merge` keeps a per-profile MCP config and
   merges the base servers into it instead.
+- MCP job notifications over the MCP tasks extension (protocol 2026-07-28, the
+  one Claude Code speaks): a client that declares `io.modelcontextprotocol/tasks`
+  and calls `delegate` or `dispatch` gets a task handle at once and `tasks/get`
+  reports `working`, then `completed` or `failed`. A failure carries `errorKind`,
+  `error`, `agent`/`model` and, for `dispatch`, every attempt tried and the
+  reroutes; `tasks/cancel` cancels the job. Legacy 2025-era clients and every
+  other call keep their exact result. `AGENT_HUB_MCP_TASKS=off` disables it.
+- `dispatch` reroutes after start: an MCP `dispatch` job that starts and then
+  fails on quota or a rate limit continues on the next routed fallback, at most 3
+  times, with the same lineage. A write job's next attempt starts from the
+  partial changes the failed one left (a scoped writer's saved patch is applied
+  first) and is told to review `git status`/`git diff`. Other failures behave as
+  before. `AGENT_HUB_REROUTE=off` / `AGENT_HUB_REROUTE_MAX=<n>`. A rerouted job
+  reports the dispatch's outcome through its own id (`job_status`/`job_wait`/
+  `job_result` add `reroutedTo`, `finalJobId`, `rerouting`; `job_cancel` stops the
+  whole chain, including a successor that is still starting, and reports
+  `rerouteCancelled: true`); jobs that never reroute are unchanged. A dispatch
+  whose result already carried the terminal failure (`waitMode`
+  `attention`/`terminal`) is never rerouted, `job_wait` never returns a quota
+  failure that is about to be rerouted, and a reroute left open by a server that
+  died reads as `failed` again after 5 minutes.
+- Opt-in Claude Code channel (`AGENT_HUB_CHANNEL=1`) for legacy connections: one
+  `<channel>` event when a job started by `delegate`/`dispatch` ends.
+- `dispatch` takes `onAttempt` and `onRoute` observation hooks; the `delegate`
+  and `dispatch` tool descriptions now steer callers to `dispatch`.
 - Learning probes: `learning_probe` runs the same read task as a control job
   (approved learnings) and a treatment job (plus one pending learning) in
   parallel; `learning_probe_result` compares them (status, errorKind,
@@ -145,6 +170,16 @@ and this project adheres to [Semantic Versioning](https://semver.org/).
 
 ### Changed
 
+- MCP SDK 1.x -> 2.x: `@modelcontextprotocol/sdk` is replaced by
+  `@modelcontextprotocol/server` ~2.4.0, pinned to the minor because task support wraps an underscored SDK hook (`@modelcontextprotocol/client` for tests)
+  and `zod` 3.25 -> ^4.6.7. The stdio entry is `serveStdio`, which serves 2026-07-28
+  clients (`server/discover`, per-request capabilities) and legacy 2025-era
+  clients (`initialize`) from the same server factory. Tool names, inputs and
+  outputs are unchanged; `tools/list` JSON Schemas are now draft 2020-12, nullable
+  fields use `type: [..., "null"]`, and input schemas no longer carry
+  `additionalProperties: false` (unknown arguments were and still are ignored).
+  `z.record(value)` became `z.record(z.string(), value)`; the dashboard's
+  search-param schemas expose optional input for zod 4's `.catch()`.
 - opencode chain steps name pools (`@free`, `@go`) instead of fixed model ids, which had
   all been retired from the catalog. `route()` expands a pool to the allowed models the
   live catalog lists (at most 2) and skips an empty one as `pool_empty`; a blocked concrete

@@ -1,5 +1,5 @@
-import { McpServer, ResourceTemplate } from '@modelcontextprotocol/sdk/server/mcp.js'
-import { StdioServerTransport } from '@modelcontextprotocol/sdk/server/stdio.js'
+import { McpServer, ResourceTemplate, CLIENT_INFO_META_KEY } from '@modelcontextprotocol/server'
+import { serveStdio } from '@modelcontextprotocol/server/stdio'
 import { execFileSync } from 'node:child_process'
 import fs from 'node:fs'
 import path from 'node:path'
@@ -22,6 +22,12 @@ import { learningProposeTool, learningProbeTool, learningProbeResultTool } from 
 import { agentSendMessageTool, agentInboxTool, agentAckTool, agentPeersTool } from './tools/messaging.mjs'
 import { scheduleStartupDiscovery, scheduleQuotaWarmup } from './startup.mjs'
 import { dispatch } from './dispatch.mjs'
+import { cancelJob } from './jobrunner.mjs'
+import { installTaskSupport, tasksEnabled, TASKS_CAPABILITIES } from './notify/mcp-tasks.mjs'
+import { channelEnabled, pushChannelNotice, CHANNEL_CAPABILITY, CHANNEL_INSTRUCTIONS } from './notify/mcp-channel.mjs'
+import { JobSupervisor } from './notify/mcp-supervisor.mjs'
+import { rerouteEnabled, maxReroutes } from './reroute.mjs'
+import { jobIdOf, isTerminalStatus } from './notify/mcp-jobs.mjs'
 import { recordDispatchOrigin } from './harness/origin.mjs'
 import { clientHintForName, getClientHint, setClientHint } from './harness/registry.mjs'
 import {
@@ -209,6 +215,13 @@ let mcpServerRef = null
  * explicit harness/env/waitMode and never decide anything
  * security-sensitive (see src/harness/registry.mjs).
  */
+export function clientHintFromCtx(ctx) {
+  // 2026-07-28 connections carry the client identity on every request (the
+  // handshake getClientVersion() reads does not exist there).
+  const name = ctx?.mcpReq?.envelope?.[CLIENT_INFO_META_KEY]?.name
+  return clientHintForName(name) ?? getMcpClientHint()
+}
+
 export function getMcpClientHint() {
   try {
     const info = mcpServerRef?.server?.getClientVersion?.() ?? mcpServerRef?.getClientVersion?.()
@@ -233,8 +246,31 @@ export function captureClientHintFromServer(server = mcpServerRef) {
   }
 }
 
-export function buildServer() {
-  const server = new McpServer({ name: 'agent-hub', version: VERSION })
+/**
+ * @param {object} [options]
+ * @param {object} [options.env] environment (AGENT_HUB_MCP_TASKS, AGENT_HUB_CHANNEL)
+ * @param {object} [options.deps] test seams: dispatch, delegateTool, cancelJob, readResult
+ * @param {number} [options.taskPollMs] how often a task/channel watcher reads the job record
+ */
+export function buildServer({ env = process.env, deps = {}, taskPollMs = 500 } = {}) {
+  const withTasks = tasksEnabled(env)
+  const channelOnly = channelEnabled(env)
+  const dispatchFn = deps.dispatch ?? dispatch
+  const delegateFn = deps.delegateTool ?? delegateTool
+  const server = new McpServer(
+    { name: 'agent-hub', version: VERSION },
+    {
+      // Capabilities only: they never change a tool result. Tasks (the 2026-07-28
+      // extension) are off with AGENT_HUB_MCP_TASKS=off; the channel is opt-in
+      // (AGENT_HUB_CHANNEL=1).
+      capabilities: {
+        ...(withTasks ? TASKS_CAPABILITIES : {}),
+        ...(channelOnly ? { experimental: { [CHANNEL_CAPABILITY]: {} } } : {}),
+      },
+      ...(channelOnly ? { instructions: CHANNEL_INSTRUCTIONS } : {}),
+    }
+  )
+  const supervisor = new JobSupervisor({ env, readResultFn: deps.readResult, cancelJobFn: deps.cancelJob ?? cancelJob, pollMs: taskPollMs })
   // Remember the server so getMcpClientHint() can read the live handshake
   // (clientInfo.name) once the client connects — see below.
   mcpServerRef = server
@@ -246,7 +282,9 @@ export function buildServer() {
   // MCP connection. Pure data — importing this module must never connect.
   const register = (name, def, handler) => {
     TOOLS.push({ name, ...def })
-    return server.registerTool(name, def, handler)
+    // zod 4 / Standard Schema: a raw shape ({field: z.string()}) is wrapped in z.object().
+    const inputSchema = def.inputSchema && typeof def.inputSchema.safeParse !== 'function' ? z.object(def.inputSchema) : def.inputSchema
+    return server.registerTool(name, { ...def, ...(inputSchema ? { inputSchema } : {}) }, handler)
   }
 
   register(
@@ -426,6 +464,129 @@ export function buildServer() {
     )
   )
 
+  // Tools whose job outlives the call. The supervisor follows the job a call
+  // started (src/notify/mcp-*.mjs): for an MCP task it answers tasks/get, for the
+  // opt-in channel it pushes the terminal state, and for dispatch it reroutes a
+  // quota failure that only shows up once the job runs (src/reroute.mjs).
+  const taskTools = new Map()
+  const rerouteOn = rerouteEnabled(env)
+
+  // A dispatch to continue on the routed fallbacks left over after the job that started.
+  const rerouteSpec = (args, hooks, ctx) => {
+    if (!rerouteOn || !hooks.route?.remaining?.length) return null
+    let n = 0
+    const baseKey = args.dispatchKey ?? hooks.route.executionId
+    return {
+      task: args.task,
+      maxReroutes: maxReroutes(env),
+      remaining: hooks.route.remaining,
+      restart: async ({ candidate, remaining, task, previous }) => {
+        n += 1
+        const attempts = []
+        let route = null
+        try {
+          const res = await dispatchFn({
+            ...args,
+            task,
+            fanout: false,
+            label: undefined,
+            dispatchKey: `${baseKey}#reroute-${n}`,
+            parentExecutionId: hooks.route.executionId,
+            rootExecutionId: hooks.route.rootExecutionId,
+            mode: args.mode ?? previous.mode,
+            waitMode: 'none',
+            routeFn: async () => ({ primary: candidate, fallbacks: remaining }),
+            onAttempt: (a) => attempts.push(a),
+            onRoute: (r) => {
+              route = r
+            },
+            clientHint: clientHintFromCtx(ctx),
+          })
+          return {
+            jobId: jobIdOf(res),
+            agent: res?.candidate?.agent ?? candidate.agent,
+            model: res?.candidate?.model ?? candidate.model,
+            attempts,
+            remaining: route?.remaining ?? [],
+          }
+        } catch (error) {
+          error.attempts = attempts
+          throw error
+        }
+      },
+    }
+  }
+
+  const startTracking = (tool, payload, hooks, args, ctx, { allowReroute = true } = {}) => {
+    const jobId = jobIdOf(payload)
+    if (!jobId) return null
+    return supervisor.start({
+      tool,
+      jobId,
+      attempts: hooks.attempts,
+      reroute: tool === 'dispatch' && allowReroute ? rerouteSpec(args, hooks, ctx) : null,
+      onTerminal: channelOnly ? (tracker) => void pushChannelNotice(server, tracker.notice) : null,
+    })
+  }
+
+  const payloadIsTerminal = (payload) => isTerminalStatus(payload?.wait?.status) || isTerminalStatus(payload?.job?.status ?? payload?.status)
+
+  // Plain (non-task) calls keep their exact result; when a notice or a reroute
+  // can apply, the supervisor follows the job in the background.
+  const withTracking = (tool, handler) => async (args, ctx) => {
+    const hooks = { attempts: [], route: null }
+    const payload = await handler(args, ctx, {
+      onAttempt: (a) => hooks.attempts.push(a),
+      onRoute: (r) => {
+        hooks.route = r
+      },
+    })
+    // A payload that already carries the job's terminal outcome (dispatch waited:
+    // waitMode attention/terminal) is final for the caller, who may now fall back
+    // on its own. Rerouting it would flip a failure the caller saw back to running
+    // and start a second dispatch next to the caller's, so such a job is only
+    // followed for the notice, never rerouted.
+    const allowReroute = !payloadIsTerminal(payload)
+    const wantsReroute = tool === 'dispatch' && allowReroute && rerouteOn && hooks.route?.remaining?.length > 0
+    if (channelOnly || wantsReroute) startTracking(tool, payload, hooks, args, ctx, { allowReroute })
+    return payload
+  }
+  const delegateInput = {
+    agent: agentEnum,
+    model: z.string().min(1),
+    task: z.string().min(1).describe('The prompt/task text.'),
+    cwd: z.string().min(1),
+    mode: modeEnum.optional().default('read'),
+    timeoutS: z.number().int().positive().optional(),
+    title: z.string().optional(),
+    variant: z.string().optional().describe('opencode reasoning effort (minimal/low/medium/high/max), or gentle-shell thinking level (--thinking); ignored by agy/copilot.'),
+    taskType: taskTypeArg,
+    profile: z.string().optional().describe(
+      'agys account to run an agy job on; omit for automatic quota/load-balanced selection. Only meaningful for agent "agy"; rejected for any other agent.'
+    ),
+    verify: z.array(VerifyCheckInput).optional().describe(
+      'Optional hub-run verification checks (argv kind at minimum), run in the foreground in the job cwd once it succeeds — never ask the agent to run tests/builds itself. See docs/verification.md.'
+    ),
+    isolation: isolationArg,
+    output: outputArg,
+    writeScope: writeScopeArg,
+  }
+
+  const delegateHandler = ({ agent, model, task, cwd, mode, timeoutS, title, variant, taskType, profile, verify, isolation, output, writeScope }, extra) => {
+    const res = delegateFn({ agent, model, task, cwd, mode, timeoutS, title, variant, taskType, profile, verify, isolation, output, writeScope })
+    // C1.2 origin mapping (best-effort, mapping-only): remember which
+    // harness session this job came from for a future wake-up bridge.
+    recordDispatchOrigin({ jobId: res?.jobId, extra, harness: null, env: process.env })
+    return res
+  }
+  taskTools.set('delegate', {
+    schema: z.object(delegateInput),
+    handler: delegateHandler,
+    track: (payload, hooks, args, ctx) => startTracking('delegate', payload, hooks, args, ctx),
+    ok: (payload) => ok(payload, payload),
+    fail,
+  })
+
   register(
     'delegate',
     {
@@ -433,31 +594,14 @@ export function buildServer() {
       description:
         'RAW ESCAPE HATCH: runs exactly the agent and model you name, with no routing, no policy recovery, no circuit ' +
         'breakers, no dispatch-key idempotency and no execution lineage. Most callers want dispatch(), which adds all of ' +
-        'those around the same task. Use delegate() only when you must pin one exact pair and handle failures yourself. ' +
+        'those around the same task. Use delegate() only when you must pin one exact pair and handle failures yourself: ' +
+        'a quota or auth failure here is final, nothing retries it or moves it to another agent, so for any write job that ' +
+        'could run on more than one agent call dispatch() instead. ' +
         'Returns {jobId, status:"queued"} immediately and never waits; ' +
-        'poll with job_wait or job_status, read with job_result. Write mode with a writeScope runs in a hub-managed ' +
+        'poll with job_wait or job_status, read with job_result (a client that declares the MCP tasks extension gets a task handle and is told when the job ends). Write mode with a writeScope runs in a hub-managed ' +
         'scratch copy and applies only its in-scope diff to your tree (no worktree); without a writeScope it requires cwd to be a secondary ' +
         '`git worktree add` checkout. Read jobs need no worktree: fan out several in parallel in your own checkout (see isolation). Codex (model "default") has a limited plan quota and is only a LAST fallback, never a primary.',
-      inputSchema: {
-        agent: agentEnum,
-        model: z.string().min(1),
-        task: z.string().min(1).describe('The prompt/task text.'),
-        cwd: z.string().min(1),
-        mode: modeEnum.optional().default('read'),
-        timeoutS: z.number().int().positive().optional(),
-        title: z.string().optional(),
-        variant: z.string().optional().describe('opencode reasoning effort (minimal/low/medium/high/max), or gentle-shell thinking level (--thinking); ignored by agy/copilot.'),
-        taskType: taskTypeArg,
-        profile: z.string().optional().describe(
-          'agys account to run an agy job on; omit for automatic quota/load-balanced selection. Only meaningful for agent "agy"; rejected for any other agent.'
-        ),
-        verify: z.array(VerifyCheckInput).optional().describe(
-          'Optional hub-run verification checks (argv kind at minimum), run in the foreground in the job cwd once it succeeds — never ask the agent to run tests/builds itself. See docs/verification.md.'
-        ),
-        isolation: isolationArg,
-        output: outputArg,
-        writeScope: writeScopeArg,
-      },
+      inputSchema: delegateInput,
       outputSchema: DelegateResponse,
       annotations: { readOnlyHint: false, openWorldHint: true },
     },
@@ -465,14 +609,56 @@ export function buildServer() {
     // for the job) -- do not reach for .then() here. guard() awaits whatever
     // the handler returns, so a plain object is correct. dispatch() below can
     // use .then() only because it really is async.
-    guard(({ agent, model, task, cwd, mode, timeoutS, title, variant, taskType, profile, verify, isolation, output, writeScope }, extra) => {
-      const res = delegateTool({ agent, model, task, cwd, mode, timeoutS, title, variant, taskType, profile, verify, isolation, output, writeScope })
+    guard(withTracking('delegate', delegateHandler))
+  )
+
+  const dispatchInput = {
+    task: z.string().min(1).describe('The prompt/task text.'),
+    cwd: z.string().min(1),
+    taskType: taskTypeArg.optional(),
+    mode: modeEnum.optional().describe(
+      'Explicit mode for every chain step (timeout, write lock, writeScope); a differing step mode is reported as modeOverride. ' +
+      'Omit to let each chain step\'s declared mode apply (fallback read). A writeScope requires an explicit mode "write".'
+    ),
+    workflowStep: z.string().optional().describe('Workflow step identifier used in key derivation.'),
+    dispatchKey: z.string().optional().describe('Explicit idempotency key. Defaults to sha256(task+cwd+taskType+workflowStep).'),
+    attempt: z.number().int().positive().optional().default(1),
+    parentExecutionId: z.string().optional(),
+    rootExecutionId: z.string().optional(),
+    timeoutS: z.number().int().positive().optional(),
+    waitMode: waitModeEnum.optional().describe('none: return at create/start; attention: also return on waiting/attention; terminal: terminal status only. Defaults to the harness profile.'),
+    harness: harnessEnum.optional().describe('Explicit harness profile; beats AGENT_HUB_HARNESS env and the MCP client hint.'),
+    profile: z.string().optional().describe(
+      'agys account to run an agy job on; omit for automatic quota/load-balanced selection. Only meaningful when the routed candidate is agent "agy"; rejected otherwise.'
+    ),
+    verify: z.array(VerifyCheckInput).optional().describe(
+      'Optional hub-run verification checks (argv kind at minimum), run in the foreground in the job cwd once it succeeds — never ask the agent to run tests/builds itself. See docs/verification.md.'
+    ),
+    isolation: isolationArg,
+    output: outputArg,
+    writeScope: writeScopeArg,
+    fanout: z.boolean().optional().describe('Also start the read-only parallelWith reviewer(s) declared on the routed chain step (e.g. adversarial-review: agy + copilot) and return them as parallelJobs; wait on all with job_wait({jobIds}). Default false.'),
+    label: z.string().min(1).optional().describe('Fan-out: a distinct label per call keeps N identical dispatches (e.g. parallel reviewers) from deduplicating into one job. Ignored when dispatchKey is given.'),
+    requirements: z
+      .array(z.string())
+      .optional()
+      .describe('Capability keys every routed candidate must have (same keys as route), on top of the taskType\'s own (ui-test requires browser). A candidate missing one is skipped.'),
+  }
+
+  const dispatchHandler = ({ task, taskType, cwd, mode, workflowStep, dispatchKey, attempt, parentExecutionId, rootExecutionId, timeoutS, waitMode, harness, profile, verify, isolation, label, output, fanout, writeScope, requirements }, extra, { onAttempt, onRoute } = {}) =>
+    dispatchFn({ task, taskType, cwd, mode, workflowStep, dispatchKey, attempt, parentExecutionId, rootExecutionId, timeoutS, waitMode, harness, profile, verify, isolation, label, output, fanout, writeScope, ...(requirements?.length ? { requirements } : {}), onAttempt, onRoute, clientHint: clientHintFromCtx(extra) }).then((res) => {
       // C1.2 origin mapping (best-effort, mapping-only): remember which
-      // harness session this job came from for a future wake-up bridge.
-      recordDispatchOrigin({ jobId: res?.jobId, extra, harness: null, env: process.env })
+      // harness session this dispatch came from for a future wake-up bridge.
+      recordDispatchOrigin({ jobId: res?.job?.jobId ?? res?.jobId, extra, harness: harness ?? null, env: process.env })
       return res
     })
-  )
+  taskTools.set('dispatch', {
+    schema: z.object(dispatchInput),
+    handler: dispatchHandler,
+    track: (payload, hooks, args, ctx) => startTracking('dispatch', payload, hooks, args, ctx),
+    ok: (payload) => ok(payload, payload),
+    fail,
+  })
 
   register(
     'dispatch',
@@ -486,50 +672,16 @@ export function buildServer() {
         'An explicit waitMode always beats the harness default; the MCP client hint only supplies that default. ' +
         'waiting≠failure — act via jules_interact/job_reply, then observe again. ' +
         'An explicit mode wins over every routed chain step\'s own mode (reported as modeOverride: {requested, stepMode} when they differ); ' +
-        'omit mode to let each chain step\'s declared mode apply (default read).',
-      inputSchema: {
-        task: z.string().min(1).describe('The prompt/task text.'),
-        cwd: z.string().min(1),
-        taskType: taskTypeArg.optional(),
-        mode: modeEnum.optional().describe(
-          'Explicit mode for every chain step (timeout, write lock, writeScope); a differing step mode is reported as modeOverride. ' +
-          'Omit to let each chain step\'s declared mode apply (fallback read). A writeScope requires an explicit mode "write".'
-        ),
-        workflowStep: z.string().optional().describe('Workflow step identifier used in key derivation.'),
-        dispatchKey: z.string().optional().describe('Explicit idempotency key. Defaults to sha256(task+cwd+taskType+workflowStep).'),
-        attempt: z.number().int().positive().optional().default(1),
-        parentExecutionId: z.string().optional(),
-        rootExecutionId: z.string().optional(),
-        timeoutS: z.number().int().positive().optional(),
-        waitMode: waitModeEnum.optional().describe('none: return at create/start; attention: also return on waiting/attention; terminal: terminal status only. Defaults to the harness profile.'),
-        harness: harnessEnum.optional().describe('Explicit harness profile; beats AGENT_HUB_HARNESS env and the MCP client hint.'),
-        profile: z.string().optional().describe(
-          'agys account to run an agy job on; omit for automatic quota/load-balanced selection. Only meaningful when the routed candidate is agent "agy"; rejected otherwise.'
-        ),
-        verify: z.array(VerifyCheckInput).optional().describe(
-          'Optional hub-run verification checks (argv kind at minimum), run in the foreground in the job cwd once it succeeds — never ask the agent to run tests/builds itself. See docs/verification.md.'
-        ),
-        isolation: isolationArg,
-        output: outputArg,
-        writeScope: writeScopeArg,
-        fanout: z.boolean().optional().describe('Also start the read-only parallelWith reviewer(s) declared on the routed chain step (e.g. adversarial-review: agy + copilot) and return them as parallelJobs; wait on all with job_wait({jobIds}). Default false.'),
-        label: z.string().min(1).optional().describe('Fan-out: a distinct label per call keeps N identical dispatches (e.g. parallel reviewers) from deduplicating into one job. Ignored when dispatchKey is given.'),
-        requirements: z
-          .array(z.string())
-          .optional()
-          .describe('Capability keys every routed candidate must have (same keys as route), on top of the taskType\'s own (ui-test requires browser). A candidate missing one is skipped.'),
-      },
+        'omit mode to let each chain step\'s declared mode apply (default read). ' +
+        'Prefer this over delegate(): it routes, retries and falls back, and a job that starts and then fails on quota ' +
+        'continues on the next routed fallback (at most 3 reroutes; a write job from the partial changes the failed attempt left). ' +
+        'A client that declares the MCP tasks extension gets a task handle and is told when the job ends or fails ' +
+        '(see docs/execution.md, "Job notifications over MCP").',
+      inputSchema: dispatchInput,
       outputSchema: DispatchResponse,
       annotations: { readOnlyHint: false, openWorldHint: true },
     },
-    guard(({ task, taskType, cwd, mode, workflowStep, dispatchKey, attempt, parentExecutionId, rootExecutionId, timeoutS, waitMode, harness, profile, verify, isolation, label, output, fanout, writeScope, requirements }, extra) =>
-      dispatch({ task, taskType, cwd, mode, workflowStep, dispatchKey, attempt, parentExecutionId, rootExecutionId, timeoutS, waitMode, harness, profile, verify, isolation, label, output, fanout, writeScope, ...(requirements?.length ? { requirements } : {}), clientHint: getMcpClientHint() }).then((res) => {
-        // C1.2 origin mapping (best-effort, mapping-only): remember which
-        // harness session this dispatch came from for a future wake-up bridge.
-        recordDispatchOrigin({ jobId: res?.job?.jobId ?? res?.jobId, extra, harness: harness ?? null, env: process.env })
-        return res
-      })
-    )
+    guard(withTracking('dispatch', dispatchHandler))
   )
 
   register(
@@ -1026,7 +1178,7 @@ export function buildServer() {
         'Validate a WorkflowPlan, materialize it and run it. REQUIRES approve:true — review the plan first (plan_task). ' +
         'Never executes an invalid plan and never partially executes.',
       inputSchema: {
-        plan: z.any().describe('The WorkflowPlan to execute.'),
+        plan: z.any().optional().describe('The WorkflowPlan to execute.'),
         approve: z.boolean().describe('Must be true; confirms the plan was reviewed.'),
       },
     },
@@ -1237,6 +1389,10 @@ export function buildServer() {
     })
   )
 
+  if (withTasks) {
+    installTaskSupport(server, { tools: taskTools, supervisor, readResultFn: deps.readResult ?? readResult, env })
+  }
+
   return server
 }
 
@@ -1326,12 +1482,10 @@ async function main() {
   // Deliberately NOT startScheduler(): this MCP server is a per-session stdio
   // process, and the dashboard already runs the scheduler as the one
   // long-lived process. Two schedulers would double-fire every schedule.
-  const server = buildServer()
-  await server.connect(new StdioServerTransport())
-  // Best-effort: the handshake may complete after connect() resolves, but
-  // getMcpClientHint() also reads it live on every dispatch, so a miss here
-  // is harmless — this is just the earliest capture point.
-  captureClientHintFromServer(server)
+  // serveStdio serves 2026-07-28 clients (server/discover, per-request capabilities,
+  // tasks) and legacy 2025-era clients (initialize) from the same factory; one
+  // server instance is pinned per connection.
+  serveStdio(() => buildServer())
   log(`ready — state dir ${paths().home}`)
 }
 
