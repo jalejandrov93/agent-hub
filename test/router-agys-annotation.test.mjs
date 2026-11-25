@@ -28,7 +28,7 @@ test('with AGENT_HUB_AGYS set, agy candidates carry profiles[] and the primary/f
     ],
   })
 
-  // taskType 'recon': primary is agy gemini-3.8-flash-low, fallbacks are opencode, claude
+  // taskType 'recon': primary is agy gemini-4-hydrogen-low, fallbacks are opencode, claude
   const baseline = await route({ taskType: 'recon', env: { AGENT_HUB_HOME: home } })
   assert.equal(baseline.primary.agent, 'agy')
   assert.equal('profiles' in baseline.primary, false)
@@ -106,14 +106,14 @@ test('with AGENT_HUB_AGYS set, each agy candidate resolves profiles for its OWN 
     return { profile: 'work', status: 'selected', profiles: [{ name: 'work', status: 'selected' }] }
   }
 
-  // research: opencode, opencode, agy gemini-3.8-flash-medium (only one agy candidate)
+  // research: opencode, opencode, agy gemini-4-hydrogen-medium (only one agy candidate)
   await route({
     taskType: 'research',
     env: { AGENT_HUB_HOME: home, AGENT_HUB_AGYS: 'auto' },
     _resolveAgyProfileSync: fakeResolver,
   })
 
-  assert.deepEqual(seenModels, ['gemini-3.8-flash-medium'])
+  assert.deepEqual(seenModels, ['gemini-4-hydrogen-medium'])
 })
 
 test('without AGENT_HUB_AGYS set, output has no profiles key', async () => {

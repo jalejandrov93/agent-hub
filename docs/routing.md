@@ -39,18 +39,18 @@ passes availability filtering, plus the rest as fallbacks:
 
 | Task type | Primary | Fallbacks | Why |
 |---|---|---|---|
-| `recon` | agy gemini-3.8-flash-low | opencode muse-spark-1.3 → claude haiku | proven context compression, cheap refreshable quota |
-| `call-chain-trace` | agy gemini-3.8-flash-high | opencode nemotron-3-ultra → claude sonnet | needs multi-hop reasoning, 1M ctx |
-| `research` | opencode muse-spark-1.3 | opencode mimo-v2.5 → agy gemini-3.8-flash-medium | zero cost, 1M ctx |
+| `recon` | agy gemini-4-hydrogen-low | opencode muse-spark-1.3 → claude haiku | proven context compression, cheap refreshable quota |
+| `call-chain-trace` | agy gemini-4-hydrogen-high | opencode nemotron-3-ultra → claude sonnet | needs multi-hop reasoning, 1M ctx |
+| `research` | opencode muse-spark-1.3 | opencode mimo-v2.5 → agy gemini-4-hydrogen-medium | zero cost, 1M ctx |
 | `triage` | opencode muse-spark-1.3 | copilot auto → codex default | lowest latency |
-| `second-opinion` | agy gemini-3.8-flash-high | copilot auto | different model lineage than Claude Code |
+| `second-opinion` | agy gemini-4-hydrogen-high | copilot auto | different model lineage than Claude Code |
 | `adversarial-review` | agy claude-sonnet-4-6 (parallel with copilot auto) | agy claude-opus-4-6-thinking | dual blind review off the Claude Code quota |
 | `github-context` | copilot auto | — | built-in GitHub MCP; cheap models keep premium quota |
-| `mechanical-edit` | agy gemini-3.8-flash-medium (write) | opencode deepseek-v4-flash (write) → copilot auto (write) → codex default (write) | cheap write-capable; single writer |
+| `mechanical-edit` | agy gemini-4-hydrogen-medium (write) | opencode deepseek-v4-flash (write) → copilot auto (write) → codex default (write) | cheap write-capable; single writer |
 | `implementation-with-repo-rules` | claude sonnet | — | only Claude Code loads CLAUDE.md + skills + hooks |
 | `architecture` | claude opus | agy claude-opus-4-6-thinking | highest reasoning |
 | `structured-mechanical` | claude haiku | — | cheapest Claude tier |
-| `ui-test` | agy gemini-3.8-flash-high | agy claude-sonnet-4-6 | requires `browser`; drives a Playwright MCP server ([setup](providers/agy.md#browser--ui-testing-ui-test)) |
+| `ui-test` | agy gemini-4-hydrogen-high | agy claude-sonnet-4-6 | requires `browser`; drives a Playwright MCP server ([setup](providers/agy.md#browser--ui-testing-ui-test)) |
 
 Codex is only ever a last fallback, for small bounded tasks: its plan quota is
 limited, and every call carries a baseline of about 17,000 input tokens (its own

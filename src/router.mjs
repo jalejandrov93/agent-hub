@@ -28,7 +28,7 @@ export const DELEGATION_MAP = {
   recon: {
     why: 'proven context compression, cheap refreshable quota',
     chain: [
-      { agent: 'agy', model: 'gemini-3.8-flash-low', mode: 'read' },
+      { agent: 'agy', model: 'gemini-4-hydrogen-low', mode: 'read' },
       { agent: 'opencode', model: 'opencode/muse-spark-1.3-contributor-free', mode: 'read' },
       { agent: 'claude', model: 'haiku' },
     ],
@@ -36,7 +36,7 @@ export const DELEGATION_MAP = {
   'call-chain-trace': {
     why: 'needs multi-hop reasoning, 1M ctx',
     chain: [
-      { agent: 'agy', model: 'gemini-3.8-flash-high', mode: 'read' },
+      { agent: 'agy', model: 'gemini-4-hydrogen-high', mode: 'read' },
       { agent: 'opencode', model: 'opencode/nemotron-3-ultra-free', mode: 'read' },
       { agent: 'claude', model: 'sonnet' },
     ],
@@ -46,7 +46,7 @@ export const DELEGATION_MAP = {
     chain: [
       { agent: 'opencode', model: 'opencode/muse-spark-1.3-contributor-free', mode: 'read' },
       { agent: 'opencode', model: 'opencode/mimo-v2.5-free', mode: 'read' },
-      { agent: 'agy', model: 'gemini-3.8-flash-medium', mode: 'read' },
+      { agent: 'agy', model: 'gemini-4-hydrogen-medium', mode: 'read' },
     ],
   },
   triage: {
@@ -67,7 +67,7 @@ export const DELEGATION_MAP = {
   'second-opinion': {
     why: 'different model lineage than Claude Code',
     chain: [
-      { agent: 'agy', model: 'gemini-3.8-flash-high', mode: 'read' },
+      { agent: 'agy', model: 'gemini-4-hydrogen-high', mode: 'read' },
       { agent: 'copilot', model: 'auto', mode: 'read' },
     ],
   },
@@ -90,7 +90,7 @@ export const DELEGATION_MAP = {
     chain: [
       // agy first: refreshable plan quota, load-balanced across profiles;
       // deepseek is paid per token, so it only runs when agy is unavailable.
-      { agent: 'agy', model: 'gemini-3.8-flash-medium', mode: 'write' },
+      { agent: 'agy', model: 'gemini-4-hydrogen-medium', mode: 'write' },
       { agent: 'opencode', model: 'deepseek/deepseek-v4-flash', mode: 'write' },
       { agent: 'copilot', model: 'auto', mode: 'write' },
       // LAST resort only: codex's plan quota is limited (see config.mjs).
@@ -118,7 +118,7 @@ export const DELEGATION_MAP = {
     // capabilities.mjs): agy only qualifies when its MCP config has an
     // enabled Playwright server. Default timeout comes from TASK_TYPE_TIMEOUTS_S.
     chain: [
-      { agent: 'agy', model: 'gemini-3.8-flash-high', mode: 'read' },
+      { agent: 'agy', model: 'gemini-4-hydrogen-high', mode: 'read' },
       { agent: 'agy', model: 'claude-sonnet-4-6', mode: 'read' },
     ],
   },

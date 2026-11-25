@@ -19,13 +19,13 @@ test('route() without the new options returns the same primary/fallbacks as befo
   const result = await route({ taskType: 'recon' })
 
   assert.equal(result.primary.agent, 'agy')
-  assert.equal(result.primary.model, 'gemini-3.8-flash-low')
+  assert.equal(result.primary.model, 'gemini-4-hydrogen-low')
   assert.ok(Array.isArray(result.fallbacks))
   assert.equal(result.fallbacks.length, 2)
   assert.ok(Array.isArray(result.ranking))
   assert.equal(result.ranking.length, 3)
   assert.equal(result.ranking[0].agent, 'agy')
-  assert.equal(result.ranking[0].model, 'gemini-3.8-flash-low')
+  assert.equal(result.ranking[0].model, 'gemini-4-hydrogen-low')
   assert.ok('score' in result.ranking[0])
   assert.ok(Array.isArray(result.ranking[0].reasons))
 })
@@ -59,14 +59,14 @@ test('adaptive: true with two eligible candidates where the second has better qu
 
   const mockMetrics = () => ({
     rows: [
-      { agent: 'agy', model: 'gemini-3.8-flash-low', qualityScore: 4, taskType: 'recon' },
+      { agent: 'agy', model: 'gemini-4-hydrogen-low', qualityScore: 4, taskType: 'recon' },
       { agent: 'opencode', model: 'opencode/muse-spark-1.3-contributor-free', qualityScore: 9, taskType: 'recon' },
     ],
   })
 
   const nonAdaptive = await route({ taskType: 'recon', adaptive: false, _computeMetrics: mockMetrics })
   assert.equal(nonAdaptive.primary.agent, 'agy')
-  assert.equal(nonAdaptive.primary.model, 'gemini-3.8-flash-low')
+  assert.equal(nonAdaptive.primary.model, 'gemini-4-hydrogen-low')
 
   const adaptiveRes = await route({ taskType: 'recon', adaptive: true, _computeMetrics: mockMetrics })
   assert.equal(adaptiveRes.primary.agent, 'opencode')
@@ -80,7 +80,7 @@ test('preferences: { cost: 1 } picks the cheaper candidate when costUsdAvg diffe
 
   const mockMetrics = () => ({
     rows: [
-      { agent: 'agy', model: 'gemini-3.8-flash-low', qualityScore: 9, costUsdAvg: 0.05, taskType: 'recon' },
+      { agent: 'agy', model: 'gemini-4-hydrogen-low', qualityScore: 9, costUsdAvg: 0.05, taskType: 'recon' },
       { agent: 'opencode', model: 'opencode/muse-spark-1.3-contributor-free', qualityScore: 5, costUsdAvg: 0.001, taskType: 'recon' },
     ],
   })
@@ -126,8 +126,8 @@ test('metrics lookup prefers taskType match over other taskTypes for the same ag
 
   const mockMetrics = () => ({
     rows: [
-      { agent: 'agy', model: 'gemini-3.8-flash-low', qualityScore: 9, taskType: 'triage' },
-      { agent: 'agy', model: 'gemini-3.8-flash-low', qualityScore: 2, taskType: 'recon' },
+      { agent: 'agy', model: 'gemini-4-hydrogen-low', qualityScore: 9, taskType: 'triage' },
+      { agent: 'agy', model: 'gemini-4-hydrogen-low', qualityScore: 2, taskType: 'recon' },
       { agent: 'opencode', model: 'opencode/muse-spark-1.3-contributor-free', qualityScore: 6, taskType: 'recon' },
     ],
   })
@@ -141,7 +141,7 @@ test('metrics are read through the injected computeMetrics, never from a file', 
   const { route } = await fresh(home)
   const mockMetrics = () => ({
     rows: [
-      { agent: 'agy', model: 'gemini-3.8-flash-low', qualityScore: 3, taskType: 'recon' },
+      { agent: 'agy', model: 'gemini-4-hydrogen-low', qualityScore: 3, taskType: 'recon' },
       { agent: 'opencode', model: 'opencode/muse-spark-1.3-contributor-free', qualityScore: 8, taskType: 'recon' },
     ],
   })
