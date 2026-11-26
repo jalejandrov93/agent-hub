@@ -56,7 +56,7 @@ If `agent-hub` is not registered in this session, use the wrapper script directl
   [--max-lines N] [--timeout S] [--write] [--raw] [--cwd DIR]
 ```
 
-Aliases resolve to `gemini-3.8-flash-{low,medium,high}`, `gemini-3.1-pro-high` (`pro`),
+Aliases resolve to `gemini-4-hydrogen-{low,medium,high}`, `gemini-3.1-pro-high` (`pro`),
 `claude-sonnet-4-6` (`sonnet`), `claude-opus-4-6-thinking` (`opus`), `gpt-oss-120b-medium`
 (`oss`) — check them against your own `agy models` output, since agy's catalog moves over time.
 It writes the full response to the scratchpad and prints only a header (`model · seconds ·

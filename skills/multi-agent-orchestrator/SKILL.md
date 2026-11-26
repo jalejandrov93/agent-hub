@@ -178,24 +178,24 @@ files, you paid two quotas for one answer. Delegate when the answer is a *locati
 
 | taskType | Primary | Fallback(s) | Why |
 |---|---|---|---|
-| `recon` | agy `gemini-3.8-flash-low` | opencode `@free` → Claude `haiku` | proven context compression, cheap refreshable quota |
-| `call-chain-trace` | agy `gemini-3.8-flash-high` | opencode `@free` → opencode `@go` → Claude `sonnet` | needs multi-hop reasoning, 1M ctx |
-| `research` | opencode `@free` (up to 2 models) | agy `gemini-3.8-flash-medium` | zero cost, 1M ctx |
+| `recon` | agy `gemini-4-hydrogen-low` | opencode `@free` → Claude `haiku` | proven context compression, cheap refreshable quota |
+| `call-chain-trace` | agy `gemini-4-hydrogen-high` | opencode `@free` → opencode `@go` → Claude `sonnet` | needs multi-hop reasoning, 1M ctx |
+| `research` | opencode `@free` (up to 2 models) | agy `gemini-4-hydrogen-medium` | zero cost, 1M ctx |
 | `triage` | opencode `@free` | copilot `auto` | lowest latency |
-| `second-opinion` | agy `gemini-3.8-flash-high` | copilot `auto` | different model lineage than Claude Code |
+| `second-opinion` | agy `gemini-4-hydrogen-high` | copilot `auto` | different model lineage than Claude Code |
 | `adversarial-review` | agy `claude-sonnet-4-6` **parallel with** copilot `auto` | agy `claude-opus-4-6-thinking` | dual blind review off the Claude Code quota |
 | `github-context` | copilot `auto` | — | built-in GitHub MCP; no second fallback (see copilot.md) |
-| `mechanical-edit` | agy `gemini-3.8-flash-medium` (write) | opencode `@go` (write) → copilot `auto` (write) | cheap write-capable; single writer |
+| `mechanical-edit` | agy `gemini-4-hydrogen-medium` (write) | opencode `@go` (write) → copilot `auto` (write) | cheap write-capable; single writer |
 | `implementation-with-repo-rules` | Claude `sonnet` (Agent tool) | — | only Claude Code loads CLAUDE.md + skills + hooks |
 | `architecture` | Claude `opus` (Agent tool) | agy `claude-opus-4-6-thinking` | highest reasoning |
 | `structured-mechanical` | Claude `haiku` (Agent tool) | — | cheapest Claude tier |
-| `ui-test` | agy `gemini-3.8-flash-high` | agy `claude-sonnet-4-6` | drives a real browser through Playwright MCP; requires `browser` (page must already be running) |
+| `ui-test` | agy `gemini-4-hydrogen-high` | agy `claude-sonnet-4-6` | drives a real browser through Playwright MCP; requires `browser` (page must already be running) |
 
 Unknown `taskType` throws — call `route` with one of the exact strings above.
 
 ## What each CLI's models are good for
 
-- **agy** (Antigravity): `gemini-3.8-flash-{low,medium,high}` for recon → call-chain-trace
+- **agy** (Antigravity): `gemini-4-hydrogen-{low,medium,high}` for recon → call-chain-trace
   by size; `gemini-3.1-pro-{low,high}` for a second architectural opinion; `claude-sonnet-4-6`
   / `claude-opus-4-6-thinking` are Claude models hosted *inside* Antigravity — adversarial
   review and architecture judgment at zero Claude-quota cost. Full detail:

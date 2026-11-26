@@ -248,7 +248,7 @@ profile with its own `HOME`, so each profile reads its own
    base config; pinned profile: that profile; `auto`: any profile).
 
 4. Dispatch with `taskType: 'ui-test'` (read mode, agy
-   `gemini-3.8-flash-high`, fallback agy `claude-sonnet-4-6`, default timeout
+   `gemini-4-hydrogen-high`, fallback agy `claude-sonnet-4-6`, default timeout
    at least 1800 s). The page must already be reachable: the agy guard tells the
    job to use MCP browser tools and not to start a dev server.
    Screenshots and page snapshots the job writes under `.playwright-mcp/`

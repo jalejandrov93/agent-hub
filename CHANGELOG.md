@@ -170,6 +170,10 @@ and this project adheres to [Semantic Versioning](https://semver.org/).
 
 ### Changed
 
+- agy's primary model is now `gemini-4-hydrogen-{low,medium,high}` in every
+  delegation-map chain (same effort tier per task type) and in the `agy-delegate`
+  aliases; `gemini-3.8-flash-*` stays registered because agy still serves it.
+
 - MCP SDK 1.x -> 2.x: `@modelcontextprotocol/sdk` is replaced by
   `@modelcontextprotocol/server` ~2.4.0, pinned to the minor because task support wraps an underscored SDK hook (`@modelcontextprotocol/client` for tests)
   and `zod` 3.25 -> ^4.6.7. The stdio entry is `serveStdio`, which serves 2026-07-28

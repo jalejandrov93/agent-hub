@@ -24,13 +24,15 @@ delegating.
 > Author's setup (verified 2026-09-11, agy 1.2.1): the aliases below matched `agy models`'s
 > output, superseding a 2026-09-01 reading — the CLI had moved from `gemini-3.7-flash-*` to
 > `gemini-3.8-flash-*`, and `agy-run.sh`'s aliases were updated to match. Re-verify against your
-> own `agy models` output; alias-to-id mappings shift as agy's catalog moves.
+> own `agy models` output; alias-to-id mappings shift as agy's catalog moves. On 2026-11-25
+> the aliases moved to `gemini-4-hydrogen-*` (agy's catalog lists them alongside the older
+> `gemini-3.8-flash-*`); latency for the hydrogen tier has not been measured yet.
 
 | Alias | Model id | Use it for | Measured latency |
 |---|---|---|---|
-| `low` | `gemini-3.8-flash-low` | Single-file facts, inventories, greps, counts | 4–10s |
-| `medium` | `gemini-3.8-flash-medium` | Multi-file lookups with light reasoning | ~15s |
-| `high` | `gemini-3.8-flash-high` | Call chains, cross-module tracing | 30–110s |
+| `low` | `gemini-4-hydrogen-low` | Single-file facts, inventories, greps, counts | — |
+| `medium` | `gemini-4-hydrogen-medium` | Multi-file lookups with light reasoning | — |
+| `high` | `gemini-4-hydrogen-high` | Call chains, cross-module tracing | — |
 | `pro` | `gemini-3.1-pro-high` | Dense reasoning, design critique | slow |
 | `sonnet` | `claude-sonnet-4-6` | Adversarial review, second opinion | — |
 | `opus` | `claude-opus-4-6-thinking` | Hardest review, disagreement resolution | — |

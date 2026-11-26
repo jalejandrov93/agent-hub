@@ -39,9 +39,9 @@ agy -p "<task>" --output-format stream-json --model <model> --mode plan|accept-e
 
 | Model | Tier | Use it for |
 |---|---|---|
-| `gemini-3.8-flash-low` | cheap | recon, single-file facts, inventories, greps, counts (4-10s) |
-| `gemini-3.8-flash-medium` | cheap | multi-file lookups with light reasoning (~15s) |
-| `gemini-3.8-flash-high` | mid | call-chain-trace, cross-module tracing, 1M ctx (30-110s) |
+| `gemini-4-hydrogen-low` | cheap | recon, single-file facts, inventories, greps, counts |
+| `gemini-4-hydrogen-medium` | cheap | multi-file lookups with light reasoning |
+| `gemini-4-hydrogen-high` | mid | call-chain-trace, cross-module tracing, 1M ctx |
 | `gemini-3.1-pro-low` / `-high` | mid / expensive | second architectural opinion, dense reasoning |
 | `claude-sonnet-4-6` | mid | adversarial diff review, judge (hosted Claude, zero Claude-quota cost) |
 | `claude-opus-4-6-thinking` | expensive | architecture, hardest review, disagreement resolution |

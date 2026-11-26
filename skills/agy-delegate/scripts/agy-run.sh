@@ -62,9 +62,9 @@ command -v jq  >/dev/null 2>&1 || { echo "agy-run: jq not found in PATH" >&2; ex
 # ── Model aliases ─────────────────────────────────────────────────────────────
 # Verified against `agy models` (2026-09-11, agy 1.2.1).
 case "$MODEL_ALIAS" in
-  low)    MODEL="gemini-3.8-flash-low" ;;
-  medium) MODEL="gemini-3.8-flash-medium" ;;
-  high)   MODEL="gemini-3.8-flash-high" ;;
+  low)    MODEL="gemini-4-hydrogen-low" ;;
+  medium) MODEL="gemini-4-hydrogen-medium" ;;
+  high)   MODEL="gemini-4-hydrogen-high" ;;
   pro)    MODEL="gemini-3.1-pro-high" ;;
   sonnet) MODEL="claude-sonnet-4-6" ;;
   opus)   MODEL="claude-opus-4-6-thinking" ;;
