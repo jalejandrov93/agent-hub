@@ -108,6 +108,83 @@ specific client: `generic` (`waitMode: none`), `claude-code` (`attention`), and
     reading service URL and credentials from `~/.local/state/opencode/service.json`
     (`AGENT_HUB_OPENCODE_SERVICE_FILE`). Delivery never throws.
 
+## Job notifications over MCP
+
+`delegate` and `dispatch` return as soon as the job starts, so a client that
+does not poll `job_status` never learns that the job failed (for example on a
+quota error). The hub follows the jobs a call started and tells the client; the
+code is in `src/notify/mcp-*.mjs` and `src/reroute.mjs`, lives for the MCP
+session only, and never touches `events.jsonl`.
+
+**MCP tasks** (the `io.modelcontextprotocol/tasks` extension of protocol revision
+2026-07-28, which is what Claude Code speaks). The server advertises the extension
+in `server/discover`. A client that declares it in the per-request capabilities
+(`_meta["io.modelcontextprotocol/clientCapabilities"].extensions`) and calls
+`delegate` or `dispatch` gets a task handle (`resultType: "task"`, `taskId` = the
+first job id) at once; `dispatch` is started with `waitMode: "none"` for such a
+call. The client polls `tasks/get`: `working`, then `completed` (`result` holds
+the final notice) or `failed` (`error.message` and `error.data` carry `errorKind`,
+`error`, `agent`/`model`, `attempts[]` and `reroutes`). `tasks/cancel` cancels the
+job that is running now and stops rerouting; `tasks/update` is acknowledged (the
+hub never asks a task for input). `tasks/get` also answers from the job record
+when this process has no tracker (after a restart), without `attempts`. A call
+from a client that did not declare the extension (a legacy 2025-era connection, a
+2026 client without it) and every other tool is served as before, byte for byte.
+`AGENT_HUB_MCP_TASKS=off` turns the extension off. Claude Code reports a finished
+task to the session and starts on it if the session is idle; its main-conversation
+calls move to the background after two minutes (`CLAUDE_CODE_MCP_AUTO_BACKGROUND_MS`).
+
+**Reroute after quota.** `dispatch` recovers (retry, fallback) only while a job
+fails to start. A job that starts and then fails on a quota or rate-limit error
+(`errorKind: quota`, or an unclassified error whose text matches, for example
+`Individual quota reached` or `copilot quota/rate limit`) is rerouted by the hub
+to the next routed fallback, as a new `dispatch` pinned to that candidate with
+the same lineage (`parentExecutionId`/`rootExecutionId`), at most 3 times
+(`AGENT_HUB_REROUTE_MAX`; `AGENT_HUB_REROUTE=off` disables it). A write job's
+next attempt starts from the partial work, not a clean tree: a worktree job's
+edits are still there, and a scoped writer's saved in-scope patch
+(`scratchWrite.patchPath`) is applied to the tree first; either way the task
+text gets a note naming the failed attempt and telling the agent to run
+`git status`/`git diff` and continue from there. Read jobs rerun unchanged. Any
+other `errorKind` ends the dispatch as before. Rerouting applies to every
+`dispatch` MCP call whose result did not already carry the job's terminal
+outcome: when `dispatch` waited (`waitMode` `attention`/`terminal`, the Claude
+Code default) and returned the job `failed`, that failure is final for the
+caller and the hub never reroutes it (the caller may fall back on its own). The
+attempts and why each ended (`attempts[]`, `reroutes`) are in the notice. A
+client that does not use tasks sees the reroute through the original job id:
+`job_status`/`job_wait`/`job_result` report the last attempt (`status` stays
+`running` while the chain runs) plus `reroutedTo` (the successor), `finalJobId`
+and `rerouting`; a job that never rerouted has none of those keys. The job is
+marked as reroutable (`rerouteArmed` on its record) before its id reaches the
+caller, so `job_wait` never returns a quota failure that the hub is about to
+reroute. `job_cancel` on any id of the chain stops the whole chain: it cancels
+the attempt that is running, a reroute that is still starting does not go on
+(its successor is cancelled as soon as it exists), and the response carries
+`rerouteCancelled: true`. `tasks/cancel` during a reroute also stops the
+successor. A reroute that is still being decided or started reads as `running`
+for at most 5 minutes; after that (the server died mid-reroute) the job reads
+as what it is, `failed`. Only an MCP `dispatch` call reroutes:
+the workflow engine and direct `dispatch()` callers keep their own retry policy.
+
+**Claude Code channel** (opt in, `AGENT_HUB_CHANNEL=1`), for legacy 2025-era
+connections only. The server declares `experimental['claude/channel']` and pushes
+one `notifications/claude/channel` event at the terminal state of every job a
+plain `delegate`/`dispatch` call started, which Claude Code renders as a
+`<channel source="agent-hub" ...>` message. Claude Code has to load the server as
+a channel (`claude --dangerously-load-development-channels server:agent-hub`
+while channels are a research preview) and does not register channels on
+protocol revision 2026-07-28, where tasks do the job.
+
+Limits that matter:
+
+- `delegate` never reroutes: a quota failure there is final, so prefer `dispatch`.
+- A scoped writer's partial patch that no longer applies cleanly is left at its
+  `scope.patch` path and named in the next attempt's task text.
+- `job_wait` is unchanged: it already blocks until terminal or attention.
+- A Jules session that needs attention (`AWAITING_*`/`PAUSED`) is not pushed;
+  `job_wait`/`jules_wait` still report it.
+
 ## Task assignments
 
 An assignment keeps one plan task in one agent's native CLI session across
@@ -257,8 +334,14 @@ read-only through alternates but has its own refs, config and index and no
 commands the agent runs in the copy (commit, branch, config) never reach the
 caller. The CLI runs in the same subdirectory of the copy as the caller's
 `cwd`, and the copy is removed when the job ends; what the agent wrote there is
-reported as `isolation.discardedPaths` and thrown away. The caller's tree and
-index are only read (`git --no-optional-locks`).
+reported as `isolation.discardedPaths` and thrown away. The one exception is
+browser evidence: files written under `.playwright-mcp/` (Playwright MCP
+screenshots and page snapshots) are first copied to
+`runs/<jobId>/artifacts/`, keeping their relative paths, and listed as
+`isolation.artifacts`. The directory is read from disk, so this works when
+`.playwright-mcp/` is gitignored; files identical to the caller's tree are not
+kept. The caller's tree and index are only read
+(`git --no-optional-locks`).
 
 What the copy cannot stop: an agent that writes to an **absolute path** inside
 the caller's tree. The warn guard on the caller's tree reports that as
