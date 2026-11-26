@@ -69,8 +69,8 @@ test('capabilitiesFor: browser is false without env and for non-agy agents; dete
   const home = tmpHome()
   writeConfig(home, { mcpServers: { playwright: PLAYWRIGHT } })
   const env = { HOME: home, AGENT_HUB_HOME: home, AGENT_HUB_AGYS: 'off' }
-  assert.equal(capabilitiesFor('agy', 'gemini-3.8-flash-high').browser, false)
-  assert.equal(capabilitiesFor('agy', 'gemini-3.8-flash-high', { env }).browser, true)
+  assert.equal(capabilitiesFor('agy', 'gemini-4-hydrogen-high').browser, false)
+  assert.equal(capabilitiesFor('agy', 'gemini-4-hydrogen-high', { env }).browser, true)
   assert.equal(capabilitiesFor('opencode', 'x', { env }).browser, false)
   assert.deepEqual(requirementsFor('ui-test', ['read', 'browser']), ['browser', 'read'])
 })
@@ -93,7 +93,7 @@ test('route: ui-test skips agy candidates with missing_capabilities:browser unti
   writeConfig(path.join(home, '.agys', 'profiles', 'work'), { mcpServers: { playwright: PLAYWRIGHT } })
   const withBrowser = await route({ taskType: 'ui-test', env, ...deps })
   assert.equal(withBrowser.primary.agent, 'agy')
-  assert.equal(withBrowser.primary.model, 'gemini-3.8-flash-high')
+  assert.equal(withBrowser.primary.model, 'gemini-4-hydrogen-high')
   assert.equal(withBrowser.primary.mode, 'read')
 })
 
@@ -271,8 +271,8 @@ test('ui-test jobs: agy guard allows MCP browser tools and the default timeout i
   assert.ok(browser[1].includes(AGY_BROWSER_TOOLS_NOTE))
 
   const noMetrics = () => null
-  const recon = resolveEffectiveTimeoutS({ agent: 'agy', model: 'gemini-3.8-flash-high', taskType: 'recon', metricsForFn: noMetrics })
-  const uiTest = resolveEffectiveTimeoutS({ agent: 'agy', model: 'gemini-3.8-flash-high', taskType: 'ui-test', metricsForFn: noMetrics })
+  const recon = resolveEffectiveTimeoutS({ agent: 'agy', model: 'gemini-4-hydrogen-high', taskType: 'recon', metricsForFn: noMetrics })
+  const uiTest = resolveEffectiveTimeoutS({ agent: 'agy', model: 'gemini-4-hydrogen-high', taskType: 'ui-test', metricsForFn: noMetrics })
   assert.equal(recon.timeoutS, 900)
   assert.equal(uiTest.timeoutS, 1800)
 })
@@ -287,7 +287,7 @@ test('startJob records a warning when a browser-requiring agy job runs on a prof
   delete env.AGENT_HUB_AGYS_PROFILE
   const handle = startJob({
     agent: 'agy',
-    model: 'gemini-3.8-flash-high',
+    model: 'gemini-4-hydrogen-high',
     task: 'open the page',
     cwd: home,
     taskType: 'ui-test',

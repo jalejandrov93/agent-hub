@@ -173,6 +173,10 @@ export const TASK_TYPE_TIMEOUTS_S = { 'ui-test': 1800 }
 // 90s/180s defaults — agy's own --print-timeout then abandons the turn.
 export const DEFAULT_TIMEOUTS_S = {
   agy: {
+    'gemini-4-hydrogen-low': 300,
+    'gemini-4-hydrogen-medium': 600,
+    'gemini-4-hydrogen-high': 900,
+    'gemini-4-hydrogen-xhigh': 1200,
     'gemini-3.8-flash-low': 300,
     'gemini-3.8-flash-medium': 600,
     'gemini-3.8-flash-high': 900,
@@ -249,6 +253,10 @@ export function resolveVariant(agent, model, override) {
  */
 export const MODEL_REGISTRY = {
   agy: {
+    'gemini-4-hydrogen-low': { tier: 'cheap', dataPolicy: 'unknown', strengths: 'recon, summarize huge artifacts' },
+    'gemini-4-hydrogen-medium': { tier: 'cheap', dataPolicy: 'unknown', strengths: 'general read/write tasks' },
+    'gemini-4-hydrogen-high': { tier: 'mid', dataPolicy: 'unknown', strengths: 'cross-module call-chain trace, second opinion, ui-test' },
+    'gemini-4-hydrogen-xhigh': { tier: 'mid', dataPolicy: 'unknown', strengths: 'hardest reasoning on the agy gemini line' },
     'gemini-3.8-flash-low': { tier: 'cheap', dataPolicy: 'unknown', strengths: 'recon, summarize huge artifacts' },
     'gemini-3.8-flash-medium': { tier: 'cheap', dataPolicy: 'unknown', strengths: 'general read/write tasks' },
     'gemini-3.8-flash-high': { tier: 'mid', dataPolicy: 'unknown', strengths: 'cross-module call-chain trace, 1M ctx' },

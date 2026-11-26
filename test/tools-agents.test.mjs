@@ -153,11 +153,11 @@ test('agentsStatusTool: tier/tierSource fall back to the MODEL_REGISTRY tier whe
   const { agentsStatusTool } = await fresh(home)
   const runner = fakeRunner([
     ['--version', { stdout: 'v', stderr: '', code: 0 }],
-    [/models|help config/, { stdout: 'gemini-3.8-flash-low\tlabel\n', stderr: '', code: 0 }],
+    [/models|help config/, { stdout: 'gemini-4-hydrogen-low\tlabel\n', stderr: '', code: 0 }],
   ])
 
   const rows = await agentsStatusTool({ cwd: '/tmp', env: { AGENT_HUB_HOME: home }, commandRunner: runner })
-  const row = rows.find((r) => r.agent === 'agy' && r.model === 'gemini-3.8-flash-low')
+  const row = rows.find((r) => r.agent === 'agy' && r.model === 'gemini-4-hydrogen-low')
   assert.equal(row.tier, 'cheap')
   assert.equal(row.tierSource, 'registry')
   // Without an opencode catalog no pool resolves, so no opencode model is checked.

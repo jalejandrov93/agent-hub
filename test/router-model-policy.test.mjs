@@ -54,7 +54,7 @@ test('S2: route expands @free to allowed catalog models in policy order, keeping
 
   const result = await route({ taskType: 'research', env })
   assert.deepEqual(pick(result.primary), { agent: 'opencode', model: 'opencode/nemotron-3.5-super-vl-free', mode: 'read', pool: 'free' })
-  assert.deepEqual(result.fallbacks.map((c) => `${c.agent}:${c.model}`), ['opencode:opencode/glm-5.3-flash-free', 'agy:gemini-3.8-flash-medium'])
+  assert.deepEqual(result.fallbacks.map((c) => `${c.agent}:${c.model}`), ['opencode:opencode/glm-5.3-flash-free', 'agy:gemini-4-hydrogen-medium'])
   assert.equal(result.skipped.length, 0)
 })
 

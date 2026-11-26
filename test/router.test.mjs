@@ -32,7 +32,7 @@ test('route includes Claude subagent tiers as {agent:"claude", model} entries wh
 test('mechanical-edit prefers agy (write mode) before an OpenCode Go model', async () => {
   const { DELEGATION_MAP } = await fresh(tmpHome())
   const chain = DELEGATION_MAP['mechanical-edit'].chain
-  assert.deepEqual(chain[0], { agent: 'agy', model: 'gemini-3.8-flash-medium', mode: 'write' })
+  assert.deepEqual(chain[0], { agent: 'agy', model: 'gemini-4-hydrogen-medium', mode: 'write' })
   assert.deepEqual(chain[1], { agent: 'opencode', model: '@go', mode: 'write' })
 })
 
@@ -152,13 +152,13 @@ test('route() skips a candidate whose discovery row reports the CLI missing from
   const { route } = await fresh(home)
   const result = await route({ taskType: 'recon' })
 
-  assert.ok(!result.skipped.some((s) => s.agent === 'agy' && s.model === 'gemini-3.8-flash-low' && s.reason !== 'cli_not_found') || true)
-  const skippedAgy = result.skipped.find((s) => s.agent === 'agy' && s.model === 'gemini-3.8-flash-low')
+  assert.ok(!result.skipped.some((s) => s.agent === 'agy' && s.model === 'gemini-4-hydrogen-low' && s.reason !== 'cli_not_found') || true)
+  const skippedAgy = result.skipped.find((s) => s.agent === 'agy' && s.model === 'gemini-4-hydrogen-low')
   assert.ok(skippedAgy, 'the agy candidate must be skipped')
   assert.equal(skippedAgy.reason, 'cli_not_found')
   // the candidate must still be present in the map's chain (advisory, never hard-deleted from knowledge) —
   // it is simply not chosen as primary/fallback.
-  assert.ok(!result.fallbacks.some((c) => c.agent === 'agy' && c.model === 'gemini-3.8-flash-low'))
+  assert.ok(!result.fallbacks.some((c) => c.agent === 'agy' && c.model === 'gemini-4-hydrogen-low'))
   assert.notEqual(result.primary?.agent, 'agy')
 })
 

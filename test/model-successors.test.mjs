@@ -78,7 +78,7 @@ function agyRow(models) {
 
 test('route() auto-substitutes a vanished chain model with its discovered successor and logs one event', async () => {
   const home = tmpHome()
-  writeDiscovery(home, { agy: agyRow(['gemini-3.9-flash-low', 'gemini-3.9-flash-high']) })
+  writeDiscovery(home, { agy: agyRow(['gemini-5-hydrogen-low', 'gemini-5-hydrogen-high']) })
   const { route } = await freshModule(home, 'router.mjs')
 
   const first = await route({ taskType: 'recon' })
@@ -86,10 +86,10 @@ test('route() auto-substitutes a vanished chain model with its discovered succes
 
   const all = [first.primary, ...first.fallbacks]
   const agy = all.find((c) => c.agent === 'agy')
-  assert.equal(agy.model, 'gemini-3.9-flash-low')
-  assert.equal(agy.substitutedFrom, 'gemini-3.8-flash-low')
-  assert.ok(!all.some((c) => c.model === 'gemini-3.8-flash-low'))
-  assert.deepEqual(first.substitutions, [{ agent: 'agy', from: 'gemini-3.8-flash-low', to: 'gemini-3.9-flash-low' }])
+  assert.equal(agy.model, 'gemini-5-hydrogen-low')
+  assert.equal(agy.substitutedFrom, 'gemini-4-hydrogen-low')
+  assert.ok(!all.some((c) => c.model === 'gemini-4-hydrogen-low'))
+  assert.deepEqual(first.substitutions, [{ agent: 'agy', from: 'gemini-4-hydrogen-low', to: 'gemini-5-hydrogen-low' }])
   assert.deepEqual(second.substitutions, first.substitutions)
 
   const events = fs
@@ -99,8 +99,8 @@ test('route() auto-substitutes a vanished chain model with its discovered succes
     .map((l) => JSON.parse(l))
     .filter((e) => e.phase === 'substitution')
   assert.equal(events.length, 1, 'the substitution is logged once, not on every route() call')
-  assert.equal(events[0].model, 'gemini-3.9-flash-low')
-  assert.equal(events[0].from, 'gemini-3.8-flash-low')
+  assert.equal(events[0].model, 'gemini-5-hydrogen-low')
+  assert.equal(events[0].from, 'gemini-4-hydrogen-low')
 })
 
 test('route() keeps the pinned model when discovery has no catalog for its agent', async () => {
@@ -108,22 +108,22 @@ test('route() keeps the pinned model when discovery has no catalog for its agent
   const { route } = await freshModule(home, 'router.mjs')
   const result = await route({ taskType: 'recon' })
   const all = [result.primary, ...result.fallbacks]
-  assert.ok(all.some((c) => c.agent === 'agy' && c.model === 'gemini-3.8-flash-low'))
+  assert.ok(all.some((c) => c.agent === 'agy' && c.model === 'gemini-4-hydrogen-low'))
   assert.deepEqual(result.substitutions, [])
 })
 
 test('route() honors a hold on a vanished pinned id: skipped as held, never substituted', async () => {
   const home = tmpHome()
-  writeDiscovery(home, { agy: agyRow(['gemini-3.9-flash-low']) })
+  writeDiscovery(home, { agy: agyRow(['gemini-5-hydrogen-low']) })
   const { setOverride, overrideKey } = await freshModule(home, 'overrides.mjs')
-  setOverride(overrideKey('agy', 'gemini-3.8-flash-low'), { hold: true, reason: 'manual' }, { ...process.env, AGENT_HUB_HOME: home })
+  setOverride(overrideKey('agy', 'gemini-4-hydrogen-low'), { hold: true, reason: 'manual' }, { ...process.env, AGENT_HUB_HOME: home })
   const { route } = await freshModule(home, 'router.mjs')
 
   const result = await route({ taskType: 'recon' })
   const all = [result.primary, ...result.fallbacks].filter(Boolean)
-  assert.ok(!all.some((c) => c.agent === 'agy' && c.model === 'gemini-3.9-flash-low'), 'the substitute never takes the held slot')
-  assert.ok(!all.some((c) => c.agent === 'agy' && c.model === 'gemini-3.8-flash-low'))
-  assert.ok(result.skipped.some((s) => s.agent === 'agy' && s.model === 'gemini-3.8-flash-low' && s.reason === 'held'))
+  assert.ok(!all.some((c) => c.agent === 'agy' && c.model === 'gemini-5-hydrogen-low'), 'the substitute never takes the held slot')
+  assert.ok(!all.some((c) => c.agent === 'agy' && c.model === 'gemini-4-hydrogen-low'))
+  assert.ok(result.skipped.some((s) => s.agent === 'agy' && s.model === 'gemini-4-hydrogen-low' && s.reason === 'held'))
   assert.deepEqual(result.substitutions, [])
 })
 
@@ -154,7 +154,7 @@ test('agents_status lists every discovered opencode/agy/gentle-shell model and p
   const home = tmpHome()
   writeDiscovery(home, {
     opencode: opencodeRow(DEEPSEEK_CATALOG),
-    agy: { agent: 'agy', models: [{ id: 'gemini-3.8-flash-low' }, { id: 'gemini-3.9-flash-high' }], checkedAt: new Date().toISOString(), error: null },
+    agy: { agent: 'agy', models: [{ id: 'gemini-4-hydrogen-low' }, { id: 'gemini-5-hydrogen-high' }], checkedAt: new Date().toISOString(), error: null },
     'gentle-shell': { agent: 'gentle-shell', models: [{ id: 'anthropic/claude-sonnet-5' }], checkedAt: new Date().toISOString(), error: null },
     copilot: { agent: 'copilot', models: [{ id: 'gpt-9' }], checkedAt: new Date().toISOString(), error: null },
   })
@@ -173,11 +173,11 @@ test('agents_status lists every discovered opencode/agy/gentle-shell model and p
   assert.ok(!byKey.has('opencode:opencode-go/deepseek-v4.1-flash'), 'a model the opencode policy blocks by default is not listed')
   assert.ok(!byKey.has('copilot:gpt-9'), 'copilot catalog is not authoritative, so it is not listed')
 
-  const stale = byKey.get('agy:gemini-3.8-flash-high')
+  const stale = byKey.get('agy:gemini-4-hydrogen-high')
   assert.equal(stale.status, 'unavailable')
-  assert.equal(stale.successor, 'gemini-3.9-flash-high')
+  assert.equal(stale.successor, 'gemini-5-hydrogen-high')
 
-  const pinned = byKey.get('agy:gemini-3.8-flash-low')
+  const pinned = byKey.get('agy:gemini-4-hydrogen-low')
   assert.notEqual(pinned.source, 'discovery', 'a pinned pair keeps its preflight row, not a duplicate discovery row')
-  assert.equal(rows.filter((r) => r.agent === 'agy' && r.model === 'gemini-3.8-flash-low').length, 1)
+  assert.equal(rows.filter((r) => r.agent === 'agy' && r.model === 'gemini-4-hydrogen-low').length, 1)
 })

@@ -51,7 +51,7 @@ test('quota routing skip: an agy pair with every eligible account exhausted is s
     assert.equal(result.primary.agent, 'opencode')
     assert.deepEqual(
       result.skipped.find((s) => s.agent === 'agy'),
-      { agent: 'agy', model: 'gemini-3.8-flash-low', reason: 'quota' }
+      { agent: 'agy', model: 'gemini-4-hydrogen-low', reason: 'quota' }
     )
   })
 })

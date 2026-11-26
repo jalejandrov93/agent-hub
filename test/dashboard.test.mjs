@@ -899,8 +899,8 @@ test('POST /api/agents/refresh (bulk) skips an agent whose CLI is missing from t
   const env = { AGENT_HUB_HOME: home, PATH: binDir }
 
   const { writeCacheEntry, readCache } = await import('../src/preflight.mjs?t=' + Date.now())
-  const staleGoodEntry = { agent: 'agy', model: 'gemini-3.8-flash-low', status: 'ready', ladderLevel: 'L2', reason: null, checkedAt: new Date(Date.now() - 60_000).toISOString() }
-  writeCacheEntry('agy:gemini-3.8-flash-low', staleGoodEntry, env)
+  const staleGoodEntry = { agent: 'agy', model: 'gemini-4-hydrogen-low', status: 'ready', ladderLevel: 'L2', reason: null, checkedAt: new Date(Date.now() - 60_000).toISOString() }
+  writeCacheEntry('agy:gemini-4-hydrogen-low', staleGoodEntry, env)
 
   const runner = fakeRunner([
     ['--version', { stdout: 'GitHub Copilot CLI 1.0.83.', stderr: '', code: 0 }],
@@ -912,7 +912,7 @@ test('POST /api/agents/refresh (bulk) skips an agent whose CLI is missing from t
     const res = await postJson(port, '/api/agents/refresh', {})
     assert.equal(res.status, 200)
 
-    const agyResult = res.body.results.find((r) => r.agent === 'agy' && r.model === 'gemini-3.8-flash-low')
+    const agyResult = res.body.results.find((r) => r.agent === 'agy' && r.model === 'gemini-4-hydrogen-low')
     assert.equal(agyResult.status, 'skipped')
     assert.match(agyResult.reason, /cli_not_found_in_dashboard_process: agy is not on this process PATH/)
     assert.equal(agyResult.written, false)
@@ -924,7 +924,7 @@ test('POST /api/agents/refresh (bulk) skips an agent whose CLI is missing from t
     assert.ok(copilotResults.every((r) => r.status !== 'skipped'), 'a resolvable agent behaves as today')
 
     const cacheAfter = readCache(env)
-    assert.deepEqual(cacheAfter['agy:gemini-3.8-flash-low'], staleGoodEntry, 'the good cached row for the unresolvable agent is byte-for-byte unchanged')
+    assert.deepEqual(cacheAfter['agy:gemini-4-hydrogen-low'], staleGoodEntry, 'the good cached row for the unresolvable agent is byte-for-byte unchanged')
   } finally {
     server.close()
   }

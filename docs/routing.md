@@ -39,17 +39,18 @@ passes availability filtering, plus the rest as fallbacks:
 
 | Task type | Primary | Fallbacks | Why |
 |---|---|---|---|
-| `recon` | agy gemini-3.8-flash-low | opencode `@free` → claude haiku | proven context compression, cheap refreshable quota |
-| `call-chain-trace` | agy gemini-3.8-flash-high | opencode `@free` → opencode `@go` → claude sonnet | needs multi-hop reasoning, 1M ctx |
-| `research` | opencode `@free` (up to 2 models) | agy gemini-3.8-flash-medium | zero cost, 1M ctx |
+| `recon` | agy gemini-4-hydrogen-low | opencode `@free` → claude haiku | proven context compression, cheap refreshable quota |
+| `call-chain-trace` | agy gemini-4-hydrogen-high | opencode `@free` → opencode `@go` → claude sonnet | needs multi-hop reasoning, 1M ctx |
+| `research` | opencode `@free` (up to 2 models) | agy gemini-4-hydrogen-medium | zero cost, 1M ctx |
 | `triage` | opencode `@free` | copilot auto → codex default | lowest latency |
-| `second-opinion` | agy gemini-3.8-flash-high | copilot auto | different model lineage than Claude Code |
+| `second-opinion` | agy gemini-4-hydrogen-high | copilot auto | different model lineage than Claude Code |
 | `adversarial-review` | agy claude-sonnet-4-6 (parallel with copilot auto) | agy claude-opus-4-6-thinking | dual blind review off the Claude Code quota |
 | `github-context` | copilot auto | — | built-in GitHub MCP; cheap models keep premium quota |
-| `mechanical-edit` | agy gemini-3.8-flash-medium (write) | opencode `@go` (write) → copilot auto (write) → codex default (write) | cheap write-capable; single writer |
+| `mechanical-edit` | agy gemini-4-hydrogen-medium (write) | opencode `@go` (write) → copilot auto (write) → codex default (write) | cheap write-capable; single writer |
 | `implementation-with-repo-rules` | claude sonnet | — | only Claude Code loads CLAUDE.md + skills + hooks |
 | `architecture` | claude opus | agy claude-opus-4-6-thinking | highest reasoning |
 | `structured-mechanical` | claude haiku | — | cheapest Claude tier |
+| `ui-test` | agy gemini-4-hydrogen-high | agy claude-sonnet-4-6 | requires `browser`; drives a Playwright MCP server ([setup](providers/agy.md#browser--ui-testing-ui-test)) |
 
 `@free` and `@go` are opencode **pools**, not model ids: `route()` expands each one to the
 models the user allowed in the dashboard (`model-policy.json`), in the user's order, at most 2.
@@ -60,7 +61,6 @@ exhausted. The same policy gates `gentle-shell` when its model is `opencode-go/*
 same opencode Go quota): such a job is rejected before launch with `code: model_blocked` unless
 that model is allowed for opencode in the dashboard. See
 [providers/opencode.md](providers/opencode.md#models-the-dashboard-decides-model-policy).
-| `ui-test` | agy gemini-3.8-flash-high | agy claude-sonnet-4-6 | requires `browser`; drives a Playwright MCP server ([setup](providers/agy.md#browser--ui-testing-ui-test)) |
 
 Codex is only ever a last fallback, for small bounded tasks: its plan quota is
 limited, and every call carries a baseline of about 17,000 input tokens (its own
